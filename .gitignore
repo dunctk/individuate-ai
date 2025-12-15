@@ -1,0 +1,12 @@
+*.sqlite
+*.sqlite
+*.db
+*.wal
+*.log
+.env
+target/
+
+
+# Added by cargo
+
+/target

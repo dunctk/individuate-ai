@@ -23,6 +23,18 @@ thiserror = "1"
 tracing = { version = "0.1", optional = true }
 http = "1"
 cfg-if = "1.0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = { version = "1", optional = true }
+urlencoding = "2"
+dotenvy = { version = "0.15", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+rig-core = { version = "0.26", features = ["derive"], optional = true }
+rig-sqlite = { version = "0.1.29", optional = true }
+sqlite-vec = { version = "0.1", optional = true }
+tokio-rusqlite = { version = "0.6", features = ["bundled"], optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
 [features]
 csr = ["leptos/csr", "leptos_meta/csr", "leptos_router/csr"]
@@ -37,6 +49,15 @@ ssr = [
     "leptos_meta/ssr",
     "leptos_router/ssr",
     "dep:tracing",
+    "dep:anyhow",
+    "dep:rig-core",
+    "dep:rig-sqlite",
+    "dep:sqlite-vec",
+    "dep:tokio-rusqlite",
+    "dep:rusqlite",
+    "dep:tokio-stream",
+    "dep:dotenvy",
+    "dep:reqwest",
 ]
 
 [package.metadata.leptos]

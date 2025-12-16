@@ -1,6 +1,21 @@
+use crate::agent::agent_chat;
 use leptos::*;
 use leptos_meta::*;
 use leptos_router::*;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+#[derive(Clone, Debug, PartialEq)]
+enum ChatRole {
+    Assistant,
+    User,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ChatMessage {
+    role: ChatRole,
+    text: RwSignal<String>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct Session {
@@ -17,7 +32,7 @@ pub fn App() -> impl IntoView {
     view! {
         <Stylesheet id="leptos" href="/pkg/individuateai.css"/>
         <Title text="IndividuateAI"/>
-        
+
         <Router>
             <main class="min-h-screen bg-void-green text-parchment font-urbanist selection:bg-integral-turquoise selection:text-void-green overflow-x-hidden">
                 <Routes>
@@ -34,7 +49,21 @@ fn HomePage() -> impl IntoView {
     let (chat_input, set_chat_input) = create_signal(String::new());
     let (is_loading, set_is_loading) = create_signal(false);
     let (is_sidebar_open, set_is_sidebar_open) = create_signal(false);
-    
+    let greeting = ChatMessage {
+        role: ChatRole::Assistant,
+        text: create_rw_signal("Welcome. I am your Jungian guide. The path to individuation is a spiral, not a straight line. What brings you to the garden today?".to_string()),
+    };
+    let (toast, set_toast) = create_signal(None::<String>);
+    create_effect(move |_| {
+        if toast.get().is_some() {
+            let set_toast = set_toast.clone();
+            set_timeout(
+                move || set_toast.set(None),
+                std::time::Duration::from_secs(4),
+            );
+        }
+    });
+
     // Settings State
     let (accountability, set_accountability) = create_signal(50);
     let (spirituality, set_spirituality) = create_signal(30);
@@ -42,36 +71,296 @@ fn HomePage() -> impl IntoView {
 
     // Session Data
     let sessions = vec![
-        Session { id: 1, title: "Recurring Anxiety Loops".to_string(), date: "Today".to_string(), preview: "Exploring the root cause of the Sunday scaries...".to_string() },
-        Session { id: 2, title: "Dream Analysis: The Tower".to_string(), date: "Yesterday".to_string(), preview: "The falling tower archetype and what it means for my career...".to_string() },
-        Session { id: 3, title: "Shadow Work: Anger".to_string(), date: "Dec 12".to_string(), preview: "Why do I get triggered when...".to_string() },
-        Session { id: 4, title: "Integration Phase".to_string(), date: "Dec 10".to_string(), preview: "Connecting the dots between...".to_string() },
+        Session {
+            id: 1,
+            title: "Recurring Anxiety Loops".to_string(),
+            date: "Today".to_string(),
+            preview: "Exploring the root cause of the Sunday scaries...".to_string(),
+        },
+        Session {
+            id: 2,
+            title: "Dream Analysis: The Tower".to_string(),
+            date: "Yesterday".to_string(),
+            preview: "The falling tower archetype and what it means for my career...".to_string(),
+        },
+        Session {
+            id: 3,
+            title: "Shadow Work: Anger".to_string(),
+            date: "Dec 12".to_string(),
+            preview: "Why do I get triggered when...".to_string(),
+        },
+        Session {
+            id: 4,
+            title: "Integration Phase".to_string(),
+            date: "Dec 10".to_string(),
+            preview: "Connecting the dots between...".to_string(),
+        },
     ];
     let (search_query, set_search_query) = create_signal(String::new());
+    let (selected_session, set_selected_session) = create_signal(sessions[0].id);
+
+    let conversations = create_rw_signal({
+        let mut map = HashMap::new();
+        map.insert(selected_session.get_untracked(), vec![greeting.clone()]);
+        map
+    });
+
+    let greeting_default = greeting.clone();
+    let current_messages = move || {
+        let fallback = greeting_default.clone();
+        conversations.with(|map| {
+            map.get(&selected_session.get())
+                .cloned()
+                .unwrap_or_else(|| vec![fallback.clone()])
+        })
+    };
 
     let filtered_sessions = move || {
         let query = search_query.get().to_lowercase();
         if query.is_empty() {
             sessions.clone()
         } else {
-            sessions.iter()
-                .filter(|s| s.title.to_lowercase().contains(&query) || s.preview.to_lowercase().contains(&query))
+            sessions
+                .iter()
+                .filter(|s| {
+                    s.title.to_lowercase().contains(&query)
+                        || s.preview.to_lowercase().contains(&query)
+                })
                 .cloned()
                 .collect()
         }
     };
 
-    let on_submit = move |_| {
-        set_is_loading.set(true);
-        // Simulate delay
-        set_timeout(move || set_is_loading.set(false), std::time::Duration::from_secs(2));
+    let on_submit = {
+        let chat_input = chat_input.clone();
+        let set_chat_input = set_chat_input.clone();
+        let set_is_loading = set_is_loading.clone();
+        let conversations = conversations.clone();
+        let set_toast = set_toast.clone();
+        let greeting = greeting.clone();
+        Rc::new(move || {
+            let text = chat_input.get();
+            let trimmed = text.trim();
+            if trimmed.is_empty() || is_loading.get() {
+                return;
+            }
+
+            let session_id = selected_session.get();
+            conversations.update(|map| {
+                let entry = map
+                    .entry(session_id)
+                    .or_insert_with(|| vec![greeting.clone()]);
+                entry.push(ChatMessage {
+                    role: ChatRole::User,
+                    text: create_rw_signal(trimmed.to_string()),
+                });
+                entry.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text: create_rw_signal(String::new()),
+                });
+            });
+
+            set_chat_input.set(String::new());
+            set_is_loading.set(true);
+
+            let accountability = accountability.get();
+            let spirituality = spirituality.get();
+            let directness = directness.get();
+            let conversations = conversations.clone();
+            let set_is_loading = set_is_loading.clone();
+            let set_toast = set_toast.clone();
+            let greeting = greeting.clone();
+            let prompt = format!(
+                "User input: {trimmed}\n\nControls -> accountability: {accountability}, spirituality: {spirituality}, directness: {directness}. Use these to tune tone and firmness. Keep response concise."
+            );
+
+            #[cfg(feature = "hydrate")]
+            {
+                use wasm_bindgen::{closure::Closure, JsCast};
+                use web_sys::{console, Event, EventSource, MessageEvent};
+
+                let url = format!(
+                    "/api/agent-stream?session_id={}&prompt={}",
+                    session_id,
+                    urlencoding::encode(&prompt)
+                );
+
+                match EventSource::new(&url) {
+                    Ok(es) => {
+                        let es_clone = es.clone();
+                        let es_err = es.clone();
+                        let greeting_msg = greeting.clone();
+                        let on_message = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new({
+                            let conversations = conversations.clone();
+                            let set_is_loading = set_is_loading.clone();
+                            move |event: MessageEvent| {
+                                if let Some(data) = event.data().as_string() {
+                                    if data.starts_with("[error:") {
+                                        set_toast.set(Some(data.clone()));
+                                    }
+                                    console::log_1(&format!("[sse] {data}").into());
+                                    if data == "[DONE]" {
+                                        set_is_loading.set(false);
+                                        es_clone.close();
+                                        return;
+                                    }
+                                    conversations.update(|map| {
+                                        let entry = map
+                                            .entry(session_id)
+                                            .or_insert_with(|| vec![greeting_msg.clone()]);
+                                            
+                                        if let Some(last) = entry.last() {
+                                            if let ChatRole::Assistant = last.role {
+                                                last.text.update(|t| t.push_str(&data));
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        }));
+                        es.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+                        on_message.forget();
+
+                        let on_error = Closure::<dyn FnMut(Event)>::wrap(Box::new({
+                            let set_is_loading = set_is_loading.clone();
+                            let set_toast = set_toast.clone();
+                            let conversations = conversations.clone();
+                            let greeting_err = greeting.clone();
+                            let session_id = session_id;
+                            let prompt_clone = prompt.clone();
+                            move |_event: Event| {
+                                set_is_loading.set(false);
+                                set_toast.set(Some("Stream error from agent".to_string()));
+                                conversations.update(|map| {
+                                    let entry = map
+                                        .entry(session_id)
+                                        .or_insert_with(|| vec![greeting_err.clone()]);
+                                        
+                                    if let Some(last) = entry.last() {
+                                        if let ChatRole::Assistant = last.role {
+                                            last.text.set("(stream error)".to_string());
+                                        }
+                                    }
+                                });
+                                es_err.close();
+
+                                // fallback: call server function to complete the message
+                                let conversations = conversations.clone();
+                                let greeting = greeting.clone();
+                                let prompt_fallback = prompt_clone.clone();
+                                spawn_local(async move {
+                                    let reply =
+                                        agent_chat(prompt_fallback, session_id.to_string()).await;
+                                    match reply {
+                                        Ok(text) => conversations.update(|map| {
+                                            let entry = map
+                                                .entry(session_id)
+                                                .or_insert_with(|| vec![greeting.clone()]);
+                                            if let Some(last) = entry.last() {
+                                                if let ChatRole::Assistant = last.role {
+                                                    last.text.set(text);
+                                                }
+                                            }
+                                        }),
+                                        Err(err) => {
+                                            set_toast.set(Some(format!("(error fallback) {}", err)))
+                                        }
+                                    }
+                                });
+                            }
+                        }));
+                        es.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+                        on_error.forget();
+                    }
+                    Err(err) => {
+                        set_is_loading.set(false);
+                        set_toast.set(Some(format!("Failed to start stream: {:?}", err)));
+                        conversations.update(|map| {
+                            let entry = map
+                                .entry(session_id)
+                                .or_insert_with(|| vec![greeting.clone()]);
+                                
+                            if let Some(last) = entry.last() {
+                                if let ChatRole::Assistant = last.role {
+                                    last.text.set("(error starting stream)".to_string());
+                                }
+                            }
+                        });
+                        // fallback
+                        let conversations = conversations.clone();
+                        let greeting = greeting.clone();
+                        let prompt_fallback = prompt.clone();
+                        spawn_local(async move {
+                            let reply = agent_chat(prompt_fallback, session_id.to_string()).await;
+                            match reply {
+                                Ok(text) => conversations.update(|map| {
+                                    let mut entry = map
+                                        .entry(session_id)
+                                        .or_insert_with(|| vec![greeting.clone()])
+                                        .clone();
+                                    if let Some(last) = entry.last() {
+                                        if let ChatRole::Assistant = last.role {
+                                            last.text.set(text);
+                                        }
+                                    }
+                                    map.insert(session_id, entry);
+                                }),
+                                Err(err) => {
+                                    set_toast.set(Some(format!("(error fallback) {}", err)))
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "hydrate"))]
+            {
+                spawn_local(async move {
+                    let reply = agent_chat(prompt, session_id.to_string()).await;
+                    match reply {
+                        Ok(text) => conversations.update(|map| {
+                            let mut entry = map
+                                .entry(session_id)
+                                .or_insert_with(|| vec![greeting.clone()])
+                                .clone();
+                            if let Some(last) = entry.last() {
+                                if let ChatRole::Assistant = last.role {
+                                    last.text.set(text);
+                                }
+                            }
+                            map.insert(session_id, entry);
+                        }),
+                        Err(err) => {
+                            set_toast.set(Some(format!("(error) {}", err)));
+                            conversations.update(|map| {
+                            let mut entry = map
+                                .entry(session_id)
+                                .or_insert_with(|| vec![greeting.clone()])
+                                .clone();
+                            if let Some(last) = entry.last() {
+                                if let ChatRole::Assistant = last.role {
+                                    last.text.set("(error)".to_string());
+                                }
+                            }
+                            map.insert(session_id, entry);
+                        });
+                        }
+                    }
+                    set_is_loading.set(false);
+                });
+            }
+        })
     };
+
+    let on_submit_key = on_submit.clone();
+    let on_submit_click = on_submit.clone();
 
     view! {
         <div class="flex h-screen relative overflow-hidden">
-            
+
             // --- SIDE PANEL (Drawer) ---
-            <div 
+            <div
                 class=move || {
                     format!(
                         "fixed inset-y-0 left-0 z-50 w-80 bg-void-green/95 backdrop-blur-xl border-r border-white/5 shadow-2xl transform transition-transform duration-500 ease-out flex flex-col {}",
@@ -83,7 +372,7 @@ fn HomePage() -> impl IntoView {
                 <div class="p-6 border-b border-white/5 space-y-4">
                     <div class="flex items-center justify-between">
                          <h2 class="font-fraunces text-xl text-parchment">"History"</h2>
-                         <button 
+                         <button
                             class="p-2 hover:bg-white/5 rounded-full transition-colors"
                             on:click=move |_| set_is_sidebar_open.set(false)
                          >
@@ -93,8 +382,8 @@ fn HomePage() -> impl IntoView {
                          </button>
                     </div>
                     <div class="relative">
-                        <input 
-                            type="text" 
+                        <input
+                            type="text"
                             class="w-full bg-white/5 border border-white/10 rounded-xl py-2 pl-10 pr-4 text-sm focus:outline-none focus:border-integral-turquoise/50 transition-colors placeholder-white/20"
                             placeholder="Search sessions..."
                             on:input=move |ev| set_search_query.set(event_target_value(&ev))
@@ -108,24 +397,24 @@ fn HomePage() -> impl IntoView {
                 // 2. Settings Sliders
                 <div class="px-6 py-6 space-y-6 border-b border-white/5 bg-black/20">
                     <h3 class="text-xs font-bold text-sage-mist tracking-widest uppercase">"Model Parameters"</h3>
-                    
-                    <Slider 
-                        label="Accountability" 
-                        value=accountability 
+
+                    <Slider
+                        label="Accountability"
+                        value=accountability
                         set_value=set_accountability
                         min_label="Gentle"
                         max_label="Ruthless"
                     />
-                    <Slider 
-                        label="Spirituality (Teal)" 
-                        value=spirituality 
+                    <Slider
+                        label="Spirituality (Teal)"
+                        value=spirituality
                         set_value=set_spirituality
                         min_label="Grounded"
                         max_label="Transcendent"
                     />
-                     <Slider 
-                        label="Directness" 
-                        value=directness 
+                     <Slider
+                        label="Directness"
+                        value=directness
                         set_value=set_directness
                         min_label="Soft"
                         max_label="Blunt"
@@ -138,8 +427,20 @@ fn HomePage() -> impl IntoView {
                         each=filtered_sessions
                         key=|session| session.id
                         children=move |session| {
+                            let greeting = greeting.clone();
+                            let conversations = conversations.clone();
+                            let set_selected_session = set_selected_session.clone();
                             view! {
-                                <div class="group p-4 rounded-xl hover:bg-white/5 cursor-pointer transition-all border border-transparent hover:border-white/5">
+                                <div
+                                    class="group p-4 rounded-xl hover:bg-white/5 cursor-pointer transition-all border border-transparent hover:border-white/5"
+                                    on:click=move |_| {
+                                        set_selected_session.set(session.id);
+                                        conversations.update(|map| {
+                                            map.entry(session.id)
+                                                .or_insert_with(|| vec![greeting.clone()]);
+                                        });
+                                    }
+                                >
                                     <div class="flex justify-between items-baseline mb-1">
                                         <h4 class="font-bold text-sm text-parchment group-hover:text-integral-turquoise transition-colors">{session.title}</h4>
                                         <span class="text-xs text-white/30 font-mono">{session.date}</span>
@@ -158,7 +459,7 @@ fn HomePage() -> impl IntoView {
             </div>
 
             // Overlay for mobile when sidebar is open
-            <div 
+            <div
                 class=move || {
                     format!(
                         "fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-500 {}",
@@ -171,10 +472,10 @@ fn HomePage() -> impl IntoView {
 
             // --- MAIN CONTENT ---
             <div class="flex-1 flex flex-col h-full relative w-full transition-all duration-500">
-                
+
                 // Header
                 <header class="p-6 sticky top-0 z-10 flex items-center justify-between">
-                    <button 
+                    <button
                         class="p-2 -ml-2 text-sage-mist hover:text-parchment transition-colors rounded-full hover:bg-white/5"
                         on:click=move |_| set_is_sidebar_open.set(true)
                     >
@@ -186,32 +487,40 @@ fn HomePage() -> impl IntoView {
                     <h1 class="text-2xl font-fraunces text-center bg-clip-text text-transparent bg-gradient-to-r from-parchment to-sage-mist drop-shadow-sm absolute left-1/2 -translate-x-1/2">
                         "IndividuateAI"
                     </h1>
-                    
+
                     <div class="w-8"></div> // Spacer for balance
                 </header>
 
                 // Chat Area
                 <div class="flex-1 overflow-y-auto px-4 pb-40 w-full max-w-3xl mx-auto custom-scrollbar">
                      <div class="space-y-8 py-10">
-                        // Welcome Message
-                        <div class="flex flex-col items-start space-y-2 animate-fade-in-up">
-                            <div class="text-xs font-bold text-integral-turquoise tracking-[0.2em] uppercase pl-2">"Therapist"</div>
-                            <div class="bg-sage-mist/10 p-6 rounded-2xl rounded-tl-sm border border-white/5 backdrop-blur-md shadow-lg">
-                                <p class="text-lg leading-relaxed font-light">
-                                    "Welcome. I am your Jungian guide. The path to individuation is a spiral, not a straight line. What brings you to the garden today?"
-                                </p>
-                            </div>
-                        </div>
+                        <For
+                            each=move || { current_messages().into_iter().enumerate().collect::<Vec<_>>() }
+                            key=|(idx, _)| *idx
+                            children=move |(_, msg)| {
+                                let is_assistant = matches!(msg.role, ChatRole::Assistant);
+                                let alignment = if is_assistant { "items-start" } else { "items-end" };
+                                let label = if is_assistant { "Therapist" } else { "You" };
+                                let label_class = if is_assistant { "text-integral-turquoise" } else { "text-systemic-yellow" };
+                                let bubble_classes = if is_assistant {
+                                    "bg-sage-mist/10 p-6 rounded-2xl rounded-tl-sm border border-white/5 backdrop-blur-md shadow-lg"
+                                } else {
+                                    "bg-white/5 p-6 rounded-2xl rounded-tr-sm border border-white/5 backdrop-blur-md"
+                                };
+                                let label_pad = if is_assistant { "pl-2" } else { "pr-2" };
 
-                        // User Message Example
-                        <div class="flex flex-col items-end space-y-2 opacity-60">
-                             <div class="text-xs font-bold text-systemic-yellow tracking-[0.2em] uppercase pr-2">"You"</div>
-                             <div class="bg-white/5 p-6 rounded-2xl rounded-tr-sm border border-white/5 backdrop-blur-md">
-                                <p class="text-lg leading-relaxed font-light">
-                                    "I feel stuck in a loop. I keep making the same mistakes."
-                                </p>
-                            </div>
-                        </div>
+                                view! {
+                                    <div class=format!("flex flex-col {alignment} space-y-2 animate-fade-in-up")>
+                                        <div class=format!("text-xs font-bold tracking-[0.2em] uppercase {} {}", label_class, label_pad)>
+                                            {label}
+                                        </div>
+                                        <div class=bubble_classes>
+                                            <p class="text-lg leading-relaxed font-light whitespace-pre-wrap">{move || msg.text.get()}</p>
+                                        </div>
+                                    </div>
+                                }
+                            }
+                        />
                      </div>
                 </div>
 
@@ -220,29 +529,33 @@ fn HomePage() -> impl IntoView {
                     <div class="max-w-3xl mx-auto relative group">
                         // Glass Background
                         <div class="absolute inset-0 bg-void-green/60 backdrop-blur-xl rounded-3xl border border-white/10 shadow-2xl transition-all duration-300 group-hover:bg-void-green/80"></div>
-                        
+
                         <div class="relative flex items-center p-2 pr-2">
-                            <input 
-                                type="text" 
+                            <input
+                                type="text"
                                 class="w-full bg-transparent border-none text-parchment placeholder-white/20 px-6 py-4 text-lg focus:outline-none font-urbanist tracking-wide"
                                 placeholder="Type your thoughts..."
                                 prop:value=chat_input
                                 on:input=move |ev| set_chat_input.set(event_target_value(&ev))
                                 on:keydown=move |ev| {
-                                    if ev.key() == "Enter" {
-                                        on_submit(());
+                                    if ev.key() == "Enter" && !ev.shift_key() {
+                                        let submit = on_submit_key.clone();
+                                        submit();
                                     }
                                 }
                             />
-                            
-                            <button 
+
+                            <button
                                 class="group/btn relative flex items-center justify-center w-14 h-14 flex-shrink-0 rounded-full bg-gradient-to-br from-integral-turquoise to-systemic-yellow text-void-green shadow-lg hover:shadow-integral-turquoise/40 transition-all duration-300 transform hover:scale-105 active:scale-95"
-                                on:click=move |_| on_submit(())
+                                on:click=move |_| {
+                                    let submit = on_submit_click.clone();
+                                    submit();
+                                }
                                 disabled=move || is_loading.get()
                             >
                                 {move || if is_loading.get() {
-                                    view! { 
-                                        <div class="w-6 h-6 border-2 border-void-green/50 border-t-void-green rounded-full animate-spin"></div> 
+                                    view! {
+                                        <div class="w-6 h-6 border-2 border-void-green/50 border-t-void-green rounded-full animate-spin"></div>
                                     }.into_view()
                                 } else {
                                     view! {
@@ -257,6 +570,15 @@ fn HomePage() -> impl IntoView {
                 </div>
             </div>
         </div>
+        {move || {
+            toast.get().map(|msg| {
+                view! {
+                    <div class="fixed bottom-6 right-6 bg-void-green/90 border border-integral-turquoise/40 text-parchment px-4 py-3 rounded-xl shadow-xl backdrop-blur">
+                        {msg}
+                    </div>
+                }
+            })
+        }}
     }
 }
 
@@ -275,10 +597,10 @@ fn Slider(
                 <span class="text-integral-turquoise font-mono text-xs">{move || value.get()}%</span>
             </div>
             <div class="relative h-2 bg-white/10 rounded-full">
-                 <input 
-                    type="range" 
-                    min="0" 
-                    max="100" 
+                 <input
+                    type="range"
+                    min="0"
+                    max="100"
                     class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
                     prop:value=value
                     on:input=move |ev| {
@@ -286,11 +608,11 @@ fn Slider(
                         set_value.set(val);
                     }
                 />
-                <div 
+                <div
                     class="absolute top-0 left-0 h-full bg-gradient-to-r from-integral-turquoise to-systemic-yellow rounded-full pointer-events-none transition-all duration-75"
                     style=move || format!("width: {}%", value.get())
                 ></div>
-                 <div 
+                 <div
                     class="absolute top-1/2 -translate-y-1/2 h-4 w-4 bg-parchment rounded-full shadow-lg pointer-events-none transition-all duration-75"
                     style=move || format!("left: {}%", value.get())
                 ></div>
@@ -309,7 +631,7 @@ fn UserMenu() -> impl IntoView {
 
     view! {
         <div class="relative">
-            <button 
+            <button
                 class="flex items-center w-full space-x-3 p-2 rounded-xl hover:bg-white/5 transition-colors group"
                 on:click=move |_| set_is_open.update(|n| *n = !*n)
             >
@@ -327,7 +649,7 @@ fn UserMenu() -> impl IntoView {
                 </svg>
             </button>
 
-            <div 
+            <div
                 class=move || {
                     format!(
                         "absolute bottom-full left-0 w-full mb-2 bg-void-green border border-white/10 rounded-xl shadow-xl overflow-hidden transition-all duration-200 origin-bottom {}",

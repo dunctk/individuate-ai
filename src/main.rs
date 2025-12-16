@@ -1,11 +1,13 @@
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
-    use axum::Router;
-    use leptos::*;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use axum::{routing::get, Router};
+    use individuateai::agent::stream_handler;
     use individuateai::app::*;
     use individuateai::fileserv::file_and_error_handler;
+    use leptos::*;
+    use leptos_axum::{generate_route_list, LeptosRoutes};
+    let _ = dotenvy::dotenv();
 
     // Setting get_configuration(None) means we'll use the default Cargo.toml location
     let conf = get_configuration(None).await.unwrap();
@@ -15,6 +17,7 @@ async fn main() {
 
     // build our application with a route
     let app = Router::new()
+        .route("/api/agent-stream", get(stream_handler))
         .leptos_routes(&leptos_options, routes, App)
         .fallback(file_and_error_handler)
         .with_state(leptos_options);

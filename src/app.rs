@@ -1,4 +1,4 @@
-use crate::agent::agent_chat;
+use crate::agent::{agent_chat, create_session, get_chat_history, get_sessions, ChatLog, Session};
 use leptos::*;
 use leptos_meta::*;
 use leptos_router::*;
@@ -15,14 +15,6 @@ enum ChatRole {
 struct ChatMessage {
     role: ChatRole,
     text: RwSignal<String>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct Session {
-    id: usize,
-    title: String,
-    date: String,
-    preview: String,
 }
 
 #[component]
@@ -49,10 +41,7 @@ fn HomePage() -> impl IntoView {
     let (chat_input, set_chat_input) = create_signal(String::new());
     let (is_loading, set_is_loading) = create_signal(false);
     let (is_sidebar_open, set_is_sidebar_open) = create_signal(false);
-    let greeting = ChatMessage {
-        role: ChatRole::Assistant,
-        text: create_rw_signal("Welcome. I am your Jungian guide. The path to individuation is a spiral, not a straight line. What brings you to the garden today?".to_string()),
-    };
+    
     let (toast, set_toast) = create_signal(None::<String>);
     create_effect(move |_| {
         if toast.get().is_some() {
@@ -69,67 +58,103 @@ fn HomePage() -> impl IntoView {
     let (spirituality, set_spirituality) = create_signal(30);
     let (directness, set_directness) = create_signal(70);
 
-    // Session Data
-    let sessions = vec![
-        Session {
-            id: 1,
-            title: "Recurring Anxiety Loops".to_string(),
-            date: "Today".to_string(),
-            preview: "Exploring the root cause of the Sunday scaries...".to_string(),
-        },
-        Session {
-            id: 2,
-            title: "Dream Analysis: The Tower".to_string(),
-            date: "Yesterday".to_string(),
-            preview: "The falling tower archetype and what it means for my career...".to_string(),
-        },
-        Session {
-            id: 3,
-            title: "Shadow Work: Anger".to_string(),
-            date: "Dec 12".to_string(),
-            preview: "Why do I get triggered when...".to_string(),
-        },
-        Session {
-            id: 4,
-            title: "Integration Phase".to_string(),
-            date: "Dec 10".to_string(),
-            preview: "Connecting the dots between...".to_string(),
-        },
-    ];
+    // Resources
+    let sessions_resource = create_resource(|| (), |_| async move { get_sessions().await.unwrap_or_default() });
+    
     let (search_query, set_search_query) = create_signal(String::new());
-    let (selected_session, set_selected_session) = create_signal(sessions[0].id);
+    
+    // Selected Session (String UUID)
+    let (selected_session, set_selected_session) = create_signal(None::<String>);
 
-    let conversations = create_rw_signal({
-        let mut map = HashMap::new();
-        map.insert(selected_session.get_untracked(), vec![greeting.clone()]);
-        map
+    // Chat History Resource - fetches when session changes
+    let history_resource = create_resource(
+        move || selected_session.get(),
+        |session_id| async move {
+            if let Some(id) = session_id {
+                get_chat_history(id).await.unwrap_or_default()
+            } else {
+                vec![]
+            }
+        }
+    );
+
+    // Conversations Map: Stores hydrated messages
+    // We update this map when history_resource resolves OR when new messages are sent
+    let conversations = create_rw_signal(HashMap::<String, Vec<ChatMessage>>::new());
+
+    // Effect to hydrate conversations from history_resource
+    create_effect(move |_| {
+        let session_id = selected_session.get();
+        if let Some(id) = session_id {
+            if let Some(logs) = history_resource.get() {
+                 conversations.update(|map| {
+                     // Only insert if empty or we want to overwrite?
+                     // Let's overwrite to ensure sync, unless we have pending optimistic updates?
+                     // For simplicity, overwrite from DB on load.
+                     if !map.contains_key(&id) || map.get(&id).map(|v| v.is_empty()).unwrap_or(true) {
+                         let msgs: Vec<ChatMessage> = logs.into_iter().map(|log| ChatMessage {
+                             role: if log.role == "user" { ChatRole::User } else { ChatRole::Assistant },
+                             text: create_rw_signal(log.content)
+                         }).collect();
+                         map.insert(id, msgs);
+                     }
+                 });
+            }
+        }
     });
 
-    let greeting_default = greeting.clone();
     let current_messages = move || {
-        let fallback = greeting_default.clone();
-        conversations.with(|map| {
-            map.get(&selected_session.get())
-                .cloned()
-                .unwrap_or_else(|| vec![fallback.clone()])
-        })
+        if let Some(id) = selected_session.get() {
+            conversations.with(|map| {
+                map.get(&id)
+                   .cloned()
+                   .unwrap_or_else(Vec::new)
+            })
+        } else {
+            // Default "New Chat" view if no session selected?
+            // Or maybe a welcome message?
+             vec![ChatMessage {
+                role: ChatRole::Assistant,
+                text: create_rw_signal("Select a session or create a new one to begin.".to_string()),
+            }]
+        }
     };
 
     let filtered_sessions = move || {
         let query = search_query.get().to_lowercase();
+        let all = sessions_resource.get().unwrap_or_default();
         if query.is_empty() {
-            sessions.clone()
+            all
         } else {
-            sessions
-                .iter()
+            all.into_iter()
                 .filter(|s| {
                     s.title.to_lowercase().contains(&query)
                         || s.preview.to_lowercase().contains(&query)
                 })
-                .cloned()
                 .collect()
         }
     };
+    
+    // Actions
+    let create_new_chat = create_action(move |title: &String| {
+        let title = title.clone();
+        async move {
+            match create_session(title).await {
+                Ok(session) => {
+                    sessions_resource.refetch();
+                    set_selected_session.set(Some(session.id.clone()));
+                    // Initialize empty conversation in map
+                    conversations.update(|map| {
+                        map.insert(session.id, vec![ChatMessage {
+                            role: ChatRole::Assistant,
+                            text: create_rw_signal("Welcome to your new session.".to_string()),
+                        }]);
+                    });
+                }
+                Err(e) => console::error_1(&format!("Failed to create session: {}", e).into()),
+            }
+        }
+    });
 
     let on_submit = {
         let chat_input = chat_input.clone();
@@ -137,41 +162,50 @@ fn HomePage() -> impl IntoView {
         let set_is_loading = set_is_loading.clone();
         let conversations = conversations.clone();
         let set_toast = set_toast.clone();
-        let greeting = greeting.clone();
+        let selected_session = selected_session.clone();
+        let accountability = accountability.clone();
+        let spirituality = spirituality.clone();
+        let directness = directness.clone();
+
         Rc::new(move || {
             let text = chat_input.get();
             let trimmed = text.trim();
             if trimmed.is_empty() || is_loading.get() {
                 return;
             }
+            
+            let session_id = if let Some(id) = selected_session.get() {
+                id
+            } else {
+                set_toast.set(Some("Please select or create a session first.".to_string()));
+                return;
+            };
 
-            let session_id = selected_session.get();
+            // Optimistic Update
             conversations.update(|map| {
-                let entry = map
-                    .entry(session_id)
-                    .or_insert_with(|| vec![greeting.clone()]);
+                let entry = map.entry(session_id.clone()).or_insert_with(Vec::new);
                 entry.push(ChatMessage {
                     role: ChatRole::User,
                     text: create_rw_signal(trimmed.to_string()),
                 });
                 entry.push(ChatMessage {
                     role: ChatRole::Assistant,
-                    text: create_rw_signal(String::new()),
+                    text: create_rw_signal(String::new()), // Placeholder for stream
                 });
             });
 
             set_chat_input.set(String::new());
             set_is_loading.set(true);
 
-            let accountability = accountability.get();
-            let spirituality = spirituality.get();
-            let directness = directness.get();
+            let acc_val = accountability.get();
+            let spir_val = spirituality.get();
+            let dir_val = directness.get();
             let conversations = conversations.clone();
             let set_is_loading = set_is_loading.clone();
             let set_toast = set_toast.clone();
-            let greeting = greeting.clone();
+            
             let prompt = format!(
-                "User input: {trimmed}\n\nControls -> accountability: {accountability}, spirituality: {spirituality}, directness: {directness}. Use these to tune tone and firmness. Keep response concise."
+                "User input: {trimmed}\n\nControls -> accountability: {acc_val}, spirituality: {spir_val}, directness: {dir_val}. Use these to tune tone and firmness. Keep response concise."
             );
 
             #[cfg(feature = "hydrate")]
@@ -189,29 +223,28 @@ fn HomePage() -> impl IntoView {
                     Ok(es) => {
                         let es_clone = es.clone();
                         let es_err = es.clone();
-                        let greeting_msg = greeting.clone();
+                        let session_id_clone = session_id.clone();
+                        
                         let on_message = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new({
                             let conversations = conversations.clone();
                             let set_is_loading = set_is_loading.clone();
+                            let session_id = session_id.clone();
                             move |event: MessageEvent| {
                                 if let Some(data) = event.data().as_string() {
                                     if data.starts_with("[error:") {
                                         set_toast.set(Some(data.clone()));
                                     }
-                                    console::log_1(&format!("[sse] {data}").into());
                                     if data == "[DONE]" {
                                         set_is_loading.set(false);
                                         es_clone.close();
                                         return;
                                     }
                                     conversations.update(|map| {
-                                        let entry = map
-                                            .entry(session_id)
-                                            .or_insert_with(|| vec![greeting_msg.clone()]);
-                                            
-                                        if let Some(last) = entry.last() {
-                                            if let ChatRole::Assistant = last.role {
-                                                last.text.update(|t| t.push_str(&data));
+                                        if let Some(entry) = map.get_mut(&session_id) {
+                                            if let Some(last) = entry.last() {
+                                                if let ChatRole::Assistant = last.role {
+                                                    last.text.update(|t| t.push_str(&data));
+                                                }
                                             }
                                         }
                                     });
@@ -225,40 +258,26 @@ fn HomePage() -> impl IntoView {
                             let set_is_loading = set_is_loading.clone();
                             let set_toast = set_toast.clone();
                             let conversations = conversations.clone();
-                            let greeting_err = greeting.clone();
-                            let session_id = session_id;
+                            let session_id = session_id_clone.clone();
                             let prompt_clone = prompt.clone();
                             move |_event: Event| {
                                 set_is_loading.set(false);
                                 set_toast.set(Some("Stream error from agent".to_string()));
-                                conversations.update(|map| {
-                                    let entry = map
-                                        .entry(session_id)
-                                        .or_insert_with(|| vec![greeting_err.clone()]);
-                                        
-                                    if let Some(last) = entry.last() {
-                                        if let ChatRole::Assistant = last.role {
-                                            last.text.set("(stream error)".to_string());
-                                        }
-                                    }
-                                });
                                 es_err.close();
 
-                                // fallback: call server function to complete the message
+                                // fallback
                                 let conversations = conversations.clone();
-                                let greeting = greeting.clone();
                                 let prompt_fallback = prompt_clone.clone();
+                                let session_id = session_id.clone();
                                 spawn_local(async move {
-                                    let reply =
-                                        agent_chat(prompt_fallback, session_id.to_string()).await;
+                                    let reply = agent_chat(prompt_fallback, session_id.clone()).await;
                                     match reply {
                                         Ok(text) => conversations.update(|map| {
-                                            let entry = map
-                                                .entry(session_id)
-                                                .or_insert_with(|| vec![greeting.clone()]);
-                                            if let Some(last) = entry.last() {
-                                                if let ChatRole::Assistant = last.role {
-                                                    last.text.set(text);
+                                            if let Some(entry) = map.get_mut(&session_id) {
+                                                 if let Some(last) = entry.last() {
+                                                    if let ChatRole::Assistant = last.role {
+                                                        last.text.set(text);
+                                                    }
                                                 }
                                             }
                                         }),
@@ -275,77 +294,25 @@ fn HomePage() -> impl IntoView {
                     Err(err) => {
                         set_is_loading.set(false);
                         set_toast.set(Some(format!("Failed to start stream: {:?}", err)));
-                        conversations.update(|map| {
-                            let entry = map
-                                .entry(session_id)
-                                .or_insert_with(|| vec![greeting.clone()]);
-                                
-                            if let Some(last) = entry.last() {
-                                if let ChatRole::Assistant = last.role {
-                                    last.text.set("(error starting stream)".to_string());
-                                }
-                            }
-                        });
-                        // fallback
-                        let conversations = conversations.clone();
-                        let greeting = greeting.clone();
-                        let prompt_fallback = prompt.clone();
-                        spawn_local(async move {
-                            let reply = agent_chat(prompt_fallback, session_id.to_string()).await;
-                            match reply {
-                                Ok(text) => conversations.update(|map| {
-                                    let mut entry = map
-                                        .entry(session_id)
-                                        .or_insert_with(|| vec![greeting.clone()])
-                                        .clone();
-                                    if let Some(last) = entry.last() {
-                                        if let ChatRole::Assistant = last.role {
-                                            last.text.set(text);
-                                        }
-                                    }
-                                    map.insert(session_id, entry);
-                                }),
-                                Err(err) => {
-                                    set_toast.set(Some(format!("(error fallback) {}", err)))
-                                }
-                            }
-                        });
                     }
                 }
             }
-
+            
             #[cfg(not(feature = "hydrate"))]
             {
-                spawn_local(async move {
-                    let reply = agent_chat(prompt, session_id.to_string()).await;
+                 spawn_local(async move {
+                    let reply = agent_chat(prompt, session_id.clone()).await;
                     match reply {
                         Ok(text) => conversations.update(|map| {
-                            let mut entry = map
-                                .entry(session_id)
-                                .or_insert_with(|| vec![greeting.clone()])
-                                .clone();
-                            if let Some(last) = entry.last() {
-                                if let ChatRole::Assistant = last.role {
-                                    last.text.set(text);
+                            if let Some(entry) = map.get_mut(&session_id) {
+                                 if let Some(last) = entry.last() {
+                                    if let ChatRole::Assistant = last.role {
+                                        last.text.set(text);
+                                    }
                                 }
                             }
-                            map.insert(session_id, entry);
                         }),
-                        Err(err) => {
-                            set_toast.set(Some(format!("(error) {}", err)));
-                            conversations.update(|map| {
-                            let mut entry = map
-                                .entry(session_id)
-                                .or_insert_with(|| vec![greeting.clone()])
-                                .clone();
-                            if let Some(last) = entry.last() {
-                                if let ChatRole::Assistant = last.role {
-                                    last.text.set("(error)".to_string());
-                                }
-                            }
-                            map.insert(session_id, entry);
-                        });
-                        }
+                        Err(err) => { set_toast.set(Some(format!("(error) {}", err))); }
                     }
                     set_is_loading.set(false);
                 });
@@ -381,6 +348,12 @@ fn HomePage() -> impl IntoView {
                             </svg>
                          </button>
                     </div>
+                     <button
+                        class="w-full bg-integral-turquoise/10 hover:bg-integral-turquoise/20 text-integral-turquoise font-bold py-2 rounded-xl transition-colors mb-2"
+                        on:click=move |_| create_new_chat.dispatch("New Session".to_string())
+                     >
+                        "+ New Session"
+                     </button>
                     <div class="relative">
                         <input
                             type="text"
@@ -423,33 +396,31 @@ fn HomePage() -> impl IntoView {
 
                 // 3. Session List
                 <div class="flex-1 overflow-y-auto p-4 space-y-2 custom-scrollbar">
-                    <For
-                        each=filtered_sessions
-                        key=|session| session.id
-                        children=move |session| {
-                            let greeting = greeting.clone();
-                            let conversations = conversations.clone();
-                            let set_selected_session = set_selected_session.clone();
-                            view! {
-                                <div
-                                    class="group p-4 rounded-xl hover:bg-white/5 cursor-pointer transition-all border border-transparent hover:border-white/5"
-                                    on:click=move |_| {
-                                        set_selected_session.set(session.id);
-                                        conversations.update(|map| {
-                                            map.entry(session.id)
-                                                .or_insert_with(|| vec![greeting.clone()]);
-                                        });
-                                    }
-                                >
-                                    <div class="flex justify-between items-baseline mb-1">
-                                        <h4 class="font-bold text-sm text-parchment group-hover:text-integral-turquoise transition-colors">{session.title}</h4>
-                                        <span class="text-xs text-white/30 font-mono">{session.date}</span>
+                    <Suspense fallback=move || view! { <p class="text-center text-white/20 p-4">"Loading..."</p> }>
+                        <For
+                            each=filtered_sessions
+                            key=|session| session.id.clone()
+                            children=move |session| {
+                                let set_selected_session = set_selected_session.clone();
+                                let is_active = move || selected_session.get() == Some(session.id.clone());
+                                view! {
+                                    <div
+                                        class=move || format!(
+                                            "group p-4 rounded-xl cursor-pointer transition-all border {}",
+                                            if is_active() { "bg-white/10 border-integral-turquoise/30" } else { "hover:bg-white/5 border-transparent hover:border-white/5" }
+                                        )
+                                        on:click=move |_| set_selected_session.set(Some(session.id.clone()))
+                                    >
+                                        <div class="flex justify-between items-baseline mb-1">
+                                            <h4 class="font-bold text-sm text-parchment group-hover:text-integral-turquoise transition-colors">{session.title}</h4>
+                                            <span class="text-xs text-white/30 font-mono">{session.date}</span>
+                                        </div>
+                                        <p class="text-xs text-sage-mist line-clamp-2">{session.preview}</p>
                                     </div>
-                                    <p class="text-xs text-sage-mist line-clamp-2">{session.preview}</p>
-                                </div>
+                                }
                             }
-                        }
-                    />
+                        />
+                    </Suspense>
                 </div>
 
                 // 4. User Footer

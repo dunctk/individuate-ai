@@ -36,6 +36,7 @@ tokio-rusqlite = { version = "0.6", features = ["bundled"], optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 uuid = { version = "1.19.0", features = ["v4", "serde", "js"] }
+web-sys = { version = "0.3.83", features = ["EventSource", "MessageEvent", "Event", "console"] }
 
 [features]
 csr = ["leptos/csr", "leptos_meta/csr", "leptos_router/csr"]

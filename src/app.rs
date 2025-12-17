@@ -211,7 +211,7 @@ fn HomePage() -> impl IntoView {
             #[cfg(feature = "hydrate")]
             {
                 use wasm_bindgen::{closure::Closure, JsCast};
-                use web_sys::{console, Event, EventSource, MessageEvent};
+                use web_sys::{Event, EventSource, MessageEvent};
 
                 let url = format!(
                     "/api/agent-stream?session_id={}&prompt={}",
@@ -402,14 +402,16 @@ fn HomePage() -> impl IntoView {
                             key=|session| session.id.clone()
                             children=move |session| {
                                 let set_selected_session = set_selected_session.clone();
-                                let is_active = move || selected_session.get() == Some(session.id.clone());
+                                let session_id_active = session.id.clone();
+                                let session_id_click = session.id.clone();
+                                let is_active = move || selected_session.get() == Some(session_id_active.clone());
                                 view! {
                                     <div
                                         class=move || format!(
                                             "group p-4 rounded-xl cursor-pointer transition-all border {}",
                                             if is_active() { "bg-white/10 border-integral-turquoise/30" } else { "hover:bg-white/5 border-transparent hover:border-white/5" }
                                         )
-                                        on:click=move |_| set_selected_session.set(Some(session.id.clone()))
+                                        on:click=move |_| set_selected_session.set(Some(session_id_click.clone()))
                                     >
                                         <div class="flex justify-between items-baseline mb-1">
                                             <h4 class="font-bold text-sm text-parchment group-hover:text-integral-turquoise transition-colors">{session.title}</h4>

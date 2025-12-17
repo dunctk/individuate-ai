@@ -1,4 +1,4 @@
-use crate::agent::{agent_chat, create_session, get_chat_history, get_sessions, ChatLog, Session};
+use crate::agent::{agent_chat, create_session, get_chat_history, get_sessions};
 use leptos::*;
 use leptos_meta::*;
 use leptos_router::*;
@@ -151,7 +151,7 @@ fn HomePage() -> impl IntoView {
                         }]);
                     });
                 }
-                Err(e) => console::error_1(&format!("Failed to create session: {}", e).into()),
+                Err(e) => leptos::logging::error!("Failed to create session: {}", e),
             }
         }
     });

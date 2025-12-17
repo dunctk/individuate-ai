@@ -141,6 +141,7 @@ fn HomePage() -> impl IntoView {
         async move {
             match create_session(title).await {
                 Ok(session) => {
+                    leptos::logging::log!("Session created: {:?}", session);
                     sessions_resource.refetch();
                     set_selected_session.set(Some(session.id.clone()));
                     // Initialize empty conversation in map
@@ -171,15 +172,19 @@ fn HomePage() -> impl IntoView {
             let text = chat_input.get();
             let trimmed = text.trim();
             if trimmed.is_empty() || is_loading.get() {
+                leptos::logging::log!("Submit skipped: empty={} loading={}", trimmed.is_empty(), is_loading.get());
                 return;
             }
             
             let session_id = if let Some(id) = selected_session.get() {
                 id
             } else {
+                leptos::logging::warn!("Submit failed: No session selected");
                 set_toast.set(Some("Please select or create a session first.".to_string()));
                 return;
             };
+
+            leptos::logging::log!("Submitting to session: {}", session_id);
 
             // Optimistic Update
             conversations.update(|map| {
@@ -546,7 +551,7 @@ fn HomePage() -> impl IntoView {
         {move || {
             toast.get().map(|msg| {
                 view! {
-                    <div class="fixed bottom-6 right-6 bg-void-green/90 border border-integral-turquoise/40 text-parchment px-4 py-3 rounded-xl shadow-xl backdrop-blur">
+                    <div class="fixed bottom-6 right-6 bg-void-green/90 border border-integral-turquoise/40 text-parchment px-4 py-3 rounded-xl shadow-xl backdrop-blur z-[100]">
                         {msg}
                     </div>
                 }

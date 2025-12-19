@@ -157,33 +157,16 @@ fn HomePage() -> impl IntoView {
         }
     });
 
-    let on_submit = {
-        let chat_input = chat_input.clone();
+    let submit_with_session = {
         let set_chat_input = set_chat_input.clone();
         let set_is_loading = set_is_loading.clone();
         let conversations = conversations.clone();
         let set_toast = set_toast.clone();
-        let selected_session = selected_session.clone();
         let accountability = accountability.clone();
         let spirituality = spirituality.clone();
         let directness = directness.clone();
 
-        Rc::new(move || {
-            let text = chat_input.get();
-            let trimmed = text.trim();
-            if trimmed.is_empty() || is_loading.get() {
-                leptos::logging::log!("Submit skipped: empty={} loading={}", trimmed.is_empty(), is_loading.get());
-                return;
-            }
-            
-            let session_id = if let Some(id) = selected_session.get() {
-                id
-            } else {
-                leptos::logging::warn!("Submit failed: No session selected");
-                set_toast.set(Some("Please select or create a session first.".to_string()));
-                return;
-            };
-
+        Rc::new(move |session_id: String, trimmed: String| {
             leptos::logging::log!("Submitting to session: {}", session_id);
 
             // Optimistic Update
@@ -191,7 +174,7 @@ fn HomePage() -> impl IntoView {
                 let entry = map.entry(session_id.clone()).or_insert_with(Vec::new);
                 entry.push(ChatMessage {
                     role: ChatRole::User,
-                    text: create_rw_signal(trimmed.to_string()),
+                    text: create_rw_signal(trimmed.clone()),
                 });
                 entry.push(ChatMessage {
                     role: ChatRole::Assistant,
@@ -208,7 +191,7 @@ fn HomePage() -> impl IntoView {
             let conversations = conversations.clone();
             let set_is_loading = set_is_loading.clone();
             let set_toast = set_toast.clone();
-            
+
             let prompt = format!(
                 "User input: {trimmed}\n\nControls -> accountability: {acc_val}, spirituality: {spir_val}, directness: {dir_val}. Use these to tune tone and firmness. Keep response concise."
             );
@@ -229,7 +212,7 @@ fn HomePage() -> impl IntoView {
                         let es_clone = es.clone();
                         let es_err = es.clone();
                         let session_id_clone = session_id.clone();
-                        
+
                         let on_message = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new({
                             let conversations = conversations.clone();
                             let set_is_loading = set_is_loading.clone();
@@ -279,7 +262,7 @@ fn HomePage() -> impl IntoView {
                                     match reply {
                                         Ok(text) => conversations.update(|map| {
                                             if let Some(entry) = map.get_mut(&session_id) {
-                                                 if let Some(last) = entry.last() {
+                                                if let Some(last) = entry.last() {
                                                     if let ChatRole::Assistant = last.role {
                                                         last.text.set(text);
                                                     }
@@ -302,15 +285,15 @@ fn HomePage() -> impl IntoView {
                     }
                 }
             }
-            
+
             #[cfg(not(feature = "hydrate"))]
             {
-                 spawn_local(async move {
+                spawn_local(async move {
                     let reply = agent_chat(prompt, session_id.clone()).await;
                     match reply {
                         Ok(text) => conversations.update(|map| {
                             if let Some(entry) = map.get_mut(&session_id) {
-                                 if let Some(last) = entry.last() {
+                                if let Some(last) = entry.last() {
                                     if let ChatRole::Assistant = last.role {
                                         last.text.set(text);
                                     }
@@ -322,6 +305,61 @@ fn HomePage() -> impl IntoView {
                     set_is_loading.set(false);
                 });
             }
+        })
+    };
+
+    let on_submit = {
+        let chat_input = chat_input.clone();
+        let set_is_loading = set_is_loading.clone();
+        let conversations = conversations.clone();
+        let set_toast = set_toast.clone();
+        let selected_session = selected_session.clone();
+        let set_selected_session = set_selected_session.clone();
+        let sessions_resource = sessions_resource.clone();
+        let submit_with_session = submit_with_session.clone();
+
+        Rc::new(move || {
+            let text = chat_input.get();
+            let trimmed = text.trim();
+            if trimmed.is_empty() || is_loading.get() {
+                leptos::logging::log!("Submit skipped: empty={} loading={}", trimmed.is_empty(), is_loading.get());
+                return;
+            }
+
+            let trimmed = trimmed.to_string();
+            if let Some(id) = selected_session.get() {
+                submit_with_session(id, trimmed);
+                return;
+            }
+
+            leptos::logging::log!("No session selected; creating a new one.");
+            set_is_loading.set(true);
+            let conversations = conversations.clone();
+            let sessions_resource = sessions_resource.clone();
+            let set_selected_session = set_selected_session.clone();
+            let set_is_loading = set_is_loading.clone();
+            let set_toast = set_toast.clone();
+            let submit_with_session = submit_with_session.clone();
+            spawn_local(async move {
+                match create_session("New Session".to_string()).await {
+                    Ok(session) => {
+                        sessions_resource.refetch();
+                        set_selected_session.set(Some(session.id.clone()));
+                        conversations.update(|map| {
+                            map.insert(session.id.clone(), vec![ChatMessage {
+                                role: ChatRole::Assistant,
+                                text: create_rw_signal("Welcome to your new session.".to_string()),
+                            }]);
+                        });
+                        submit_with_session(session.id, trimmed);
+                    }
+                    Err(e) => {
+                        leptos::logging::error!("Failed to create session: {}", e);
+                        set_toast.set(Some("Failed to create a new session.".to_string()));
+                        set_is_loading.set(false);
+                    }
+                }
+            });
         })
     };
 

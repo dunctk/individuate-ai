@@ -67,7 +67,7 @@ fn HomePage() -> impl IntoView {
     let (selected_session, set_selected_session) = create_signal(None::<String>);
 
     // Chat History Resource - fetches when session changes
-    let history_resource = create_resource(
+    let history_resource = create_local_resource(
         move || selected_session.get(),
         |session_id| async move {
             if let Some(id) = session_id {
@@ -185,9 +185,9 @@ fn HomePage() -> impl IntoView {
             set_chat_input.set(String::new());
             set_is_loading.set(true);
 
-            let acc_val = accountability.get();
-            let spir_val = spirituality.get();
-            let dir_val = directness.get();
+            let acc_val = accountability.get_untracked();
+            let spir_val = spirituality.get_untracked();
+            let dir_val = directness.get_untracked();
             let conversations = conversations.clone();
             let set_is_loading = set_is_loading.clone();
             let set_toast = set_toast.clone();
@@ -319,20 +319,23 @@ fn HomePage() -> impl IntoView {
         let submit_with_session = submit_with_session.clone();
 
         Rc::new(move || {
-            let text = chat_input.get();
+            let text = chat_input.get_untracked();
             let trimmed = text.trim();
-            if trimmed.is_empty() || is_loading.get() {
-                leptos::logging::log!("Submit skipped: empty={} loading={}", trimmed.is_empty(), is_loading.get());
+            if trimmed.is_empty() || is_loading.get_untracked() {
+                leptos::logging::log!(
+                    "Submit skipped: empty={} loading={}",
+                    trimmed.is_empty(),
+                    is_loading.get_untracked()
+                );
                 return;
             }
 
             let trimmed = trimmed.to_string();
-            if let Some(id) = selected_session.get() {
+            if let Some(id) = selected_session.get_untracked() {
                 submit_with_session(id, trimmed);
                 return;
             }
 
-            leptos::logging::log!("No session selected; creating a new one.");
             set_is_loading.set(true);
             let conversations = conversations.clone();
             let sessions_resource = sessions_resource.clone();

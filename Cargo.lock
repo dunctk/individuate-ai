@@ -1191,6 +1191,7 @@ dependencies = [
  "rig-core",
  "rig-sqlite",
  "rusqlite",
+ "schemars",
  "serde",
  "serde_json",
  "sqlite-vec",

@@ -1,8 +1,11 @@
-use crate::agent::{agent_chat, create_session, get_chat_history, get_sessions};
+use crate::agent::{
+    agent_chat, create_session, get_chat_history, get_patient_graph, get_sessions, GraphNode,
+    DEFAULT_GRAPH_USER_ID,
+};
 use leptos::*;
 use leptos_meta::*;
 use leptos_router::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,6 +20,34 @@ struct ChatMessage {
     text: RwSignal<String>,
 }
 
+fn category_chip_classes(category: &str) -> &'static str {
+    match category {
+        "Trigger" => "border-systemic-yellow/40 text-systemic-yellow bg-systemic-yellow/10",
+        "Belief" => "border-integral-turquoise/40 text-integral-turquoise bg-integral-turquoise/10",
+        "Emotion" => "border-parchment/40 text-parchment bg-white/10",
+        "Somatic" => "border-sage-mist/50 text-sage-mist bg-sage-mist/15",
+        "Pattern" => "border-white/20 text-white/70 bg-white/5",
+        "Need" => "border-systemic-yellow/40 text-systemic-yellow bg-systemic-yellow/10",
+        "Goal" => "border-integral-turquoise/40 text-integral-turquoise bg-integral-turquoise/10",
+        "Resource" => "border-parchment/40 text-parchment bg-parchment/10",
+        _ => "border-white/15 text-white/60 bg-white/5",
+    }
+}
+
+fn category_marker_classes(category: &str) -> &'static str {
+    match category {
+        "Trigger" => "bg-systemic-yellow",
+        "Belief" => "bg-integral-turquoise",
+        "Emotion" => "bg-parchment",
+        "Somatic" => "bg-sage-mist",
+        "Pattern" => "bg-white/60",
+        "Need" => "bg-systemic-yellow",
+        "Goal" => "bg-integral-turquoise",
+        "Resource" => "bg-parchment",
+        _ => "bg-white/40",
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     provide_meta_context();
@@ -29,6 +60,7 @@ pub fn App() -> impl IntoView {
             <main class="min-h-screen bg-void-green text-parchment font-urbanist selection:bg-integral-turquoise selection:text-void-green overflow-x-hidden">
                 <Routes>
                     <Route path="" view=HomePage/>
+                    <Route path="mind-map" view=MindMapPage/>
                 </Routes>
             </main>
         </Router>
@@ -507,7 +539,12 @@ fn HomePage() -> impl IntoView {
                         "IndividuateAI"
                     </h1>
 
-                    <div class="w-8"></div> // Spacer for balance
+                    <A
+                        href="/mind-map"
+                        class="px-3 py-2 rounded-full border border-white/10 text-xs uppercase tracking-[0.2em] text-sage-mist hover:text-parchment hover:border-integral-turquoise/40 transition"
+                    >
+                        "Mind Map"
+                    </A>
                 </header>
 
                 // Chat Area
@@ -598,6 +635,256 @@ fn HomePage() -> impl IntoView {
                 }
             })
         }}
+    }
+}
+
+#[component]
+fn MindMapPage() -> impl IntoView {
+    let (graph_user_id, _) = create_signal(DEFAULT_GRAPH_USER_ID.to_string());
+    let graph_resource = create_resource(
+        move || graph_user_id.get(),
+        |user_id| async move { get_patient_graph(user_id).await.unwrap_or_default() },
+    );
+
+    let graph = create_memo(move |_| graph_resource.get().unwrap_or_default());
+    let grouped_nodes = create_memo(move |_| {
+        let graph_snapshot = graph.get();
+        let mut groups: BTreeMap<String, Vec<GraphNode>> = BTreeMap::new();
+        for node in graph_snapshot.nodes.iter() {
+            let category = if node.category.trim().is_empty() {
+                "Other"
+            } else {
+                node.category.as_str()
+            };
+            groups
+                .entry(category.to_string())
+                .or_default()
+                .push(node.clone());
+        }
+        for nodes in groups.values_mut() {
+            nodes.sort_by(|a, b| a.label.cmp(&b.label));
+        }
+        groups.into_iter().collect::<Vec<_>>()
+    });
+
+    let refresh_graph = {
+        let graph_resource = graph_resource.clone();
+        move |_| graph_resource.refetch()
+    };
+
+    view! {
+        <div class="min-h-screen pb-16">
+            <header class="px-6 pt-6 pb-4 flex items-center justify-between">
+                <A
+                    href="/"
+                    class="px-4 py-2 rounded-full border border-white/10 text-xs uppercase tracking-[0.2em] text-sage-mist hover:text-parchment hover:border-integral-turquoise/40 transition"
+                >
+                    "Back to Chat"
+                </A>
+                <div class="text-xs uppercase tracking-[0.4em] text-white/40">"Mind Map"</div>
+                <button
+                    class="px-4 py-2 rounded-full bg-integral-turquoise/20 text-integral-turquoise text-xs uppercase tracking-[0.2em] border border-integral-turquoise/40 hover:bg-integral-turquoise/30 transition"
+                    on:click=refresh_graph
+                >
+                    "Sync Graph"
+                </button>
+            </header>
+
+            <section class="px-6">
+                <div class="max-w-6xl mx-auto">
+                    <div class="relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-white/5 via-transparent to-black/40 p-8">
+                        <div class="absolute -top-24 -right-24 w-64 h-64 rounded-full bg-integral-turquoise/20 blur-3xl"></div>
+                        <div class="absolute -bottom-32 left-8 w-72 h-72 rounded-full bg-systemic-yellow/10 blur-[120px]"></div>
+                        <div class="relative z-10 grid gap-8 lg:grid-cols-[2fr,1fr]">
+                            <div class="space-y-4">
+                                <h1 class="text-4xl md:text-5xl font-fraunces text-parchment">
+                                    "Your evolving psyche map."
+                                </h1>
+                                <p class="text-base md:text-lg text-sage-mist max-w-xl">
+                                    "Every session nudges the graph forward. New nodes and connections are merged in SQLite, keeping the mind map persistent and editable across conversations."
+                                </p>
+                                <div class="flex flex-wrap gap-3 text-xs uppercase tracking-[0.2em] text-white/40">
+                                    <span class="px-3 py-2 rounded-full border border-white/10 bg-black/30">"SQLite source"</span>
+                                    <span class="px-3 py-2 rounded-full border border-white/10 bg-black/30">"Tool-based updates"</span>
+                                    <span class="px-3 py-2 rounded-full border border-white/10 bg-black/30">"Delta extraction"</span>
+                                </div>
+                            </div>
+                            <div class="grid gap-4 sm:grid-cols-2">
+                                <div class="rounded-2xl border border-white/10 bg-black/30 p-4">
+                                    <div class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                        "Nodes"
+                                    </div>
+                                    <div class="mt-3 text-3xl font-fraunces text-parchment">
+                                        {move || graph.get().nodes.len()}
+                                    </div>
+                                </div>
+                                <div class="rounded-2xl border border-white/10 bg-black/30 p-4">
+                                    <div class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                        "Connections"
+                                    </div>
+                                    <div class="mt-3 text-3xl font-fraunces text-parchment">
+                                        {move || graph.get().edges.len()}
+                                    </div>
+                                </div>
+                                <div class="rounded-2xl border border-white/10 bg-black/30 p-4 sm:col-span-2">
+                                    <div class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                        "Graph ID"
+                                    </div>
+                                    <div class="mt-2 text-sm text-parchment font-mono break-all">
+                                        {move || graph.get().user_id}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mt-10 grid gap-6 lg:grid-cols-[2fr,1fr]">
+                        <div class="rounded-3xl border border-white/10 bg-black/30 p-6 relative overflow-hidden">
+                            <div class="absolute top-0 right-0 w-48 h-48 bg-white/5 blur-3xl rounded-full"></div>
+                            <div class="relative z-10 flex items-center justify-between">
+                                <div>
+                                    <h2 class="text-xl font-fraunces text-parchment">
+                                        "Constellation"
+                                    </h2>
+                                    <p class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                        "Grouped by category"
+                                    </p>
+                                </div>
+                                <span class="text-[10px] uppercase tracking-[0.3em] text-integral-turquoise border border-integral-turquoise/30 px-2 py-1 rounded-full">
+                                    "Live"
+                                </span>
+                            </div>
+
+                            <Suspense fallback=move || view! {
+                                <div class="mt-8 text-center text-white/30">"Loading graph..."</div>
+                            }>
+                                {move || {
+                                    let graph_snapshot = graph.get();
+                                    if graph_snapshot.nodes.is_empty() {
+                                        view! {
+                                            <div class="mt-8 rounded-2xl border border-dashed border-white/10 p-8 text-center text-sage-mist">
+                                                <p class="text-lg font-fraunces text-parchment mb-2">"Graph is quiet."</p>
+                                                <p class="text-sm text-white/40">
+                                                    "Keep chatting and the extractor will start building your map."
+                                                </p>
+                                            </div>
+                                        }.into_view()
+                                    } else {
+                                        view! {
+                                            <div class="mt-6 grid gap-4 md:grid-cols-2">
+                                                <For
+                                                    each=move || grouped_nodes.get()
+                                                    key=|(category, _)| category.clone()
+                                                    children=move |(category, nodes)| {
+                                                        let marker_class = category_marker_classes(&category);
+                                                        let node_category = category.clone();
+                                                        view! {
+                                                            <div class="rounded-2xl border border-white/10 bg-void-green/60 p-4">
+                                                                <div class="flex items-center gap-2">
+                                                                    <span class=format!("w-2 h-2 rounded-full {}", marker_class)></span>
+                                                                    <span class="text-xs uppercase tracking-[0.2em] text-white/50">
+                                                                        {node_category}
+                                                                    </span>
+                                                                </div>
+                                                                <div class="mt-3 flex flex-wrap gap-2">
+                                                                    <For
+                                                                        each=move || nodes.clone()
+                                                                        key=|node| node.id.clone()
+                                                                        children=move |node| {
+                                                                            let chip_class = category_chip_classes(&node.category);
+                                                                            view! {
+                                                                                <span class=format!("px-3 py-1.5 text-xs rounded-full border {}", chip_class)>
+                                                                                    {node.label}
+                                                                                </span>
+                                                                            }
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        }
+                                                    }
+                                                />
+                                            </div>
+                                        }.into_view()
+                                    }
+                                }}
+                            </Suspense>
+                        </div>
+
+                        <div class="space-y-6">
+                            <div class="rounded-3xl border border-white/10 bg-black/30 p-6">
+                                <h3 class="text-lg font-fraunces text-parchment">"Connections"</h3>
+                                <p class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                    "Edges and relations"
+                                </p>
+                                <Suspense fallback=move || view! {
+                                    <div class="mt-4 text-white/30">"Loading edges..."</div>
+                                }>
+                                    {move || {
+                                        let edges = graph.get().edges;
+                                        if edges.is_empty() {
+                                            view! {
+                                                <div class="mt-4 rounded-2xl border border-dashed border-white/10 p-5 text-sm text-white/40">
+                                                    "No edges yet. As patterns emerge, relationships will appear here."
+                                                </div>
+                                            }.into_view()
+                                        } else {
+                                            view! {
+                                                <div class="mt-4 space-y-3">
+                                                    <For
+                                                        each=move || {
+                                                            edges
+                                                                .clone()
+                                                                .into_iter()
+                                                                .enumerate()
+                                                                .collect::<Vec<_>>()
+                                                        }
+                                                        key=|(idx, _)| *idx
+                                                        children=move |(_, edge)| {
+                                                            view! {
+                                                                <div class="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                                                                    <span class="text-[10px] uppercase tracking-[0.2em] text-integral-turquoise border border-integral-turquoise/30 px-2 py-1 rounded-full">
+                                                                        {edge.relation}
+                                                                    </span>
+                                                                    <div class="text-sm text-parchment">
+                                                                        {format!("{} -> {}", edge.from, edge.to)}
+                                                                    </div>
+                                                                </div>
+                                                            }
+                                                        }
+                                                    />
+                                                </div>
+                                            }.into_view()
+                                        }
+                                    }}
+                                </Suspense>
+                            </div>
+
+                            <div class="rounded-3xl border border-white/10 bg-black/30 p-6">
+                                <h3 class="text-lg font-fraunces text-parchment">"Graph Engine"</h3>
+                                <p class="text-xs uppercase tracking-[0.2em] text-white/40">
+                                    "How updates flow"
+                                </p>
+                                <div class="mt-4 space-y-3 text-sm text-sage-mist">
+                                    <div class="flex items-start gap-3">
+                                        <span class="text-integral-turquoise">"01"</span>
+                                        <span>"Read the current map via rig tools."</span>
+                                    </div>
+                                    <div class="flex items-start gap-3">
+                                        <span class="text-integral-turquoise">"02"</span>
+                                        <span>"Extract deltas from new messages."</span>
+                                    </div>
+                                    <div class="flex items-start gap-3">
+                                        <span class="text-integral-turquoise">"03"</span>
+                                        <span>"Write merges back into SQLite."</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
     }
 }
 

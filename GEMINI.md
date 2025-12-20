@@ -3,7 +3,7 @@
 ## Project Overview
 **IndividuateAI** is a Rust-based web application acting as an AI Therapist. It utilizes the **Rig.rs** agent framework to power a "Jungian" therapist persona that leverages long-term vector memory to retain user context.
 
-**Status:** 🛠 Design & Requirements Phase (Codebase not yet initialized).
+**Status:** 🛠 Active prototype.
 
 ## Technology Stack
 *   **Language:** Rust 🦀
@@ -21,6 +21,14 @@
 3.  **Memory Retrieval:** Agent searches local SQLite vector store for relevant context.
 4.  **Inference:** Agent sends Prompt + Context to xAI Grok API.
 5.  **Response:** Agent streams response back to UI.
+
+## Mind Map Graph (Persistent)
+To avoid context overflow, the "mind map" lives as a persistent graph in SQLite instead of being reconstructed every session.
+
+- **Source of Truth:** `patient_graphs` table stores a JSON blob (`PatientGraph`) with `nodes` and `edges`.
+- **Rig Tools:** `read_mind_map` (read) and `update_mind_map` (write) are implemented as `rig::tool` tools.
+- **Delta Extraction:** A background `rig::extractor` produces incremental changes (`ConversationGraphDelta`) after each exchange.
+- **API + UI:** `/api/graph/:user_id` returns the current graph; `/mind-map` renders it in the UI.
 
 ## UI/Design System: "Organic Integral"
 *   **Philosophy:** "The Digital Greenhouse" – A botanical, Jungian aesthetic avoiding sterile SaaS tropes.

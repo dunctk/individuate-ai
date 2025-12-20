@@ -2,7 +2,7 @@
 #[tokio::main]
 async fn main() {
     use axum::{routing::get, Router};
-    use individuateai::agent::stream_handler;
+    use individuateai::agent::{graph_handler, stream_handler};
     use individuateai::app::*;
     use individuateai::fileserv::file_and_error_handler;
     use leptos::*;
@@ -18,6 +18,7 @@ async fn main() {
     // build our application with a route
     let app = Router::new()
         .route("/api/agent-stream", get(stream_handler))
+        .route("/api/graph/:user_id", get(graph_handler))
         .leptos_routes(&leptos_options, routes, App)
         .fallback(file_and_error_handler)
         .with_state(leptos_options);

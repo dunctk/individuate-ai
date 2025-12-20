@@ -1,6 +1,8 @@
 use leptos::*;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_GRAPH_USER_ID: &str = "local-user";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -15,19 +17,54 @@ pub struct ChatLog {
     pub content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+pub struct PatientGraph {
+    pub user_id: String,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+impl Default for PatientGraph {
+    fn default() -> Self {
+        Self {
+            user_id: DEFAULT_GRAPH_USER_ID.to_string(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+pub struct GraphNode {
+    pub id: String,
+    pub label: String,
+    pub category: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    pub relation: String,
+}
+
 #[cfg(feature = "ssr")]
 mod runtime {
-    use super::{ChatLog, Session};
+    use super::{ChatLog, GraphEdge, GraphNode, PatientGraph, Session, DEFAULT_GRAPH_USER_ID};
     use std::{
         collections::HashMap,
-        path::Path,
+        path::Path as FsPath,
         sync::{Arc, Once},
     };
 
     use anyhow::{Context, Result};
     use axum::{
-        extract::Query,
+        extract::{Path, Query},
         http::StatusCode,
+        response::Json,
         response::sse::{Event, Sse},
     };
     use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
@@ -42,11 +79,14 @@ mod runtime {
         providers::{openai, xai},
         Embed,
     };
+    use rig::{completion::ToolDefinition, tool::Tool};
     use rig_sqlite::{
         Column, ColumnValue, SqliteSearchFilter, SqliteVectorIndex, SqliteVectorStore,
         SqliteVectorStoreTable,
     };
     use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
+    use rusqlite::OptionalExtension;
+    use schemars::{schema_for, JsonSchema};
     use serde::{Deserialize, Serialize};
     use sqlite_vec::sqlite3_vec_init;
     use tokio::sync::{mpsc, OnceCell, RwLock};
@@ -62,6 +102,72 @@ mod runtime {
     const SYSTEM_PROMPT: &str = r#"
 You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under ~180 words, grounded, and practical. Mirror the user briefly, surface patterns, propose one concrete practice, and end with a concise reflective question. If the user shares safety-critical content, encourage professional or emergency support.
     "#;
+    const GRAPH_DELTA_PROMPT: &str = r#"
+Identify new psychological concepts or connections in the conversation.
+Only return NEW additions or explicit removals.
+Use stable snake_case ids, lowercase with underscores (example: sleep_deprivation).
+Keep labels 2-4 words and categories one of: Trigger, Belief, Emotion, Somatic, Pattern, Need, Goal, Resource, Other.
+If nothing changes, return empty arrays.
+    "#;
+
+    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+    struct GraphUpdateArgs {
+        pub user_id: String,
+        pub new_nodes: Vec<GraphNode>,
+        pub new_edges: Vec<GraphEdge>,
+        pub nodes_to_remove_ids: Vec<String>,
+        #[serde(default)]
+        pub edges_to_remove: Vec<GraphEdge>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+    struct GraphReadArgs {
+        pub user_id: String,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct GraphUpdateSummary {
+        added_nodes: usize,
+        added_edges: usize,
+        removed_nodes: usize,
+        removed_edges: usize,
+        total_nodes: usize,
+        total_edges: usize,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+    struct ConversationGraphDelta {
+        pub new_concepts: Vec<GraphNode>,
+        pub new_connections: Vec<GraphEdge>,
+        pub obsolete_concept_ids: Vec<String>,
+        #[serde(default)]
+        pub obsolete_connections: Vec<GraphEdge>,
+    }
+
+    impl ConversationGraphDelta {
+        fn is_empty(&self) -> bool {
+            self.new_concepts.is_empty()
+                && self.new_connections.is_empty()
+                && self.obsolete_concept_ids.is_empty()
+                && self.obsolete_connections.is_empty()
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum GraphToolError {
+        #[error("{0}")]
+        Message(String),
+    }
+
+    #[derive(Clone)]
+    struct GraphReaderTool {
+        conn: Connection,
+    }
+
+    #[derive(Clone)]
+    struct GraphManagerTool {
+        conn: Connection,
+    }
 
     struct SqliteIndexAdapter<E, T>
     where
@@ -174,7 +280,7 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
     }
 
     async fn ensure_data_dir(db_path: &str) -> Result<()> {
-        if let Some(parent) = Path::new(db_path).parent() {
+        if let Some(parent) = FsPath::new(db_path).parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -197,11 +303,200 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
         Ok(exists == 1)
     }
 
+    async fn read_graph(conn: &Connection, user_id: &str) -> Result<PatientGraph> {
+        let user_id_owned = user_id.to_string();
+        let stored: Option<String> = conn
+            .call(move |conn| {
+                conn.query_row(
+                    "SELECT graph_json FROM patient_graphs WHERE user_id = ?1",
+                    [user_id_owned],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(tokio_rusqlite::Error::Rusqlite)
+            })
+            .await
+            .context("Fetching patient graph")?;
+
+        if let Some(raw) = stored {
+            let graph = serde_json::from_str::<PatientGraph>(&raw)
+                .context("Parsing patient graph JSON")?;
+            return Ok(graph);
+        }
+
+        let graph = PatientGraph {
+            user_id: user_id.to_string(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        };
+        write_graph(conn, &graph).await?;
+        Ok(graph)
+    }
+
+    async fn write_graph(conn: &Connection, graph: &PatientGraph) -> Result<()> {
+        let user_id = graph.user_id.clone();
+        let payload = serde_json::to_string(graph).context("Serializing patient graph")?;
+        conn.call(move |conn| {
+            conn.execute(
+                r#"
+                INSERT INTO patient_graphs (user_id, graph_json)
+                VALUES (?1, ?2)
+                ON CONFLICT(user_id)
+                DO UPDATE SET graph_json = excluded.graph_json,
+                              updated_at = CURRENT_TIMESTAMP
+                "#,
+                rusqlite::params![user_id, payload],
+            )
+            .map_err(tokio_rusqlite::Error::Rusqlite)
+        })
+        .await
+        .context("Persisting patient graph")?;
+        Ok(())
+    }
+
+    fn apply_graph_update(graph: &mut PatientGraph, update: GraphUpdateArgs) -> GraphUpdateSummary {
+        let mut added_nodes = 0;
+        let mut added_edges = 0;
+        let mut removed_nodes = 0;
+        let mut removed_edges = 0;
+
+        let remove_nodes: std::collections::HashSet<String> =
+            update.nodes_to_remove_ids.into_iter().collect();
+        if !remove_nodes.is_empty() {
+            let before = graph.nodes.len();
+            graph.nodes.retain(|node| !remove_nodes.contains(&node.id));
+            removed_nodes = before.saturating_sub(graph.nodes.len());
+        }
+
+        if !remove_nodes.is_empty() {
+            let before = graph.edges.len();
+            graph.edges.retain(|edge| {
+                !remove_nodes.contains(&edge.from) && !remove_nodes.contains(&edge.to)
+            });
+            removed_edges += before.saturating_sub(graph.edges.len());
+        }
+
+        let remove_edges: std::collections::HashSet<(String, String, String)> = update
+            .edges_to_remove
+            .into_iter()
+            .map(|edge| (edge.from, edge.to, edge.relation))
+            .collect();
+        if !remove_edges.is_empty() {
+            let before = graph.edges.len();
+            graph.edges.retain(|edge| {
+                !remove_edges.contains(&(edge.from.clone(), edge.to.clone(), edge.relation.clone()))
+            });
+            removed_edges += before.saturating_sub(graph.edges.len());
+        }
+
+        let mut existing_nodes: std::collections::HashSet<String> =
+            graph.nodes.iter().map(|node| node.id.clone()).collect();
+        for node in update.new_nodes {
+            if existing_nodes.insert(node.id.clone()) {
+                graph.nodes.push(node);
+                added_nodes += 1;
+            }
+        }
+
+        let mut existing_edges: std::collections::HashSet<(String, String, String)> = graph
+            .edges
+            .iter()
+            .map(|edge| (edge.from.clone(), edge.to.clone(), edge.relation.clone()))
+            .collect();
+        for edge in update.new_edges {
+            if !existing_nodes.contains(&edge.from) || !existing_nodes.contains(&edge.to) {
+                continue;
+            }
+            let key = (edge.from.clone(), edge.to.clone(), edge.relation.clone());
+            if existing_edges.insert(key) {
+                graph.edges.push(edge);
+                added_edges += 1;
+            }
+        }
+
+        GraphUpdateSummary {
+            added_nodes,
+            added_edges,
+            removed_nodes,
+            removed_edges,
+            total_nodes: graph.nodes.len(),
+            total_edges: graph.edges.len(),
+        }
+    }
+
+    fn graph_context(graph: &PatientGraph) -> String {
+        if graph.nodes.is_empty() && graph.edges.is_empty() {
+            return "Current graph is empty.".to_string();
+        }
+
+        let mut lines = Vec::new();
+        lines.push("Current nodes (id: label [category]):".to_string());
+        for node in graph.nodes.iter().take(60) {
+            lines.push(format!("- {}: {} [{}]", node.id, node.label, node.category));
+        }
+        lines.push("Current edges (from -> to: relation):".to_string());
+        for edge in graph.edges.iter().take(80) {
+            lines.push(format!("- {} -> {} ({})", edge.from, edge.to, edge.relation));
+        }
+        lines.join("\n")
+    }
+
+    impl Tool for GraphReaderTool {
+        const NAME: &'static str = "read_mind_map";
+        type Error = GraphToolError;
+        type Args = GraphReadArgs;
+        type Output = PatientGraph;
+
+        async fn definition(&self, _prompt: String) -> ToolDefinition {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Read the current patient mind map from SQLite.".to_string(),
+                parameters: serde_json::json!(schema_for!(GraphReadArgs)),
+            }
+        }
+
+        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+            read_graph(&self.conn, &args.user_id)
+                .await
+                .map_err(|err| GraphToolError::Message(err.to_string()))
+        }
+    }
+
+    impl Tool for GraphManagerTool {
+        const NAME: &'static str = "update_mind_map";
+        type Error = GraphToolError;
+        type Args = GraphUpdateArgs;
+        type Output = GraphUpdateSummary;
+
+        async fn definition(&self, _prompt: String) -> ToolDefinition {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Apply incremental updates to the patient mind map.".to_string(),
+                parameters: serde_json::json!(schema_for!(GraphUpdateArgs)),
+            }
+        }
+
+        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+            let mut graph = read_graph(&self.conn, &args.user_id)
+                .await
+                .map_err(|err| GraphToolError::Message(err.to_string()))?;
+            let summary = apply_graph_update(&mut graph, args);
+            write_graph(&self.conn, &graph)
+                .await
+                .map_err(|err| GraphToolError::Message(err.to_string()))?;
+            Ok(summary)
+        }
+    }
+
     pub struct AgentRuntime {
         agent: rig::agent::Agent<xai::completion::CompletionModel>,
         // We still keep in-memory cache for speed during session, but sync to DB
         histories: RwLock<HashMap<String, Vec<Message>>>,
         conn: Connection,
+        openai_client: openai::Client,
+        graph_reader: GraphReaderTool,
+        graph_writer: GraphManagerTool,
+        graph_user_id: String,
     }
 
     impl AgentRuntime {
@@ -215,7 +510,7 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
                 .await
                 .context("Opening sqlite memory store")?;
 
-            // Init Chat Schema
+            // Init Chat + Graph Schema
             conn.call(|conn| {
                 conn.execute_batch(
                     r"
@@ -232,6 +527,11 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
                         content TEXT NOT NULL,
                         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY(session_id) REFERENCES sessions(id)
+                    );
+                    CREATE TABLE IF NOT EXISTS patient_graphs (
+                        user_id TEXT PRIMARY KEY,
+                        graph_json TEXT NOT NULL,
+                        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                     );
                     "
                 ).map_err(tokio_rusqlite::Error::Rusqlite)
@@ -295,9 +595,22 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
                 .dynamic_context(4, vector_index)
                 .build();
 
+            let graph_reader = GraphReaderTool {
+                conn: conn.clone(),
+            };
+            let graph_writer = GraphManagerTool {
+                conn: conn.clone(),
+            };
+            let graph_user_id = std::env::var("GRAPH_USER_ID")
+                .unwrap_or_else(|_| DEFAULT_GRAPH_USER_ID.to_string());
+
             Ok(Self {
                 agent,
                 histories: RwLock::new(HashMap::new()),
+                openai_client,
+                graph_reader,
+                graph_writer,
+                graph_user_id,
                 conn,
             })
         }
@@ -375,10 +688,73 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
                 Ok(logs)
             }).await.context("Fetching history")
         }
+
+        async fn read_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
+            self.graph_reader
+                .call(GraphReadArgs { user_id })
+                .await
+                .context("Reading patient graph")
+        }
+
+        fn spawn_graph_update(self: &Arc<Self>, prompt: String, reply: String) {
+            let runtime = Arc::clone(self);
+            tokio::spawn(async move {
+                if let Err(err) = runtime
+                    .update_graph_from_exchange(prompt, reply)
+                    .await
+                {
+                    eprintln!("[graph_update] {}", err);
+                }
+            });
+        }
+
+        async fn update_graph_from_exchange(&self, prompt: String, reply: String) -> Result<()> {
+            let user_id = self.graph_user_id.clone();
+            let current_graph = self.read_patient_graph(user_id.clone()).await?;
+            let context = graph_context(&current_graph);
+
+            let model = std::env::var("GRAPH_EXTRACTOR_MODEL")
+                .unwrap_or_else(|_| "gpt-4o-mini".to_string());
+            let extractor = self
+                .openai_client
+                .extractor::<ConversationGraphDelta>(model)
+                .preamble(GRAPH_DELTA_PROMPT)
+                .context(&context)
+                .build();
+
+            let transcript = format!("User: {}\nAssistant: {}", prompt, reply);
+            let delta = extractor
+                .extract(transcript)
+                .await
+                .map_err(|err| anyhow::anyhow!("Extractor failed: {}", err))?;
+
+            if delta.is_empty() {
+                return Ok(());
+            }
+
+            let update = GraphUpdateArgs {
+                user_id,
+                new_nodes: delta.new_concepts,
+                new_edges: delta.new_connections,
+                nodes_to_remove_ids: delta.obsolete_concept_ids,
+                edges_to_remove: delta.obsolete_connections,
+            };
+            let summary = self.graph_writer.call(update).await?;
+            eprintln!(
+                "[graph_update] +{} nodes +{} edges -{} nodes -{} edges ({} nodes, {} edges)",
+                summary.added_nodes,
+                summary.added_edges,
+                summary.removed_nodes,
+                summary.removed_edges,
+                summary.total_nodes,
+                summary.total_edges
+            );
+            Ok(())
+        }
         
         // --- Agent Logic ---
 
-        pub async fn respond(&self, session_id: &str, prompt: String) -> Result<String> {
+        pub async fn respond(self: &Arc<Self>, session_id: &str, prompt: String) -> Result<String> {
             // Persist User Message
             self.save_message(session_id.to_string(), "user".into(), prompt.clone()).await?;
 
@@ -421,6 +797,7 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
             let mut guard = self.histories.write().await;
             guard.insert(session_id.to_string(), history);
 
+            self.spawn_graph_update(prompt, reply.clone());
             Ok(reply)
         }
 
@@ -512,6 +889,7 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
                     let _ = runtime.save_message(session_id_clone.clone(), "assistant".into(), final_content.clone()).await;
                 }
 
+                runtime.spawn_graph_update(prompt.clone(), final_content.clone());
                 let _ = tx.send(Ok("[DONE]".to_string())).await;
                 
                 // Update History Cache
@@ -542,6 +920,10 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
         
         pub async fn get_session_history(&self, id: String) -> Result<Vec<ChatLog>> {
             self.get_history(id).await
+        }
+
+        pub async fn get_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
+            self.read_patient_graph(user_id).await
         }
     }
 
@@ -580,13 +962,24 @@ You are IndividuateAI, a Jungian, somatic-aware therapist. Keep responses under 
         Ok(Sse::new(mapped))
     }
 
+    pub async fn graph_handler(
+        Path(user_id): Path<String>,
+    ) -> Result<Json<PatientGraph>, (StatusCode, String)> {
+        let runtime = agent_runtime().await.map_err(internal_err)?;
+        let graph = runtime
+            .get_patient_graph(user_id)
+            .await
+            .map_err(internal_err)?;
+        Ok(Json(graph))
+    }
+
     fn internal_err(e: impl std::fmt::Display) -> (StatusCode, String) {
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     }
 }
 
 #[cfg(feature = "ssr")]
-pub use runtime::{agent_runtime, stream_handler};
+pub use runtime::{agent_runtime, graph_handler, stream_handler};
 
 fn server_error(err: impl std::fmt::Display) -> ServerFnError {
     eprintln!("[agent_serverfn] {}", err);
@@ -659,6 +1052,20 @@ pub async fn get_chat_history(session_id: String) -> Result<Vec<ChatLog>, Server
     #[cfg(not(feature = "ssr"))]
     {
         let _ = session_id;
+        Err(ServerFnError::ServerError("SSR only".into()))
+    }
+}
+
+#[server(GetPatientGraph, "/api")]
+pub async fn get_patient_graph(user_id: String) -> Result<PatientGraph, ServerFnError> {
+    #[cfg(feature = "ssr")]
+    {
+        let agent = agent_runtime().await.map_err(server_error)?;
+        agent.get_patient_graph(user_id).await.map_err(server_error)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = user_id;
         Err(ServerFnError::ServerError("SSR only".into()))
     }
 }

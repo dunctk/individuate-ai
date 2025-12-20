@@ -2,6 +2,7 @@
 
 ## Project Structure & Module Organization
 - `src/`: Rust code for Leptos components and Axum server. `main.rs` runs SSR, `app.rs` hosts the UI, `lib.rs` exposes hydration entry points, and `fileserv.rs` handles static files/errors.
+- Mind map graph: stored in SQLite `patient_graphs` table, exposed via `/api/graph/:user_id`, and updated through Rig tools + extractor (delta-only updates).
 - `public/`: Static assets copied as-is to the built site; place favicon, manifest, and other non-compiled files here.
 - `style/`: Tailwind sources. Edit `input.css`; the generated bundle is `output.css` (referenced in `Cargo.toml`).
 - `index.html`: Base HTML shell for the WASM client.
@@ -31,4 +32,5 @@
 
 ## Security & Configuration Tips
 - Feature flags control build mode: `ssr` for server builds, `hydrate` for client builds; `cargo-leptos` selects them automatically—avoid manual toggling unless you know the target.
+- Mind map extraction uses `GRAPH_EXTRACTOR_MODEL` (default `gpt-4o-mini`) and `GRAPH_USER_ID` (default `local-user`) to namespace the persistent graph.
 - Do not commit secrets; prefer environment variables loaded by your process manager when deploying the Axum server.

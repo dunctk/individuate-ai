@@ -16,7 +16,7 @@ RUN npx tailwindcss -i style/input.css -o style/output.css --minify
 
 # Install cargo-leptos and add wasm target
 RUN rustup target add wasm32-unknown-unknown
-RUN cargo install cargo-leptos
+RUN cargo install --locked cargo-leptos
 
 # Build the application
 RUN cargo leptos build --release

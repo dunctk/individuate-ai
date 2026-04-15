@@ -6,7 +6,11 @@
 .env
 target/
 
+.gemini-clipboard
+
 
 # Added by cargo
 
 /target
+
+.gemini-clipboard/

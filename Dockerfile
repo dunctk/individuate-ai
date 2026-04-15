@@ -44,13 +44,13 @@ COPY --from=builder /app/target/release/individuateai /app/individuateai
 COPY --from=builder /app/target/site /app/site
 
 # Set environment variables
-ENV LEPTOS_SITE_ADDR="0.0.0.0:3004"
+ENV LEPTOS_SITE_ADDR="0.0.0.0:3008"
 ENV LEPTOS_SITE_ROOT="site"
 # Default DB path (can be overridden in Coolify)
 ENV MEMORY_DB_PATH="/app/data/memory.sqlite"
 
 # Expose the port
-EXPOSE 3004
+EXPOSE 3008
 
 # Run the application
 CMD ["./individuateai"]

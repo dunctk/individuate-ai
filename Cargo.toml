@@ -37,7 +37,19 @@ tokio-rusqlite = { version = "0.6", features = ["bundled"], optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 uuid = { version = "1.19.0", features = ["v4", "serde", "js"] }
-web-sys = { version = "0.3.83", features = ["EventSource", "MessageEvent", "Event", "console"] }
+web-sys = { version = "0.3.83", features = ["EventSource", "MessageEvent", "Event", "console", "Window"] }
+serde-wasm-bindgen = "0.6.5"
+js-sys = "0.3.83"
+argon2 = "0.5.3"
+axum-extra = { version = "0.12.3", features = ["cookie", "cookie-signed", "cookie-private"] }
+cookie = { version = "0.18", features = ["private", "percent-encode"] }
+time = "0.3.44"
+webauthn-rs = { version = "0.5.4", optional = true }
+webauthn-rs-proto = "0.5.4"
+dashmap = "6.1.0"
+wasm-bindgen-futures = "0.4.56"
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
+serde_cbor_2 = { version = "0.13", optional = true }
 
 [features]
 csr = ["leptos/csr", "leptos_meta/csr", "leptos_router/csr"]
@@ -62,6 +74,8 @@ ssr = [
     "dep:dotenvy",
     "dep:reqwest",
     "dep:schemars",
+    "dep:webauthn-rs",
+    "dep:serde_cbor_2",
 ]
 
 [package.metadata.leptos]

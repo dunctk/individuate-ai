@@ -26,7 +26,7 @@ To start the development server with hot-reloading:
 cargo leptos watch
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3008](http://localhost:3008) in your browser.
 
 ## Design System
 

@@ -2,6 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+    :root {
+        color-scheme: dark;
+    }
+
+    input,
+    textarea,
+    select,
+    button {
+        font: inherit;
+    }
+
+    input,
+    textarea,
+    select {
+        @apply appearance-none;
+        background-clip: padding-box;
+    }
+}
+
 body {
     @apply bg-void-green text-parchment font-urbanist;
 }

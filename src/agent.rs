@@ -2417,7 +2417,7 @@ mod runtime {
                         }
                         Some(Err(e)) => {
                             eprintln!("[draft-stream:error] {}", e);
-                            let _ = tx.send(Ok(format!("[error:{}]", e))).await;
+                            let _ = tx.send(Ok(format!("error:{e}"))).await;
                             break;
                         }
                         Some(_) => {}
@@ -2543,7 +2543,7 @@ mod runtime {
                         }
                         Some(Err(e)) => {
                             eprintln!("[agent-stream:error] {}", e);
-                            let _ = tx.send(Ok(format!("[error:{}]", e))).await;
+                            let _ = tx.send(Ok(format!("error:{e}"))).await;
                             break;
                         }
                         Some(_) => {} // Ignore other stream items

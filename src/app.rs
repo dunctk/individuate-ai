@@ -107,8 +107,9 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // Global User State
-    let user_resource = create_resource(
+    // Global User State — blocking so SSR waits for auth before rendering,
+    // preventing reactive re-triggers on disposed runtimes.
+    let user_resource = create_blocking_resource(
         || (),
         |_| async move { get_context_user().await.ok().flatten() },
     );
@@ -666,7 +667,7 @@ fn HomePage() -> impl IntoView {
                                 let session_id = session_id.clone();
                                 move |event: MessageEvent| {
                                     if let Some(data) = event.data().as_string() {
-                                        if data.starts_with("[error:") {
+                                        if data.starts_with("error:") {
                                             set_toast.set(Some(data.clone()));
                                         }
                                         if data == "[DONE]" {
@@ -832,7 +833,7 @@ fn HomePage() -> impl IntoView {
                             let set_toast = set_toast.clone();
                             move |event: MessageEvent| {
                                 if let Some(data) = event.data().as_string() {
-                                    if data.starts_with("[error:") {
+                                    if data.starts_with("error:") {
                                         set_toast.set(Some(data.clone()));
                                     }
                                     if data == "[DONE]" {
@@ -1033,7 +1034,7 @@ fn HomePage() -> impl IntoView {
         view! {
         <div class="flex h-screen relative overflow-hidden">
             // Side Panel
-            <div class=move || format!("fixed inset-y-0 left-0 z-50 w-80 bg-void-green/95 backdrop-blur-xl border-r border-white/5 shadow-2xl transform transition-transform duration-500 ease-out flex flex-col {}", if is_sidebar_open.get() { "translate-x-0" } else { "-translate-x-full" })>
+            <div class=move || format!("fixed inset-y-0 left-0 z-50 w-80 bg-void-green/95 backdrop-blur-xl border-r border-white/5 shadow-2xl transform transition-transform duration-500 ease-out flex flex-col {}", if is_sidebar_open.get() { "translate-x-0 pointer-events-auto" } else { "-translate-x-full pointer-events-none" })>
                 <div class="p-6 border-b border-white/5 space-y-4">
                     <div class="flex items-center justify-between">
                         <h2 class="font-fraunces text-xl text-parchment">"History"</h2>
@@ -1079,7 +1080,7 @@ fn HomePage() -> impl IntoView {
             // Overlay
             <div class=move || format!("fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-500 {}", if is_sidebar_open.get() { "opacity-100 pointer-events-auto" } else { "opacity-0 pointer-events-none" }) on:click=move |_| set_is_sidebar_open.set(false)></div>
             <div class=move || format!("fixed inset-0 bg-black/50 backdrop-blur-sm z-[55] transition-opacity duration-300 {}", if is_profile_drawer_open.get() { "opacity-100 pointer-events-auto" } else { "opacity-0 pointer-events-none" }) on:click=move |_| set_is_profile_drawer_open.set(false)></div>
-            <div class=move || format!("fixed top-0 right-0 h-full w-full max-w-xl z-[60] bg-void-green/95 backdrop-blur-xl border-l border-white/10 shadow-2xl transform transition-transform duration-300 {}", if is_profile_drawer_open.get() { "translate-x-0" } else { "translate-x-full" })>
+            <div class=move || format!("fixed top-0 right-0 h-full w-full max-w-xl z-[60] bg-void-green/95 backdrop-blur-xl border-l border-white/10 shadow-2xl transform transition-transform duration-300 {}", if is_profile_drawer_open.get() { "translate-x-0 pointer-events-auto" } else { "translate-x-full pointer-events-none" })>
                 <div class="h-full flex flex-col">
                     <div class="p-6 border-b border-white/10 flex items-start justify-between gap-4">
                         <div>
@@ -1100,7 +1101,8 @@ fn HomePage() -> impl IntoView {
                     </div>
                     <div class="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
                         <select
-                            class="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs uppercase tracking-[0.18em] text-parchment focus:outline-none"
+                            class="w-full border border-white/10 rounded-xl px-4 py-3 text-xs uppercase tracking-[0.18em] text-parchment focus:outline-none"
+                            style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;"
                             prop:value=profile_editor_slug
                             on:change=move |ev| set_profile_editor_slug.set(event_target_value(&ev))
                         >
@@ -1110,15 +1112,15 @@ fn HomePage() -> impl IntoView {
                                 children=move |(slug, label)| view! { <option value=slug>{label}</option> }
                             />
                         </select>
-                        <input type="text" class="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none" placeholder="Display name" prop:value=profile_display_name on:input=move |ev| set_profile_display_name.set(event_target_value(&ev)) />
-                        <input type="text" class="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none" placeholder="Relationship type" prop:value=profile_relationship_type on:input=move |ev| set_profile_relationship_type.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[96px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none resize-y" placeholder="Background" prop:value=profile_background on:input=move |ev| set_profile_background.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[84px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Goals, one per line" prop:value=profile_goals on:input=move |ev| set_profile_goals.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[84px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Triggers, one per line" prop:value=profile_triggers on:input=move |ev| set_profile_triggers.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[84px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Boundaries, one per line" prop:value=profile_boundaries on:input=move |ev| set_profile_boundaries.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[72px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Tone preferences, one per line" prop:value=profile_effective_tone on:input=move |ev| set_profile_effective_tone.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[72px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Recent events, one per line" prop:value=profile_recent_events on:input=move |ev| set_profile_recent_events.set(event_target_value(&ev)) />
-                        <textarea class="w-full min-h-[72px] bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" placeholder="Do not say, one per line" prop:value=profile_do_not_say on:input=move |ev| set_profile_do_not_say.set(event_target_value(&ev)) />
+                        <input type="text" class="w-full border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Display name" prop:value=profile_display_name on:input=move |ev| set_profile_display_name.set(event_target_value(&ev)) />
+                        <input type="text" class="w-full border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Relationship type" prop:value=profile_relationship_type on:input=move |ev| set_profile_relationship_type.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[96px] border border-white/10 rounded-xl px-4 py-3 text-sm text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Background" prop:value=profile_background on:input=move |ev| set_profile_background.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[84px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Goals, one per line" prop:value=profile_goals on:input=move |ev| set_profile_goals.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[84px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Triggers, one per line" prop:value=profile_triggers on:input=move |ev| set_profile_triggers.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[84px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Boundaries, one per line" prop:value=profile_boundaries on:input=move |ev| set_profile_boundaries.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[72px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Tone preferences, one per line" prop:value=profile_effective_tone on:input=move |ev| set_profile_effective_tone.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[72px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Recent events, one per line" prop:value=profile_recent_events on:input=move |ev| set_profile_recent_events.set(event_target_value(&ev)) />
+                        <textarea class="w-full min-h-[72px] border border-white/10 rounded-xl px-4 py-3 text-xs text-parchment focus:outline-none resize-y" style="background-color: rgba(0, 0, 0, 0.30); color: #F2F0E9; color-scheme: dark;" placeholder="Do not say, one per line" prop:value=profile_do_not_say on:input=move |ev| set_profile_do_not_say.set(event_target_value(&ev)) />
                     </div>
                 </div>
             </div>

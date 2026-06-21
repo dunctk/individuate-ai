@@ -1,68 +1,120 @@
 {% extends "base.html" %}
 {% block content %}
-<body class="bg-void-green text-parchment font-urbanist selection:bg-integral-turquoise selection:text-void-green overflow-hidden"
-      data-user-id="{{ user_id }}"
-      data-username="{{ username }}">
-<div id="sidebar-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="toggleSidebar()"></div>
-<div id="profile-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="closeProfileDrawer()"></div>
+<div id="app-shell"
+     class="h-screen flex flex-col relative overflow-hidden"
+     data-user-id="{{ user_id }}"
+     data-username="{{ username }}"
+     data-session-id="{{ session_id }}">
 
-<aside id="sidebar"
-    class="fixed top-0 left-0 z-40 h-full w-72 bg-[#152520] border-r border-sage-mist/20 transform -translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"
-    hx-get="/fragments/sidebar" hx-trigger="load" hx-target="#sidebar"></aside>
+    <div id="sidebar-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="toggleSidebar()"></div>
+    <div id="profile-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="closeProfileDrawer()"></div>
 
-<aside id="profile-drawer"
-    class="fixed top-0 right-0 z-40 h-full w-80 bg-[#152520] border-l border-sage-mist/20 transform translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"></aside>
+    <aside id="sidebar"
+        class="fixed top-0 left-0 z-40 h-full w-72 glass-strong border-r border-sage-mist/20 transform -translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"
+        hx-get="/fragments/sidebar" hx-trigger="load" hx-target="#sidebar"></aside>
 
-<div id="main-content" class="h-screen flex flex-col">
-    <header class="flex items-center justify-between px-4 py-3 border-b border-sage-mist/20 shrink-0">
-        <div class="flex items-center gap-3">
-            <button onclick="toggleSidebar()" class="text-parchment hover:text-integral-turquoise transition-colors">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+    <aside id="profile-drawer"
+        class="fixed top-0 right-0 z-40 h-full w-80 glass-strong border-l border-sage-mist/20 transform translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"></aside>
+
+    <!-- Glass header — the "foggy greenhouse window" floating membrane -->
+    <header class="glass shrink-0 flex items-center justify-between px-4 py-3 border-b border-sage-mist/15 z-10">
+        <div class="flex items-center gap-2">
+            <button onclick="toggleSidebar()" class="icon-btn" aria-label="Open history">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h16"/>
+                </svg>
             </button>
-            <h1 class="text-lg font-fraunces font-bold text-integral-turquoise">IndividuateAI</h1>
+            <span class="brand-mark text-lg leading-none">IndividuateAI</span>
         </div>
-        <div class="flex items-center gap-3">
-            <button onclick="openProfileDrawer()" class="text-sm text-sage-mist hover:text-integral-turquoise transition-colors">Profiles</button>
-            <a href="/mind-map" class="text-sm text-sage-mist hover:text-integral-turquoise transition-colors">Mind Map</a>
+        <div class="flex items-center gap-1">
+            <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
+            <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
         </div>
     </header>
 
-    <div id="chat-messages" class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-    </div>
-
-    <div class="border-t border-sage-mist/20 shrink-0">
-        <div id="mode-toggle" class="flex items-center justify-center gap-2 px-4 py-2 bg-[#152520]">
-            <button onclick="setMode('therapist')" id="mode-therapist"
-                class="px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium">Therapist</button>
-            <button onclick="setMode('draft')" id="mode-draft"
-                class="px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors">Draft</button>
-        </div>
-        <div id="draft-controls" class="hidden px-4 py-2 bg-[#152520] border-t border-sage-mist/10">
-            <select id="draft-profile-select" class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-1.5 text-xs text-parchment"></select>
-        </div>
-        <div class="flex items-end gap-2 px-4 py-3 bg-[#152520]">
-            <div id="presets" class="flex gap-1 shrink-0">
-                <button onclick="submitPreset('I need to set a boundary')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Boundary</button>
-                <button onclick="submitPreset('I need to apologize')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Apologize</button>
-                <button onclick="submitPreset('I need to express a need')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Need</button>
+    <!-- Chat scroll region — the "living rhizome" of the conversation -->
+    <main id="chat-stage" class="flex-1 overflow-y-auto relative min-h-0">
+        <div id="chat-empty"
+             class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none px-6 text-center">
+            <div class="spiral-empty mb-6" aria-hidden="true">
+                <svg viewBox="0 0 200 200" fill="none" stroke="currentColor" stroke-width="1.2">
+                    <path d="M100,100 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M100,98 m-6,2 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 M100,95 m-11,5 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 M100,90 m-17,7 a17,17 0 1,0 34,0 a17,17 0 1,0 -34,0 M100,85 m-24,9 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0 M100,79 m-33,11 a33,33 0 1,0 66,0 a33,33 0 1,0 -66,0 M100,72 m-44,15 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M100,64 m-56,21 a56,56 0 1,0 112,0 a56,56 0 1,0 -112,0 M100,55 m-70,23 a70,70 0 1,0 140,0 a70,70 0 1,0 -140,0 M100,44 m-86,30 a86,86 0 1,0 172,0 a86,86 0 1,0 -172,0"/>
+                </svg>
             </div>
-            <input id="chat-input" type="text" autofocus
-                placeholder="What happened, and what do you want to say?"
-                class="flex-1 bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
-            <button onclick="submitChat()"
-                class="bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors shrink-0">
-                Send
-            </button>
+            <h2 class="font-fraunces font-soft text-2xl text-parchment/90 mb-2 text-balance">A space for what's growing</h2>
+            <p class="text-sm text-sage-light max-w-xs text-balance leading-relaxed">
+                Speak the way you would to a careful stranger. The rhizome takes shape as you write.
+            </p>
         </div>
-    </div>
-</div>
 
-<div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+        <div id="chat-messages" class="px-4 sm:px-6 py-6 space-y-5 max-w-3xl mx-auto relative z-[1]"
+             {% if session_id %}hx-get="/fragments/chat/{{ session_id }}" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
+        </div>
+
+        <!-- Mandala thinking loader — floats at the foot while the therapist is responding -->
+        <div id="thinking" class="hidden px-6 pb-4 pt-1 max-w-3xl mx-auto">
+            <div class="flex items-center gap-3">
+                <div class="mandala" aria-hidden="true">
+                    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.4">
+                        <circle cx="32" cy="32" r="4"/>
+                        <circle cx="32" cy="32" r="11" stroke-dasharray="3 4"/>
+                        <circle cx="32" cy="32" r="18" stroke-dasharray="2 6"/>
+                        <circle cx="32" cy="32" r="26" stroke-dasharray="1 8"/>
+                        <path d="M32 6 L32 14 M32 50 L32 58 M6 32 L14 32 M50 32 L58 32 M14 14 L19 19 M45 45 L50 50 M14 50 L19 45 M45 19 L50 14"/>
+                    </svg>
+                </div>
+                <div class="font-fraunces text-sm italic text-sage-light tracking-mycelium">listening through the roots…</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Composer — the bottom "membrane" with mode toggle, presets, input, and seed orb -->
+    <footer class="shrink-0 z-10">
+        <div class="fern-divider"></div>
+        <div class="glass-strong">
+            <div class="px-4 sm:px-6 pt-3 pb-2 max-w-3xl mx-auto">
+                <div class="flex items-center justify-between gap-2 mb-2">
+                    <div class="flex items-center gap-1.5">
+                        <button onclick="setMode('therapist')" id="mode-therapist" class="pill" data-active="true">Therapist</button>
+                        <button onclick="setMode('draft')" id="mode-draft" class="pill" data-active="false">Draft</button>
+                    </div>
+                    <div id="draft-controls" class="hidden items-center gap-2">
+                        <select id="draft-profile-select"
+                            class="field !py-1.5 !px-2.5 !w-auto text-xs min-w-[140px]"></select>
+                    </div>
+                </div>
+                <div id="presets" class="flex gap-1.5 overflow-x-auto no-scrollbar pb-2 -mx-1 px-1">
+                    <button onclick="submitPreset('I need to set a boundary')" class="chip">Boundary</button>
+                    <button onclick="submitPreset('I need to apologize')" class="chip">Apologize</button>
+                    <button onclick="submitPreset('I need to express a need')" class="chip">Need</button>
+                </div>
+            </div>
+            <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
+                <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
+                    <div class="flex-1 relative">
+                        <input id="chat-input" type="text" autofocus autocomplete="off"
+                            placeholder="What happened, and what do you want to say?"
+                            class="field !rounded-2xl !py-3 !px-4 pr-12"/>
+                        <kbd class="hidden sm:flex absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-sage-mist/60 border border-sage-mist/20 rounded px-1.5 py-0.5 pointer-events-none">↵</kbd>
+                    </div>
+                    <button id="seed-send" type="submit" class="seed-orb" aria-label="Send">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.4">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6"/>
+                        </svg>
+                    </button>
+                </form>
+            </div>
+        </div>
+    </footer>
+
+    <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2 pointer-events-none"></div>
+</div>
 
 <script>
 let currentMode = 'therapist';
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
+let currentUsername = '{{ username }}';
 
 function toggleSidebar() {
     const sidebar = document.getElementById('sidebar');
@@ -92,15 +144,13 @@ function closeProfileDrawer() {
 
 function setMode(mode) {
     currentMode = mode;
-    document.getElementById('mode-therapist').className = mode === 'therapist'
-        ? 'px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium'
-        : 'px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors';
-    document.getElementById('mode-draft').className = mode === 'draft'
-        ? 'px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium'
-        : 'px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors';
-    document.getElementById('draft-controls').classList.toggle('hidden', mode !== 'draft');
+    document.getElementById('mode-therapist').setAttribute('data-active', mode === 'therapist');
+    document.getElementById('mode-draft').setAttribute('data-active', mode === 'draft');
+    const draftControls = document.getElementById('draft-controls');
+    draftControls.classList.toggle('hidden', mode !== 'draft');
+    draftControls.classList.toggle('flex', mode === 'draft');
     document.getElementById('chat-input').placeholder = mode === 'draft'
-        ? 'Describe the message you want to draft...'
+        ? 'Describe the message you want to draft…'
         : 'What happened, and what do you want to say?';
 }
 
@@ -113,16 +163,46 @@ function selectSession(sessionId) {
     window.location.href = '/?session=' + sessionId;
 }
 
+function renderBubble(role, content) {
+    const isUser = role === 'user';
+    const label = isUser ? 'You' : 'Therapist';
+    const initial = isUser ? (currentUsername || 'Y').slice(0,1).toUpperCase() : 'T';
+    const avatarCls = isUser ? 'avatar-user' : 'avatar-therapist';
+    const bubbleCls = isUser ? 'bubble-user' : 'bubble-therapist';
+    const rowCls = isUser ? 'flex-row-reverse' : 'flex-row';
+    const alignCls = isUser ? 'items-end' : 'items-start';
+    return '' +
+      '<div class="flex ' + rowCls + ' gap-2.5 items-start animate-grow-in">' +
+        '<div class="avatar-orb ' + avatarCls + '">' + initial + '</div>' +
+        '<div class="flex flex-col ' + alignCls + ' min-w-0 max-w-[78%]">' +
+          '<span class="role-label mb-1 ' + (isUser ? 'text-right' : '') + '">' + label + '</span>' +
+          '<div class="bubble ' + bubbleCls + '">' + escapeHtml(content) + '</div>' +
+        '</div>' +
+      '</div>';
+}
+
 async function addMessage(role, content) {
     const container = document.getElementById('chat-messages');
-    const div = document.createElement('div');
-    div.className = 'animate-fade-in-up';
-    const label = role === 'therapist' ? 'Therapist' : 'You';
-    const align = role === 'therapist' ? 'items-start' : 'items-end';
-    const bg = role === 'therapist' ? 'bg-sage-mist/20' : 'bg-integral-turquoise/20';
-    div.innerHTML = '<div class="flex flex-col ' + align + '"><span class="text-xs text-sage-mist mb-1 px-1">' + label + '</span><div class="max-w-[80%] rounded-xl px-4 py-2 ' + bg + ' text-sm text-parchment">' + escapeHtml(content) + '</div></div>';
-    container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    const empty = document.getElementById('chat-empty');
+    if (empty) empty.classList.add('hidden');
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderBubble(role, content);
+    container.appendChild(wrapper.firstElementChild);
+    scrollChatToBottom();
+}
+
+function scrollChatToBottom() {
+    const stage = document.getElementById('chat-stage');
+    stage.scrollTop = stage.scrollHeight;
+}
+
+function setThinking(on) {
+    const el = document.getElementById('thinking');
+    if (!el) return;
+    el.classList.toggle('hidden', !on);
+    const orb = document.getElementById('seed-send');
+    if (orb) orb.toggleAttribute('disabled', on);
+    if (on) scrollChatToBottom();
 }
 
 async function submitChat() {
@@ -131,6 +211,7 @@ async function submitChat() {
     if (!text) return;
     input.value = '';
     addMessage('user', text);
+    setThinking(true);
     try {
         const resp = await fetch('/api/chat', {
             method: 'POST',
@@ -147,6 +228,8 @@ async function submitChat() {
         if (data.response) addMessage('therapist', data.response);
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+    } finally {
+        setThinking(false);
     }
 }
 
@@ -164,10 +247,15 @@ function refreshSidebar() {
 function showToast(message, type) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
-    toast.className = 'px-4 py-2 rounded-lg text-sm shadow-lg animate-fade-in-up ' + (type === 'error' ? 'bg-red-500/90 text-white' : 'bg-integral-turquoise/90 text-void-green');
+    toast.className = 'toast pointer-events-auto ' + (type === 'error' ? 'toast-error' : '');
     toast.textContent = message;
     container.appendChild(toast);
-    setTimeout(() => { toast.remove(); }, 3000);
+    setTimeout(() => {
+        toast.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(8px)';
+        setTimeout(() => toast.remove(), 320);
+    }, 3000);
 }
 
 function escapeHtml(str) {
@@ -197,16 +285,31 @@ async function registerAdditionalPasskey() {
         showToast('Error: ' + e.message, 'error');
     }
 }
+
+// Keyboard submit on desktop (Enter to send, Shift+Enter newline)
+document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('chat-input');
+    if (input) {
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitChat();
+            }
+        });
+    }
+    // Hide the empty state the moment any message lands (covers initial hx history load too)
+    const mo = new MutationObserver(() => {
+        const msgs = document.getElementById('chat-messages');
+        const empty = document.getElementById('chat-empty');
+        if (msgs && empty) empty.classList.toggle('hidden', msgs.children.length > 0);
+    });
+    const target = document.getElementById('chat-messages');
+    if (target) mo.observe(target, { childList: true });
+});
+
+// After an htmx swap loads chat history, scroll to foot
+document.body.addEventListener('htmx:afterSwap', (e) => {
+    if (e.detail.target.id === 'chat-messages') scrollChatToBottom();
+});
 </script>
-<style>
-@keyframes fade-in-up {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-.animate-fade-in-up { animation: fade-in-up 0.3s ease-out; }
-#chat-messages::-webkit-scrollbar { width: 6px; }
-#chat-messages::-webkit-scrollbar-track { background: transparent; }
-#chat-messages::-webkit-scrollbar-thumb { background: #4A635D; border-radius: 3px; }
-#chat-messages::-webkit-scrollbar-thumb:hover { background: #5d7d73; }
-</style>
 {% endblock %}

@@ -98,3 +98,45 @@ pub fn render_mind_map(env: &Environment, graph: &PatientGraph, user_id: &str) -
         "user_id": user_id,
     })).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_templates_compile() {
+        let env = create_env();
+        for name in [
+            "base.html", "login", "signup", "home", "sidebar",
+            "chat_messages", "profile_drawer", "mind_map",
+            "forgot_password", "reset_password",
+        ] {
+            env.get_template(name).expect("template registered");
+        }
+    }
+
+    #[test]
+    fn renders_chat_messages_bubbles() {
+        let env = create_env();
+        let messages = vec![
+            ChatLog { role: "user".into(), content: "hello".into() },
+            ChatLog { role: "assistant".into(), content: "hi there".into() },
+        ];
+        let html = render_chat_messages(&env, &messages);
+        assert!(html.contains("bubble-user"));
+        assert!(html.contains("bubble-therapist"));
+        assert!(html.contains("avatar-orb"));
+        assert!(html.contains("role-label"));
+    }
+
+    #[test]
+    fn renders_home_shell() {
+        let env = create_env();
+        let user = User { id: "u1".into(), username: "Dunc".into() };
+        let html = render_home(&env, &user, "");
+        assert!(html.contains("app-shell"));
+        assert!(html.contains("chat-stage"));
+        assert!(html.contains("seed-orb"));
+        assert!(html.contains("mandala"));
+    }
+}

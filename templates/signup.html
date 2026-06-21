@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="min-h-screen flex items-center justify-center px-4">
+    <div class="w-full max-w-sm">
+        <div class="text-center mb-8">
+            <h1 class="text-3xl font-fraunces font-bold text-integral-turquoise mb-2">Create Account</h1>
+            <p class="text-sage-mist text-sm">Set up a passkey to get started</p>
+        </div>
+        <div class="bg-void-green border border-sage-mist rounded-xl p-6 space-y-5">
+            <div>
+                <label class="block text-sm text-sage-mist mb-1.5" for="signup-email">Email</label>
+                <input id="signup-email" type="email" placeholder="you@example.com"
+                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-parchment text-sm placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
+                <button id="create-passkey-btn"
+                    class="w-full mt-2 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors">
+                    Create Passkey
+                </button>
+                <div id="signup-error" class="text-red-400 text-xs mt-1 hidden"></div>
+            </div>
+        </div>
+        <p class="text-center text-xs text-sage-mist mt-4">
+            Already have an account?
+            <a href="/login" class="text-integral-turquoise hover:underline">Sign in</a>
+        </p>
+    </div>
+</div>
+<script>
+document.getElementById('create-passkey-btn').addEventListener('click', async () => {
+    const email = document.getElementById('signup-email').value.trim();
+    const errEl = document.getElementById('signup-error');
+    errEl.classList.add('hidden');
+    if (!email) { errEl.textContent = 'Enter your email'; errEl.classList.remove('hidden'); return; }
+    try {
+        const resp = await fetch('/api/passkey/register/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email })
+        });
+        if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Registration start failed'); }
+        const { challenge_id, options } = await resp.json();
+        const cred = await window.registerPasskey(options);
+        const verify = await fetch('/api/passkey/register/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ challenge_id, credential: cred })
+        });
+        if (!verify.ok) { const e = await verify.json(); throw new Error(e.error || 'Verification failed'); }
+        const result = await verify.json();
+        if (result.redirect) { window.location.href = result.redirect; }
+    } catch (e) {
+        errEl.textContent = e.message;
+        errEl.classList.remove('hidden');
+    }
+});
+</script>
+{% endblock %}

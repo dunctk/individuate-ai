@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="h-screen flex flex-col">
+    <header class="flex items-center justify-between px-4 py-3 border-b border-sage-mist/20 shrink-0">
+        <div class="flex items-center gap-3">
+            <a href="/" class="text-sage-mist hover:text-integral-turquoise transition-colors">
+                <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+                Back to Chat
+            </a>
+            <h1 class="text-lg font-fraunces font-bold text-integral-turquoise">Mind Map</h1>
+        </div>
+        <div class="flex items-center gap-2">
+            <button onclick="resetView()"
+                class="px-3 py-1.5 text-xs border border-sage-mist text-sage-mist rounded-lg hover:border-integral-turquoise hover:text-integral-turquoise transition-colors">
+                Reset View
+            </button>
+            <button id="sync-btn" hx-post="/api/graph/sync" hx-target="#sync-status"
+                class="px-3 py-1.5 text-xs bg-integral-turquoise text-void-green rounded-lg font-medium hover:bg-integral-turquoise/90 transition-colors">
+                Sync Graph
+            </button>
+            <span id="sync-status" class="text-xs text-sage-mist"></span>
+        </div>
+    </header>
+
+    <div id="mind-map-container" class="flex-1 relative">
+        {% if graph_data.nodes|length == 0 %}
+        <div class="absolute inset-0 flex items-center justify-center">
+            <div class="text-center">
+                <p class="text-sage-mist text-sm mb-2">No concepts mapped yet</p>
+                <p class="text-sage-mist/60 text-xs">Start a conversation to build your mind map</p>
+            </div>
+        </div>
+        {% endif %}
+        <div id="mind-map-canvas" class="w-full h-full"></div>
+    </div>
+
+    <div id="stats-overlay" class="fixed bottom-4 left-4 bg-[#152520]/90 border border-sage-mist/20 rounded-lg px-3 py-2 text-xs text-sage-mist space-y-0.5">
+        <div>Nodes: <span id="node-count">{{ graph_data.nodes|length }}</span></div>
+        <div>Edges: <span id="edge-count">{{ graph_data.edges|length }}</span></div>
+    </div>
+
+    <div id="legend-overlay" class="fixed bottom-4 right-4 bg-[#152520]/90 border border-sage-mist/20 rounded-lg px-3 py-2 space-y-1">
+        <div class="text-xs text-sage-mist font-medium mb-1">Categories</div>
+        {% for cat, color in [("Trigger", "#E9C46A"), ("Belief", "#2A9D8F"), ("Emotion", "#F2F0E9"), ("Somatic", "#4A635D"), ("Pattern", "#ffffff"), ("Need", "#E9C46A"), ("Goal", "#2A9D8F"), ("Resource", "#F2F0E9")] %}
+        <div class="flex items-center gap-2 text-xs text-parchment/80">
+            <span class="w-2.5 h-2.5 rounded-full" style="background-color: {{ color }}"></span>
+            {{ cat }}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+<script>
+const graphData = {{ graph_data|safe }};
+
+document.addEventListener('DOMContentLoaded', function() {
+    if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+        window.renderMindMap('mind-map-canvas', graphData);
+    }
+});
+
+window.resetView = function() {
+    const svg = document.querySelector('#mind-map-canvas svg');
+    if (svg) {
+        const zoom = d3.zoom().on('zoom', null);
+        d3.select(svg).transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+    }
+};
+</script>
+{% endblock %}

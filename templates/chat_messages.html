@@ -1,0 +1,13 @@
+{% for message in messages %}
+<div class="animate-fade-in-up">
+    <div class="flex flex-col {% if message.role == 'user' %}items-end{% else %}items-start{% endif %}">
+        <span class="text-xs text-sage-mist mb-1 px-1">
+            {% if message.role == 'user' %}You{% else %}Therapist{% endif %}
+        </span>
+        <div class="max-w-[80%] rounded-xl px-4 py-2 text-sm text-parchment
+            {% if message.role == 'user' %}bg-integral-turquoise/20{% else %}bg-sage-mist/20{% endif %}">
+            {{ message.content }}
+        </div>
+    </div>
+</div>
+{% endfor %}

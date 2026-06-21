@@ -1,0 +1,76 @@
+<div class="p-4 space-y-4">
+    <div class="flex items-center justify-between">
+        <h2 class="text-sm font-fraunces font-semibold text-parchment">History</h2>
+        <button onclick="toggleSidebar()" class="text-sage-mist hover:text-parchment transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+    </div>
+
+    <button hx-post="/api/sessions" hx-target="#sidebar" hx-swap="outerHTML"
+        class="w-full bg-integral-turquoise/10 border border-integral-turquoise/30 text-integral-turquoise rounded-lg px-3 py-2 text-sm font-medium hover:bg-integral-turquoise/20 transition-colors">
+        + New Session
+    </button>
+
+    <div class="relative">
+        <input type="text" placeholder="Search sessions..."
+            class="w-full bg-[#1A2B26] border border-sage-mist/30 rounded-lg px-3 py-1.5 text-xs text-parchment placeholder:text-sage-mist/40 focus:outline-none focus:border-sage-mist transition-colors">
+    </div>
+
+    <div class="space-y-3">
+        <div>
+            <label class="block text-xs text-sage-mist mb-1">Accountability</label>
+            <div class="relative">
+                <input type="range" min="0" max="100" value="50" oninput="setSlider('accountability', this.value)"
+                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
+                <span id="accountability-value" class="text-xs text-integral-turquoise ml-1">50%</span>
+            </div>
+        </div>
+        <div>
+            <label class="block text-xs text-sage-mist mb-1">Spirituality</label>
+            <div class="relative">
+                <input type="range" min="0" max="100" value="50" oninput="setSlider('spirituality', this.value)"
+                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
+                <span id="spirituality-value" class="text-xs text-integral-turquoise ml-1">50%</span>
+            </div>
+        </div>
+        <div>
+            <label class="block text-xs text-sage-mist mb-1">Directness</label>
+            <div class="relative">
+                <input type="range" min="0" max="100" value="50" oninput="setSlider('directness', this.value)"
+                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
+                <span id="directness-value" class="text-xs text-integral-turquoise ml-1">50%</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="space-y-1">
+        {% for session in sessions %}
+        <button onclick="selectSession('{{ session.id }}')"
+            class="w-full text-left px-3 py-2 rounded-lg hover:bg-sage-mist/10 transition-colors group">
+            <div class="text-sm text-parchment font-medium truncate">{{ session.title }}</div>
+            <div class="text-xs text-sage-mist truncate">{{ session.preview }}</div>
+            <div class="text-[10px] text-sage-mist/60">{{ session.date }}</div>
+        </button>
+        {% endfor %}
+    </div>
+
+    <div class="pt-3 border-t border-sage-mist/20">
+        <div class="flex items-center gap-2 px-3 py-2">
+            <div class="w-8 h-8 rounded-full bg-integral-turquoise/20 flex items-center justify-center text-sm font-bold text-integral-turquoise shrink-0">
+                {{ username[:1]|upper }}
+            </div>
+            <div class="flex-1 min-w-0">
+                <div class="text-sm text-parchment truncate">{{ username }}</div>
+            </div>
+            <div class="relative group">
+                <button class="text-sage-mist hover:text-parchment transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                </button>
+                <div class="absolute bottom-full right-0 mb-1 w-40 bg-[#1A2B26] border border-sage-mist/20 rounded-lg shadow-lg py-1 hidden group-hover:block">
+                    <button onclick="registerAdditionalPasskey()" class="w-full text-left px-3 py-1.5 text-xs text-parchment hover:bg-sage-mist/10">Register Passkey</button>
+                    <a href="/logout" class="block px-3 py-1.5 text-xs text-red-400 hover:bg-sage-mist/10">Log Out</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

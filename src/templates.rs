@@ -1,0 +1,100 @@
+use crate::agent::{ChatLog, PatientGraph, RelationshipProfile, Session, User};
+use minijinja::Environment;
+use serde_json::json;
+
+pub fn create_env() -> Environment<'static> {
+    let mut env = Environment::new();
+    env.add_template("base.html", include_str!("../templates/base.html")).unwrap();
+    env.add_template("login", include_str!("../templates/login.html")).unwrap();
+    env.add_template("signup", include_str!("../templates/signup.html")).unwrap();
+    env.add_template("home", include_str!("../templates/home.html")).unwrap();
+    env.add_template("sidebar", include_str!("../templates/sidebar.html")).unwrap();
+    env.add_template("chat_messages", include_str!("../templates/chat_messages.html")).unwrap();
+    env.add_template("profile_drawer", include_str!("../templates/profile_drawer.html")).unwrap();
+    env.add_template("mind_map", include_str!("../templates/mind_map.html")).unwrap();
+    env.add_template("forgot_password", include_str!("../templates/forgot_password.html")).unwrap();
+    env.add_template("reset_password", include_str!("../templates/reset_password.html")).unwrap();
+    env
+}
+
+pub fn render_login(env: &Environment) -> String {
+    env.get_template("login").unwrap().render(json!({})).unwrap()
+}
+
+pub fn render_signup(env: &Environment) -> String {
+    env.get_template("signup").unwrap().render(json!({})).unwrap()
+}
+
+pub fn render_home(env: &Environment, user: &User, session_id: &str) -> String {
+    env.get_template("home").unwrap().render(json!({
+        "user_id": user.id,
+        "username": user.username,
+        "session_id": session_id,
+    })).unwrap()
+}
+
+pub fn render_sidebar(env: &Environment, sessions: &[Session], user: &User) -> String {
+    let session_list: Vec<serde_json::Value> = sessions.iter().map(|s| json!({
+        "id": s.id,
+        "title": s.title,
+        "preview": s.preview,
+        "date": s.date,
+    })).collect();
+    env.get_template("sidebar").unwrap().render(json!({
+        "sessions": session_list,
+        "username": user.username,
+    })).unwrap()
+}
+
+pub fn render_chat_messages(env: &Environment, messages: &[ChatLog]) -> String {
+    let msg_list: Vec<serde_json::Value> = messages.iter().map(|m| json!({
+        "role": m.role,
+        "content": m.content,
+    })).collect();
+    env.get_template("chat_messages").unwrap().render(json!({
+        "messages": msg_list,
+    })).unwrap()
+}
+
+pub fn render_profile_drawer(
+    env: &Environment,
+    profiles: &[RelationshipProfile],
+    slug: &str,
+) -> String {
+    let selected = profiles.iter().find(|p| p.slug == slug);
+    let profile_list: Vec<serde_json::Value> = profiles.iter().map(|p| json!({
+        "slug": p.slug,
+        "display_name": p.display_name,
+    })).collect();
+    env.get_template("profile_drawer").unwrap().render(json!({
+        "profiles": profile_list,
+        "selected_slug": slug,
+        "display_name": selected.map_or("", |p| &p.display_name),
+        "relationship_type": selected.map_or("", |p| &p.relationship_type),
+        "background": selected.map_or("", |p| &p.background),
+        "goals": selected.map_or(&Vec::<String>::new(), |p| &p.goals),
+        "triggers": selected.map_or(&Vec::<String>::new(), |p| &p.triggers),
+        "do_not_say": selected.map_or(&Vec::<String>::new(), |p| &p.do_not_say),
+        "effective_tone": selected.map_or(&Vec::<String>::new(), |p| &p.effective_tone),
+        "recent_events": selected.map_or(&Vec::<String>::new(), |p| &p.recent_events),
+        "boundaries": selected.map_or(&Vec::<String>::new(), |p| &p.boundaries),
+    })).unwrap()
+}
+
+pub fn render_forgot_password(env: &Environment) -> String {
+    env.get_template("forgot_password").unwrap().render(json!({})).unwrap()
+}
+
+pub fn render_reset_password(env: &Environment, token: &str) -> String {
+    env.get_template("reset_password").unwrap().render(json!({
+        "token": token,
+    })).unwrap()
+}
+
+pub fn render_mind_map(env: &Environment, graph: &PatientGraph, user_id: &str) -> String {
+    let graph_json = serde_json::to_value(graph).unwrap_or(json!({"nodes":[],"edges":[]}));
+    env.get_template("mind_map").unwrap().render(json!({
+        "graph_data": graph_json,
+        "user_id": user_id,
+    })).unwrap()
+}

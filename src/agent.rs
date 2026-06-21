@@ -1,7 +1,8 @@
-use leptos::*;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_GRAPH_USER_ID: &str = "local-user";
+pub const AUTH_COOKIE_NAME: &str = "auth_token";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
@@ -24,8 +25,7 @@ pub struct ChatLog {
     pub content: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PatientGraph {
     pub user_id: String,
     pub nodes: Vec<GraphNode>,
@@ -42,16 +42,14 @@ impl Default for PatientGraph {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphNode {
     pub id: String,
     pub label: String,
     pub category: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ssr", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GraphEdge {
     pub from: String,
     pub to: String,
@@ -73,11 +71,9 @@ pub struct RelationshipProfile {
     pub boundaries: Vec<String>,
 }
 
-#[cfg(feature = "ssr")]
 mod runtime {
     use super::{
         ChatLog, GraphEdge, GraphNode, PatientGraph, RelationshipProfile, Session, User,
-        DEFAULT_GRAPH_USER_ID,
     };
     use std::{
         collections::{HashMap, HashSet},
@@ -101,10 +97,7 @@ mod runtime {
     };
     use axum_extra::extract::cookie::{Key, PrivateCookieJar};
     use dashmap::DashMap;
-    use leptos::ServerFnError;
     use rig::streaming::StreamingPrompt;
-    use rig::vector_store::request::{Filter, VectorSearchRequest};
-    use rig::vector_store::{VectorStoreError, VectorStoreIndex};
     use rig::{
         agent::AgentBuilder,
         client::{CompletionClient, EmbeddingsClient},
@@ -115,7 +108,7 @@ mod runtime {
     };
     use rig::{completion::ToolDefinition, tool::Tool};
     use rig_sqlite::{
-        Column, ColumnValue, SqliteSearchFilter, SqliteVectorIndex, SqliteVectorStore,
+        Column, ColumnValue, SqliteVectorStore,
         SqliteVectorStoreTable,
     };
     use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
@@ -338,41 +331,6 @@ mod runtime {
         conn: Connection,
     }
 
-    struct SqliteIndexAdapter<E, T>
-    where
-        E: rig::embeddings::EmbeddingModel + 'static,
-        T: SqliteVectorStoreTable + 'static,
-    {
-        inner: SqliteVectorIndex<E, T>,
-    }
-
-    impl<E, T> VectorStoreIndex for SqliteIndexAdapter<E, T>
-    where
-        E: rig::embeddings::EmbeddingModel + Sync + Send + 'static,
-        T: SqliteVectorStoreTable + Clone + for<'de> Deserialize<'de> + 'static,
-    {
-        type Filter = Filter<serde_json::Value>;
-
-        async fn top_n<D>(
-            &self,
-            req: VectorSearchRequest<Self::Filter>,
-        ) -> Result<Vec<(f64, String, D)>, VectorStoreError>
-        where
-            D: for<'de> Deserialize<'de> + Send,
-        {
-            let mapped = req.map_filter(Filter::interpret::<SqliteSearchFilter>);
-            self.inner.top_n(mapped).await
-        }
-
-        async fn top_n_ids(
-            &self,
-            req: VectorSearchRequest<Self::Filter>,
-        ) -> Result<Vec<(f64, String)>, VectorStoreError> {
-            let mapped = req.map_filter(Filter::interpret::<SqliteSearchFilter>);
-            self.inner.top_n_ids(mapped).await
-        }
-    }
-
     #[derive(Embed, Clone, Debug, Serialize, Deserialize)]
     pub struct MemoryFragment {
         pub id: String,
@@ -549,9 +507,30 @@ mod runtime {
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_passkeys_user_id ON passkeys(user_id);
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    token TEXT NOT NULL UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_reset_tokens_token ON password_reset_tokens(token);
                 "###,
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)?;
+
+            if table_exists(conn, "users").map_err(tokio_rusqlite::Error::Rusqlite)?
+                && !table_has_column(conn, "users", "email_verified")
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?
+            {
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .map_err(tokio_rusqlite::Error::Rusqlite)?;
+            }
 
             if table_exists(conn, "sessions").map_err(tokio_rusqlite::Error::Rusqlite)?
                 && !table_has_column(conn, "sessions", "user_id")
@@ -584,6 +563,37 @@ mod runtime {
         })
         .await
         .context("Initializing chat schema")
+    }
+
+    async fn ensure_local_test_user(conn: &Connection) -> Result<()> {
+        let email = std::env::var("LOCAL_TEST_EMAIL").unwrap_or_default();
+        let password = std::env::var("LOCAL_TEST_PASSWORD").unwrap_or_default();
+        if email.is_empty() || password.is_empty() {
+            return Ok(());
+        }
+
+        let id = Uuid::new_v4().to_string();
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| anyhow::anyhow!("Hashing failed: {}", e))?
+            .to_string();
+
+        conn.call(move |conn| {
+            conn.execute(
+                r###"
+                INSERT INTO users (id, username, password_hash)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+                "###,
+                rusqlite::params![id, email, password_hash],
+            )
+            .map_err(tokio_rusqlite::Error::Rusqlite)
+        })
+        .await?;
+
+        Ok(())
     }
 
     async fn table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
@@ -1053,10 +1063,11 @@ mod runtime {
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         histories: RwLock<HashMap<String, Vec<Message>>>,
         conn: Connection,
-        openai_client: openai::Client,
+        openai_client: openai::CompletionsClient,
+        #[allow(dead_code)]
+        embedding_client: openai::Client,
         graph_reader: GraphReaderTool,
         graph_writer: GraphManagerTool,
-        graph_user_id: String,
         webauthn: Webauthn,
         pending_registrations: DashMap<String, (Instant, String, PasskeyRegistration)>,
         pending_logins: DashMap<String, (Instant, PasskeyAuthentication)>,
@@ -1079,37 +1090,48 @@ mod runtime {
                 .await
                 .with_context(|| format!("Initializing chat schema at {db_path_display}"))?;
 
+            ensure_local_test_user(&conn).await?;
+
             let openai_key =
                 std::env::var("OPENAI_API_KEY").context("Set OPENAI_API_KEY for embeddings")?;
-            let openai_client: openai::Client = openai::Client::builder()
+            let openai_client: openai::CompletionsClient = openai::CompletionsClient::builder()
+                .api_key(openai_key.clone())
+                .build()
+                .context("Building OpenAI completions client")?;
+            let embedding_client: openai::Client = openai::Client::builder()
                 .api_key(openai_key)
                 .build()
-                .context("Building OpenAI client")?;
+                .context("Building OpenAI embedding client")?;
             let embedding_model_name = std::env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
-            let embedding_model = openai_client.embedding_model(embedding_model_name);
+            let embedding_model = embedding_client.embedding_model(embedding_model_name);
 
             let vector_store: SqliteVectorStore<_, MemoryFragment> =
                 SqliteVectorStore::new(conn.clone(), &embedding_model)
                     .await
                     .context("Initializing sqlite vector store")?;
 
-            if !table_has_rows(&conn, MemoryFragment::name()).await? {
-                let embeddings = EmbeddingsBuilder::new(embedding_model.clone())
-                    .documents(seed_memory())?
-                    .build()
-                    .await
-                    .context("Building seed embeddings")?;
-
-                vector_store
-                    .add_rows(embeddings)
-                    .await
-                    .context("Seeding sqlite vector store")?;
+            if !table_has_rows(&conn, MemoryFragment::name()).await.unwrap_or(true) {
+                let builder_result = EmbeddingsBuilder::new(embedding_model.clone())
+                    .documents(seed_memory());
+                match builder_result {
+                    Ok(builder) => {
+                        match builder.build().await {
+                            Ok(embeddings) => {
+                                if let Err(e) = vector_store.add_rows(embeddings).await {
+                                    tracing::warn!("Failed to seed vector store: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Vector store build failed: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Vector store documents failed: {}", e);
+                    }
+                }
             }
-
-            let vector_index = SqliteIndexAdapter {
-                inner: vector_store.index(embedding_model),
-            };
 
             let openrouter_key =
                 std::env::var("OPENROUTER_API_KEY").context("Set OPENROUTER_API_KEY")?;
@@ -1124,7 +1146,6 @@ mod runtime {
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model.clone()))
                     .name("individuateai_therapist")
                     .preamble(THERAPIST_SYSTEM_PROMPT)
-                    .dynamic_context(4, vector_index)
                     .build();
             let draft_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model))
@@ -1134,9 +1155,6 @@ mod runtime {
 
             let graph_reader = GraphReaderTool { conn: conn.clone() };
             let graph_writer = GraphManagerTool { conn: conn.clone() };
-            let graph_user_id = std::env::var("GRAPH_USER_ID")
-                .unwrap_or_else(|_| DEFAULT_GRAPH_USER_ID.to_string());
-
             // Initialize WebAuthn
             let rp_id = std::env::var("RP_ID").unwrap_or_else(|_| "localhost".to_string());
             let rp_origin =
@@ -1152,9 +1170,9 @@ mod runtime {
                 draft_agent,
                 histories: RwLock::new(HashMap::new()),
                 openai_client,
+                embedding_client,
                 graph_reader,
                 graph_writer,
-                graph_user_id,
                 conn,
                 webauthn,
                 pending_registrations: DashMap::new(),
@@ -2224,10 +2242,11 @@ mod runtime {
 
             let reply = self
                 .therapist_agent
-                .prompt(Message::user(prompt.clone())) // Prompt is user message
+                .prompt(Message::user(prompt.clone()))
                 .with_history(&mut history)
                 .multi_turn(2)
                 .await
+                .inspect_err(|e| tracing::error!("Therapist agent API error: {}", e))
                 .context("Running agent prompt")?;
 
             self.save_message(session_id.to_string(), "assistant".into(), reply.clone())
@@ -2641,6 +2660,156 @@ mod runtime {
         pub async fn get_user(&self, id: String) -> Result<User> {
             self.get_user_by_id(id).await
         }
+
+        // --- Password Reset ---
+
+        pub async fn generate_password_reset_token(&self, email: &str) -> Result<String> {
+            let user = self
+                .get_user_by_username(email)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("No account found with that email"))?;
+
+            let token = Uuid::new_v4().to_string();
+            let user_id = user.id.clone();
+            let token_clone = token.clone();
+
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO password_reset_tokens (user_id, token, expires_at)
+                        VALUES (?1, ?2, datetime('now', '+1 hours'))
+                        "###,
+                        rusqlite::params![user_id, token_clone],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+
+            Ok(token)
+        }
+
+        pub async fn verify_and_reset_password(
+            &self,
+            token: &str,
+            new_password: &str,
+        ) -> Result<()> {
+            let token_owned = token.to_string();
+            let (user_id,) = self
+                .conn
+                .call(move |conn| {
+                    let result: Option<(String,)> = conn
+                        .query_row(
+                            r###"
+                            SELECT user_id FROM password_reset_tokens
+                            WHERE token = ?1 AND used = 0 AND expires_at > datetime('now')
+                            "###,
+                            [token_owned],
+                            |row| Ok((row.get::<_, String>(0)?,)),
+                        )
+                        .optional()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    Ok(result)
+                })
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Invalid or expired reset token"))?;
+
+            let salt = SaltString::generate(&mut OsRng);
+            let argon2 = Argon2::default();
+            let password_hash = argon2
+                .hash_password(new_password.as_bytes(), &salt)
+                .map_err(|e| anyhow::anyhow!("Hashing failed: {}", e))?
+                .to_string();
+
+            let user_id_for_update = user_id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                        rusqlite::params![password_hash, user_id_for_update],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+
+            let token_for_use = token.to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE password_reset_tokens SET used = 1 WHERE token = ?1",
+                        [token_for_use],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+
+            Ok(())
+        }
+
+        // --- Email Verification ---
+
+        pub async fn verify_email(&self, user_id: &str) -> Result<()> {
+            let uid = user_id.to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE users SET email_verified = 1 WHERE id = ?1",
+                        [uid],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            Ok(())
+        }
+
+        pub async fn generate_email_verification_token(&self, user_id: &str) -> Result<String> {
+            let token = Uuid::new_v4().to_string();
+            let uid = user_id.to_string();
+            let token_clone = token.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO password_reset_tokens (user_id, token, expires_at)
+                        VALUES (?1, ?2, datetime('now', '+24 hours'))
+                        "###,
+                        rusqlite::params![uid, token_clone],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            Ok(token)
+        }
+
+        pub async fn verify_email_with_token(&self, token: &str) -> Result<()> {
+            let token_owned = token.to_string();
+            let (user_id,): (String,) = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        r###"
+                        SELECT user_id FROM password_reset_tokens
+                        WHERE token = ?1 AND used = 0 AND expires_at > datetime('now')
+                        "###,
+                        [token_owned],
+                        |row| Ok((row.get::<_, String>(0)?,)),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            self.verify_email(&user_id).await?;
+            let token_for_use = token.to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "UPDATE password_reset_tokens SET used = 1 WHERE token = ?1",
+                        [token_for_use],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            Ok(())
+        }
     }
 
     static GLOBAL_AGENT: OnceCell<Arc<AgentRuntime>> = OnceCell::const_new();
@@ -2653,18 +2822,6 @@ mod runtime {
     }
 
     // -- Auth Middleware Helpers --
-
-    pub async fn get_current_user_id() -> Result<String, ServerFnError> {
-        let headers: HeaderMap = leptos_axum::extract().await?;
-        let key = cookie_key();
-        let jar = PrivateCookieJar::from_headers(&headers, key);
-
-        if let Some(cookie) = jar.get(AUTH_COOKIE_NAME) {
-            Ok(cookie.value().to_string())
-        } else {
-            Err(ServerFnError::ServerError("Unauthorized".into()))
-        }
-    }
 
     pub fn cookie_is_secure(headers: &HeaderMap) -> bool {
         if let Some(proto) = headers
@@ -2802,541 +2959,210 @@ mod runtime {
     fn internal_err(e: impl std::fmt::Display) -> (StatusCode, String) {
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     }
-}
 
-#[cfg(feature = "ssr")]
-pub use runtime::{agent_runtime, cookie_key, draft_stream_handler, graph_handler, stream_handler};
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-#[cfg(feature = "ssr")]
-fn server_error(err: impl std::fmt::Display) -> ServerFnError {
-    let message = format!("{:#}", err);
-    eprintln!("[agent_serverfn] {}", message);
-    ServerFnError::ServerError(message)
-}
-
-#[server(GetContextUser, "/api")]
-pub async fn get_context_user() -> Result<Option<User>, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        use axum_extra::extract::cookie::{Key, PrivateCookieJar};
-        let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-        let key = runtime::cookie_key();
-        let jar = PrivateCookieJar::from_headers(&headers, key);
-
-        if let Some(cookie) = jar.get(runtime::AUTH_COOKIE_NAME) {
-            let user_id = cookie.value().to_string();
-            let agent = agent_runtime().await.map_err(server_error)?;
-            match agent.get_user(user_id).await {
-                Ok(u) => Ok(Some(u)),
-                Err(_) => Ok(None),
-            }
-        } else {
-            Ok(None)
-        }
-    }
-    #[cfg(not(feature = "ssr"))]
-    Err(ServerFnError::ServerError("SSR only".into()))
-}
-
-#[server(Login, "/api")]
-pub async fn login(username: String, pass: String) -> Result<User, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        let user = agent
-            .login(username, pass)
-            .await
-            .map_err(|_| server_error("Invalid credentials"))?;
-
-        use axum_extra::extract::cookie::{Cookie, Key};
-        use cookie::CookieJar;
-        use leptos_axum::ResponseOptions;
-
-        let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-        let secure_cookie = runtime::cookie_is_secure(&headers);
-        let key = runtime::cookie_key();
-
-        let cookie = Cookie::build((runtime::AUTH_COOKIE_NAME, user.id.clone()))
-            .path("/")
-            .secure(secure_cookie)
-            .http_only(true)
-            .max_age(time::Duration::days(30))
-            .build();
-
-        let mut jar = CookieJar::new();
-        jar.private_mut(&key).add(cookie);
-
-        if let Some(opts) = leptos::use_context::<ResponseOptions>() {
-            for cookie in jar.delta() {
-                let header_val = cookie.encoded().to_string();
-                opts.append_header(
-                    axum::http::header::SET_COOKIE,
-                    axum::http::HeaderValue::from_str(&header_val).map_err(server_error)?,
-                );
-            }
+        #[test]
+        fn test_tokenize_basic() {
+            let tokens = tokenize("hello world example");
+            assert!(tokens.contains("hello"));
+            assert!(tokens.contains("world"));
+            assert!(tokens.contains("example"));
+            assert_eq!(tokens.len(), 3);
         }
 
-        Ok(user)
-    }
-    #[cfg(not(feature = "ssr"))]
-    Err(ServerFnError::ServerError("SSR only".into()))
-}
-
-#[server(Signup, "/api")]
-pub async fn signup(username: String, pass: String) -> Result<User, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        match agent.signup(username, pass).await {
-            Ok(user) => {
-                use axum_extra::extract::cookie::{Cookie, Key};
-                use cookie::CookieJar;
-                use leptos_axum::ResponseOptions;
-
-                let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-                let secure_cookie = runtime::cookie_is_secure(&headers);
-                let key = runtime::cookie_key();
-
-                let cookie = Cookie::build((runtime::AUTH_COOKIE_NAME, user.id.clone()))
-                    .path("/")
-                    .secure(secure_cookie)
-                    .http_only(true)
-                    .max_age(time::Duration::days(30))
-                    .build();
-
-                let mut jar = CookieJar::new();
-                jar.private_mut(&key).add(cookie);
-
-                if let Some(opts) = leptos::use_context::<ResponseOptions>() {
-                    for cookie in jar.delta() {
-                        let header_val = cookie.encoded().to_string();
-                        opts.append_header(
-                            axum::http::header::SET_COOKIE,
-                            axum::http::HeaderValue::from_str(&header_val).map_err(server_error)?,
-                        );
-                    }
-                }
-                Ok(user)
-            }
-            Err(e) => Err(server_error(e)),
-        }
-    }
-    #[cfg(not(feature = "ssr"))]
-    Err(ServerFnError::ServerError("SSR only".into()))
-}
-
-#[server(Logout, "/api")]
-pub async fn logout() -> Result<(), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        use axum_extra::extract::cookie::{Cookie, Key};
-        use cookie::CookieJar;
-        use leptos_axum::ResponseOptions;
-
-        let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-        let secure_cookie = runtime::cookie_is_secure(&headers);
-        let key = runtime::cookie_key();
-
-        let mut jar = CookieJar::new();
-        let mut removal = Cookie::build((runtime::AUTH_COOKIE_NAME, ""))
-            .path("/")
-            .secure(secure_cookie)
-            .http_only(true)
-            .max_age(time::Duration::seconds(0))
-            .build();
-        removal.make_removal();
-        jar.private_mut(&key).add(removal);
-
-        if let Some(opts) = leptos::use_context::<ResponseOptions>() {
-            for cookie in jar.delta() {
-                let header_val = cookie.encoded().to_string();
-                opts.append_header(
-                    axum::http::header::SET_COOKIE,
-                    axum::http::HeaderValue::from_str(&header_val).map_err(server_error)?,
-                );
-            }
+        #[test]
+        fn test_tokenize_short_words() {
+            let tokens = tokenize("a be");
+            assert!(tokens.is_empty(), "Words shorter than 3 chars should be excluded");
         }
 
-        Ok(())
-    }
-    #[cfg(not(feature = "ssr"))]
-    Err(ServerFnError::ServerError("SSR only".into()))
-}
-
-#[server(AgentChat, "/api")]
-pub async fn agent_chat(prompt: String, session_id: String) -> Result<String, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        return match agent.respond(&user_id, &session_id, prompt.clone()).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => Err(server_error(e)),
-        };
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (prompt, session_id);
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(DraftMessage, "/api")]
-pub async fn draft_message(
-    prompt: String,
-    session_id: String,
-    relationship_slug: String,
-    intent: String,
-    accountability: i32,
-    spirituality: i32,
-    directness: i32,
-) -> Result<String, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        return agent
-            .draft_message(
-                &user_id,
-                &session_id,
-                relationship_slug,
-                intent,
-                prompt,
-                accountability,
-                spirituality,
-                directness,
-            )
-            .await
-            .map_err(server_error);
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (
-            prompt,
-            session_id,
-            relationship_slug,
-            intent,
-            accountability,
-            spirituality,
-            directness,
-        );
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(GetSessions, "/api")]
-pub async fn get_sessions() -> Result<Vec<Session>, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent.list_sessions(user_id).await.map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(CreateSession, "/api")]
-pub async fn create_session(title: String) -> Result<Session, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .create_new_session(user_id, title)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = title;
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(GetChatHistory, "/api")]
-pub async fn get_chat_history(session_id: String) -> Result<Vec<ChatLog>, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .get_session_history(user_id, session_id)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = session_id;
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(GetPatientGraph, "/api")]
-pub async fn get_patient_graph(user_id: String) -> Result<PatientGraph, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        // Ensure requestor is the user
-        let current_uid = runtime::get_current_user_id().await?;
-        if current_uid != user_id {
-            return Err(ServerFnError::ServerError("Unauthorized".into()));
+        #[test]
+        fn test_tokenize_case_insensitive() {
+            let tokens = tokenize("Hello WORLD");
+            assert!(tokens.contains("hello"));
+            assert!(tokens.contains("world"));
         }
 
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent.get_patient_graph(user_id).await.map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = user_id;
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(GetRelationshipProfiles, "/api")]
-pub async fn get_relationship_profiles() -> Result<Vec<RelationshipProfile>, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .get_relationship_profiles(user_id)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(SaveRelationshipProfile, "/api")]
-pub async fn save_relationship_profile(
-    slug: String,
-    display_name: String,
-    relationship_type: String,
-    background: String,
-    goals: Vec<String>,
-    triggers: Vec<String>,
-    do_not_say: Vec<String>,
-    effective_tone: Vec<String>,
-    recent_events: Vec<String>,
-    boundaries: Vec<String>,
-) -> Result<(), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .save_relationship_profile(RelationshipProfile {
-                user_id,
-                slug,
-                display_name,
-                relationship_type,
-                background,
-                goals,
-                triggers,
-                do_not_say,
-                effective_tone,
-                recent_events,
-                boundaries,
-            })
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (
-            slug,
-            display_name,
-            relationship_type,
-            background,
-            goals,
-            triggers,
-            do_not_say,
-            effective_tone,
-            recent_events,
-            boundaries,
-        );
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-// --- Passkey Server Functions ---
-
-#[server(StartPasskeyRegister, "/api")]
-pub async fn start_passkey_register(
-) -> Result<(String, webauthn_rs_proto::CreationChallengeResponse), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let user_id = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .start_passkey_registration(user_id)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    Err(ServerFnError::ServerError("SSR only".into()))
-}
-
-#[server(FinishPasskeyRegister, "/api")]
-pub async fn finish_passkey_register(
-    req_id: String,
-    response: webauthn_rs_proto::RegisterPublicKeyCredential,
-) -> Result<(), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let _ = runtime::get_current_user_id().await?;
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .finish_passkey_registration(req_id, response)
-            .await
-            .map_err(server_error)?;
-        Ok(())
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (req_id, response);
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(StartPasskeyRegisterEmail, "/api")]
-pub async fn start_passkey_register_email(
-    email: String,
-) -> Result<(String, webauthn_rs_proto::CreationChallengeResponse), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .start_passkey_registration_email(email)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = email;
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(FinishPasskeyRegisterEmail, "/api")]
-pub async fn finish_passkey_register_email(
-    req_id: String,
-    response: webauthn_rs_proto::RegisterPublicKeyCredential,
-) -> Result<(), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        let user = agent
-            .finish_passkey_registration(req_id, response)
-            .await
-            .map_err(server_error)?;
-
-        use axum_extra::extract::cookie::{Cookie, Key};
-        use cookie::CookieJar;
-        use leptos_axum::ResponseOptions;
-
-        let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-        let secure_cookie = runtime::cookie_is_secure(&headers);
-        let key = runtime::cookie_key();
-
-        let cookie = Cookie::build((runtime::AUTH_COOKIE_NAME, user.id.clone()))
-            .path("/")
-            .secure(secure_cookie)
-            .http_only(true)
-            .max_age(time::Duration::days(30))
-            .build();
-
-        let mut jar = CookieJar::new();
-        jar.private_mut(&key).add(cookie);
-
-        if let Some(opts) = leptos::use_context::<ResponseOptions>() {
-            for cookie in jar.delta() {
-                let header_val = cookie.encoded().to_string();
-                opts.append_header(
-                    axum::http::header::SET_COOKIE,
-                    axum::http::HeaderValue::from_str(&header_val).map_err(server_error)?,
-                );
-            }
+        #[test]
+        fn test_tokenize_special_chars() {
+            let tokens = tokenize("hello-world! example_test");
+            assert!(tokens.contains("hello"));
+            assert!(tokens.contains("world"));
+            assert!(tokens.contains("example"));
+            assert!(tokens.contains("test"));
         }
 
-        Ok(())
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (req_id, response);
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(StartPasskeyLogin, "/api")]
-pub async fn start_passkey_login(
-    username: String,
-) -> Result<(String, webauthn_rs_proto::RequestChallengeResponse), ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        agent
-            .start_passkey_login(username)
-            .await
-            .map_err(server_error)
-    }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = username;
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
-}
-
-#[server(FinishPasskeyLogin, "/api")]
-pub async fn finish_passkey_login(
-    req_id: String,
-    response: webauthn_rs_proto::PublicKeyCredential,
-) -> Result<User, ServerFnError> {
-    #[cfg(feature = "ssr")]
-    {
-        let agent = agent_runtime().await.map_err(server_error)?;
-        let user = agent
-            .finish_passkey_login(req_id, response)
-            .await
-            .map_err(server_error)?;
-
-        // Auto-login (Cookie) logic copied from login/signup
-        use axum_extra::extract::cookie::{Cookie, Key};
-        use cookie::CookieJar;
-        use leptos_axum::ResponseOptions;
-
-        let headers: axum::http::HeaderMap = leptos_axum::extract().await?;
-        let secure_cookie = runtime::cookie_is_secure(&headers);
-        let key = runtime::cookie_key();
-
-        let cookie = Cookie::build((runtime::AUTH_COOKIE_NAME, user.id.clone()))
-            .path("/")
-            .secure(secure_cookie)
-            .http_only(true)
-            .max_age(time::Duration::days(30))
-            .build();
-
-        let mut jar = CookieJar::new();
-        jar.private_mut(&key).add(cookie);
-
-        if let Some(opts) = leptos::use_context::<ResponseOptions>() {
-            for cookie in jar.delta() {
-                let header_val = cookie.encoded().to_string();
-                opts.append_header(
-                    axum::http::header::SET_COOKIE,
-                    axum::http::HeaderValue::from_str(&header_val).map_err(server_error)?,
-                );
-            }
+        #[test]
+        fn test_normalize_slug() {
+            assert_eq!(normalize_slug("Hello World"), "hello_world");
+            assert_eq!(normalize_slug("  leading trailing  "), "leading_trailing");
+            assert_eq!(normalize_slug("already_snake"), "already_snake");
         }
-        Ok(user)
+
+        #[test]
+        fn test_canonical_relationship_slug_mother() {
+            assert_eq!(canonical_relationship_slug("mom", "", ""), "mother");
+            assert_eq!(canonical_relationship_slug("mother", "", ""), "mother");
+            assert_eq!(canonical_relationship_slug("mum", "", ""), "mother");
+            assert_eq!(canonical_relationship_slug("mama", "", ""), "mother");
+        }
+
+        #[test]
+        fn test_canonical_relationship_slug_partner() {
+            assert_eq!(canonical_relationship_slug("partner", "", ""), "partner");
+            assert_eq!(canonical_relationship_slug("wife", "", ""), "partner");
+            assert_eq!(canonical_relationship_slug("girlfriend", "", ""), "partner");
+            assert_eq!(canonical_relationship_slug("husband", "", ""), "partner");
+        }
+
+        #[test]
+        fn test_merge_unique_strings() {
+            let existing = vec!["a".into(), "b".into()];
+            let incoming = vec!["b".into(), "c".into()];
+            let merged = merge_unique_strings(&existing, &incoming, 10);
+            assert_eq!(merged, vec!["a", "b", "c"]);
+        }
+
+        #[test]
+        fn test_merge_unique_strings_limit() {
+            let existing = vec!["a".into(), "b".into()];
+            let incoming = vec!["c".into(), "d".into()];
+            let merged = merge_unique_strings(&existing, &incoming, 3);
+            assert_eq!(merged.len(), 3);
+            assert_eq!(merged, vec!["a", "b", "c"]);
+        }
+
+        #[test]
+        fn test_merge_unique_strings_duplicates() {
+            let existing = vec!["hello".into(), "world".into()];
+            let incoming = vec!["HELLO".into(), "World".into(), "again".into()];
+            let merged = merge_unique_strings(&existing, &incoming, 10);
+            assert_eq!(merged.len(), 3);
+            assert!(merged.contains(&"hello".to_string()));
+        }
+
+        #[test]
+        fn test_merge_background_empty() {
+            assert_eq!(merge_background("", "new info"), "new info");
+            assert_eq!(merge_background("existing", ""), "existing");
+            assert_eq!(merge_background("", ""), "");
+        }
+
+        #[test]
+        fn test_merge_background_duplicate() {
+            assert_eq!(merge_background("some text", "some text"), "some text");
+        }
+
+        #[test]
+        fn test_merge_background_contains() {
+            assert_eq!(merge_background("longer text here", "text"), "longer text here");
+            assert_eq!(merge_background("text", "longer text here"), "longer text here");
+        }
+
+        #[test]
+        fn test_merge_background_combine() {
+            let result = merge_background("first part", "second part");
+            assert_eq!(result, "first part second part");
+        }
+
+        #[test]
+        fn test_overlap_score() {
+            let query = tokenize("hello world test");
+            let score = overlap_score("hello world", &query);
+            assert_eq!(score, 2);
+        }
+
+        #[test]
+        fn test_overlap_score_no_match() {
+            let query = tokenize("hello world");
+            let score = overlap_score("completely different", &query);
+            assert_eq!(score, 0);
+        }
+
+        #[test]
+        fn test_fallback_session_preview() {
+            let logs = vec![
+                ChatLog { role: "user".into(), content: "first".into() },
+                ChatLog { role: "assistant".into(), content: "I am helping you explore".into() },
+                ChatLog { role: "user".into(), content: "last message".into() },
+            ];
+            let preview = fallback_session_preview(&logs);
+            assert_eq!(preview, "last message");
+        }
+
+        #[test]
+        fn test_fallback_session_preview_empty() {
+            let logs: Vec<ChatLog> = vec![];
+            let preview = fallback_session_preview(&logs);
+            assert_eq!(preview, "Begin exploring what's here.");
+        }
+
+        #[test]
+        fn test_compress_chat_logs() {
+            let logs = vec![
+                ChatLog { role: "user".into(), content: "hello".into() },
+                ChatLog { role: "assistant".into(), content: "hi there".into() },
+            ];
+            let compressed = compress_chat_logs(&logs, 1000);
+            assert!(compressed.contains("user: hello"));
+            assert!(compressed.contains("assistant: hi there"));
+        }
+
+        #[test]
+        fn test_compress_chat_logs_max_chars() {
+            let logs = vec![
+                ChatLog { role: "user".into(), content: "very long message that should be truncated".into() },
+                ChatLog { role: "assistant".into(), content: "short".into() },
+            ];
+            let compressed = compress_chat_logs(&logs, 20);
+            assert!(compressed.len() <= 20);
+        }
+
+        #[test]
+        fn test_join_items() {
+            assert_eq!(join_items(&[]), "none");
+            assert_eq!(join_items(&["a".into()]), "a");
+            assert_eq!(join_items(&["a".into(), "b".into()]), "a, b");
+        }
+
+        #[test]
+        fn test_password_reset_token_generation() {
+            let token = Uuid::new_v4().to_string();
+            assert_eq!(token.len(), 36);
+            assert!(token.contains('-'));
+        }
     }
-    #[cfg(not(feature = "ssr"))]
-    {
-        let _ = (req_id, response);
-        Err(ServerFnError::ServerError("SSR only".into()))
-    }
+}
+
+pub use runtime::{
+    agent_runtime, cookie_key, draft_stream_handler, graph_handler, stream_handler,
+};
+
+pub fn has_auth_cookie(
+    headers: &axum::http::HeaderMap,
+    key: &axum_extra::extract::cookie::Key,
+) -> bool {
+    use axum_extra::extract::cookie::PrivateCookieJar;
+
+    let jar = PrivateCookieJar::from_headers(headers, key.clone());
+    jar.get(AUTH_COOKIE_NAME).is_some()
+}
+
+pub fn cookie_is_secure(headers: &axum::http::HeaderMap) -> bool {
+    runtime::cookie_is_secure(headers)
+}
+
+pub fn extract_user_id_from_headers(
+    headers: &axum::http::HeaderMap,
+    key: &axum_extra::extract::cookie::Key,
+) -> Result<String, anyhow::Error> {
+    use axum_extra::extract::cookie::PrivateCookieJar;
+
+    let jar = PrivateCookieJar::from_headers(headers, key.clone());
+    jar.get(AUTH_COOKIE_NAME)
+        .map(|c| c.value().to_string())
+        .ok_or_else(|| anyhow::anyhow!("Unauthorized"))
 }

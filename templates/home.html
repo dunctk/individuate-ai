@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block content %}
+<body class="bg-void-green text-parchment font-urbanist selection:bg-integral-turquoise selection:text-void-green overflow-hidden"
+      data-user-id="{{ user_id }}"
+      data-username="{{ username }}">
+<div id="sidebar-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="toggleSidebar()"></div>
+<div id="profile-overlay" class="fixed inset-0 bg-black/50 z-30 hidden" onclick="closeProfileDrawer()"></div>
+
+<aside id="sidebar"
+    class="fixed top-0 left-0 z-40 h-full w-72 bg-[#152520] border-r border-sage-mist/20 transform -translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"
+    hx-get="/fragments/sidebar" hx-trigger="load" hx-target="#sidebar"></aside>
+
+<aside id="profile-drawer"
+    class="fixed top-0 right-0 z-40 h-full w-80 bg-[#152520] border-l border-sage-mist/20 transform translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"></aside>
+
+<div id="main-content" class="h-screen flex flex-col">
+    <header class="flex items-center justify-between px-4 py-3 border-b border-sage-mist/20 shrink-0">
+        <div class="flex items-center gap-3">
+            <button onclick="toggleSidebar()" class="text-parchment hover:text-integral-turquoise transition-colors">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+            <h1 class="text-lg font-fraunces font-bold text-integral-turquoise">IndividuateAI</h1>
+        </div>
+        <div class="flex items-center gap-3">
+            <button onclick="openProfileDrawer()" class="text-sm text-sage-mist hover:text-integral-turquoise transition-colors">Profiles</button>
+            <a href="/mind-map" class="text-sm text-sage-mist hover:text-integral-turquoise transition-colors">Mind Map</a>
+        </div>
+    </header>
+
+    <div id="chat-messages" class="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+    </div>
+
+    <div class="border-t border-sage-mist/20 shrink-0">
+        <div id="mode-toggle" class="flex items-center justify-center gap-2 px-4 py-2 bg-[#152520]">
+            <button onclick="setMode('therapist')" id="mode-therapist"
+                class="px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium">Therapist</button>
+            <button onclick="setMode('draft')" id="mode-draft"
+                class="px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors">Draft</button>
+        </div>
+        <div id="draft-controls" class="hidden px-4 py-2 bg-[#152520] border-t border-sage-mist/10">
+            <select id="draft-profile-select" class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-1.5 text-xs text-parchment"></select>
+        </div>
+        <div class="flex items-end gap-2 px-4 py-3 bg-[#152520]">
+            <div id="presets" class="flex gap-1 shrink-0">
+                <button onclick="submitPreset('I need to set a boundary')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Boundary</button>
+                <button onclick="submitPreset('I need to apologize')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Apologize</button>
+                <button onclick="submitPreset('I need to express a need')" class="px-2 py-1 text-[10px] bg-sage-mist/20 text-sage-mist rounded hover:bg-sage-mist/30 transition-colors">Need</button>
+            </div>
+            <input id="chat-input" type="text" autofocus
+                placeholder="What happened, and what do you want to say?"
+                class="flex-1 bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
+            <button onclick="submitChat()"
+                class="bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors shrink-0">
+                Send
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div>
+
+<script>
+let currentMode = 'therapist';
+let currentSessionId = '{{ session_id }}';
+let currentUserId = '{{ user_id }}';
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const isOpen = !sidebar.classList.contains('-translate-x-full');
+    sidebar.classList.toggle('-translate-x-full', isOpen);
+    sidebar.classList.toggle('translate-x-0', !isOpen);
+    overlay.classList.toggle('hidden', isOpen);
+}
+
+function openProfileDrawer() {
+    const drawer = document.getElementById('profile-drawer');
+    const overlay = document.getElementById('profile-overlay');
+    drawer.classList.remove('translate-x-full');
+    drawer.classList.add('translate-x-0');
+    overlay.classList.remove('hidden');
+    htmx.ajax('GET', '/fragments/profile-drawer', { target: '#profile-drawer' });
+}
+
+function closeProfileDrawer() {
+    const drawer = document.getElementById('profile-drawer');
+    const overlay = document.getElementById('profile-overlay');
+    drawer.classList.add('translate-x-full');
+    drawer.classList.remove('translate-x-0');
+    overlay.classList.add('hidden');
+}
+
+function setMode(mode) {
+    currentMode = mode;
+    document.getElementById('mode-therapist').className = mode === 'therapist'
+        ? 'px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium'
+        : 'px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors';
+    document.getElementById('mode-draft').className = mode === 'draft'
+        ? 'px-3 py-1 text-xs rounded-full border border-integral-turquoise text-integral-turquoise bg-integral-turquoise/10 font-medium'
+        : 'px-3 py-1 text-xs rounded-full border border-sage-mist text-sage-mist hover:border-integral-turquoise hover:text-integral-turquoise transition-colors';
+    document.getElementById('draft-controls').classList.toggle('hidden', mode !== 'draft');
+    document.getElementById('chat-input').placeholder = mode === 'draft'
+        ? 'Describe the message you want to draft...'
+        : 'What happened, and what do you want to say?';
+}
+
+function setSlider(id, value) {
+    const el = document.getElementById(id + '-value');
+    if (el) el.textContent = value + '%';
+}
+
+function selectSession(sessionId) {
+    window.location.href = '/?session=' + sessionId;
+}
+
+async function addMessage(role, content) {
+    const container = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = 'animate-fade-in-up';
+    const label = role === 'therapist' ? 'Therapist' : 'You';
+    const align = role === 'therapist' ? 'items-start' : 'items-end';
+    const bg = role === 'therapist' ? 'bg-sage-mist/20' : 'bg-integral-turquoise/20';
+    div.innerHTML = '<div class="flex flex-col ' + align + '"><span class="text-xs text-sage-mist mb-1 px-1">' + label + '</span><div class="max-w-[80%] rounded-xl px-4 py-2 ' + bg + ' text-sm text-parchment">' + escapeHtml(content) + '</div></div>';
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+async function submitChat() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    addMessage('user', text);
+    try {
+        const resp = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: currentSessionId,
+                message: text,
+                mode: currentMode
+            })
+        });
+        if (!resp.ok) throw new Error('Chat request failed');
+        const data = await resp.json();
+        if (data.session_id) currentSessionId = data.session_id;
+        if (data.response) addMessage('therapist', data.response);
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function buildStreamUrl(sessionId) { return '/api/chat-stream/' + sessionId; }
+
+function submitPreset(preset) {
+    document.getElementById('chat-input').value = preset;
+    submitChat();
+}
+
+function refreshSidebar() {
+    htmx.ajax('GET', '/fragments/sidebar', { target: '#sidebar' });
+}
+
+function showToast(message, type) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = 'px-4 py-2 rounded-lg text-sm shadow-lg animate-fade-in-up ' + (type === 'error' ? 'bg-red-500/90 text-white' : 'bg-integral-turquoise/90 text-void-green');
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 3000);
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+async function registerAdditionalPasskey() {
+    try {
+        const resp = await fetch('/api/passkey/register/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: currentUserId })
+        });
+        if (!resp.ok) throw new Error('Start failed');
+        const { challenge_id, options } = await resp.json();
+        const cred = await window.registerPasskey(options);
+        const verify = await fetch('/api/passkey/register/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ challenge_id, credential: cred })
+        });
+        if (!verify.ok) throw new Error('Verification failed');
+        showToast('Passkey registered');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+</script>
+<style>
+@keyframes fade-in-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up { animation: fade-in-up 0.3s ease-out; }
+#chat-messages::-webkit-scrollbar { width: 6px; }
+#chat-messages::-webkit-scrollbar-track { background: transparent; }
+#chat-messages::-webkit-scrollbar-thumb { background: #4A635D; border-radius: 3px; }
+#chat-messages::-webkit-scrollbar-thumb:hover { background: #5d7d73; }
+</style>
+{% endblock %}

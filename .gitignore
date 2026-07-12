@@ -4,7 +4,11 @@
 *.wal
 *.log
 .env
+.DS_Store
 target/
+node_modules/
+.playwright-cli/
+.playwright-mcp/
 
 .gemini-clipboard
 
@@ -14,3 +18,4 @@ target/
 /target
 
 .gemini-clipboard/
+data/

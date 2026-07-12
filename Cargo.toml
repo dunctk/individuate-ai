@@ -10,7 +10,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 minijinja = "2"
-cookie = { version = "0.18", features = ["private", "percent-encode"] }
+cookie = { version = "0.18", features = ["private", "percent-encode", "key-expansion"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

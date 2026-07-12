@@ -310,21 +310,30 @@ mod runtime {
         Avoid generic words like therapy session, check-in, conversation, or support unless necessary.
     "###;
 
-    pub(crate) const COOKIE_SECRET: &[u8] =
-        b"SUPER_SECRET_KEY_MUST_BE_CHANGED_IN_PROD_12345678901234567890123456789012";
     pub(crate) const AUTH_COOKIE_NAME: &str = "auth_token";
 
+    /// Cookie signing/encryption key derived (HKDF, via `Key::derive_from`)
+    /// from the mandatory COOKIE_SECRET env var. Fails closed: no secret, no
+    /// server — there is deliberately no built-in fallback key.
     pub fn cookie_key() -> Key {
-        if let Ok(secret) = std::env::var("COOKIE_SECRET") {
-            if !secret.trim().is_empty() {
-                let mut key_bytes = [0u8; 64];
-                for (index, byte) in secret.as_bytes().iter().enumerate() {
-                    key_bytes[index % key_bytes.len()] ^= *byte;
-                }
-                return Key::from(&key_bytes);
-            }
-        }
-        Key::from(COOKIE_SECRET)
+        static KEY: std::sync::OnceLock<Key> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let secret = std::env::var("COOKIE_SECRET")
+                .ok()
+                .map(|secret| secret.trim().to_string())
+                .filter(|secret| !secret.is_empty())
+                .expect(
+                    "COOKIE_SECRET must be set to a random secret of at least 32 characters \
+                     (e.g. `openssl rand -hex 32`); refusing to run without one",
+                );
+            assert!(
+                secret.len() >= 32,
+                "COOKIE_SECRET must be at least 32 characters, got {}",
+                secret.len()
+            );
+            Key::derive_from(secret.as_bytes())
+        })
+        .clone()
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -661,6 +670,16 @@ mod runtime {
             }
         }
         Ok(())
+    }
+
+    /// OpenRouter provider preferences sent with every completion/extraction
+    /// request. `data_collection: deny` restricts routing to providers that do
+    /// not retain or train on prompts; set OPENROUTER_DATA_COLLECTION=allow to
+    /// opt out (e.g. if a model has no zero-retention provider).
+    fn openrouter_privacy_params() -> serde_json::Value {
+        let policy =
+            std::env::var("OPENROUTER_DATA_COLLECTION").unwrap_or_else(|_| "deny".to_string());
+        serde_json::json!({ "provider": { "data_collection": policy } })
     }
 
     fn memory_db_key() -> Option<String> {
@@ -3182,12 +3201,14 @@ mod runtime {
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model.clone()))
                     .name("individuateai_therapist")
                     .preamble(THERAPIST_SYSTEM_PROMPT)
+                    .additional_params(openrouter_privacy_params())
                     .tool(CurrentDateTimeTool)
                     .build();
             let draft_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model))
                     .name("individuateai_drafter")
                     .preamble(DRAFT_SYSTEM_PROMPT)
+                    .additional_params(openrouter_privacy_params())
                     .build();
 
             let graph_reader = GraphReaderTool { conn: conn.clone() };
@@ -3727,6 +3748,7 @@ mod runtime {
                 .openrouter_client
                 .extractor::<SessionSummaryData>(&model)
                 .preamble(SESSION_SUMMARY_PROMPT)
+                .additional_params(openrouter_privacy_params())
                 .build();
 
             let fallback_preview = fallback_session_preview(&logs);
@@ -4169,6 +4191,7 @@ mod runtime {
                 .extractor::<RelationshipProfileDelta>(&model)
                 .preamble(RELATIONSHIP_PROFILE_PROMPT)
                 .context(&existing_context)
+                .additional_params(openrouter_privacy_params())
                 .build();
 
             extractor
@@ -4258,6 +4281,7 @@ mod runtime {
                 .extractor::<SocialRelationshipDelta>(&model)
                 .preamble(SOCIAL_RELATIONSHIP_PROMPT)
                 .context(&existing_context)
+                .additional_params(openrouter_privacy_params())
                 .build();
 
             extractor
@@ -4339,6 +4363,7 @@ mod runtime {
                 .extractor::<EpisodeDelta>(&model)
                 .preamble(EPISODE_PROMPT)
                 .context(&context)
+                .additional_params(openrouter_privacy_params())
                 .build();
 
             extractor
@@ -4785,6 +4810,7 @@ mod runtime {
                 .extractor::<ConversationGraphDelta>(&model)
                 .preamble(GRAPH_DELTA_PROMPT)
                 .context(&context)
+                .additional_params(openrouter_privacy_params())
                 .build();
 
             let transcript = format!("User: {}\nAssistant: {}", prompt, reply);

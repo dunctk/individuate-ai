@@ -47,3 +47,5 @@
 - Feature flags control build mode: `ssr` for server builds, `hydrate` for client builds; `cargo-leptos` selects them automatically—avoid manual toggling unless you know the target.
 - Configure memory and extraction with environment variables rather than checked-in config; most model env vars default to lightweight OpenRouter/OpenAI models in `src/agent.rs`.
 - Do not commit secrets; prefer environment variables loaded by your process manager when deploying the Axum server.
+- `COOKIE_SECRET` (min 32 chars, e.g. `openssl rand -hex 32`) is required; the server fails closed at startup without it, and rotating it logs every user out.
+- OpenRouter requests send `provider.data_collection = deny` so prompts are only routed to zero-retention providers; set `OPENROUTER_DATA_COLLECTION=allow` if a chosen model has no such provider.

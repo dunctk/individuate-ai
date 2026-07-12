@@ -24,11 +24,11 @@ rig-core = { version = "0.26", features = ["derive"] }
 rig-sqlite = "0.1.29"
 sqlite-vec = "0.1"
 tokio-rusqlite = { version = "0.6", features = ["bundled"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 anyhow = "1"
 argon2 = "0.5.3"
-time = "0.3.44"
+time = { version = "0.3.44", features = ["local-offset"] }
 dashmap = "6.1.0"
 webauthn-rs = "0.5.4"
 webauthn-rs-proto = "0.5.4"

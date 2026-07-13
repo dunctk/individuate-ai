@@ -39,3 +39,9 @@ Open [http://localhost:3008](http://localhost:3008) in your browser.
 *   **Frontend**: Leptos (WASM).
 *   **Server**: Axum (SSR).
 *   **Styling**: Tailwind CSS (v3).
+
+## License
+
+Copyright (C) 2026 Duncan. Licensed under the [GNU AGPL v3.0 or later](LICENSE):
+if you run a modified version of this software as a network service, you must
+make your modified source available to its users.

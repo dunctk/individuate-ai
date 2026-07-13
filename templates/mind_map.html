@@ -1,28 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="h-screen flex flex-col">
-    <header class="flex items-center justify-between px-4 py-3 border-b border-sage-mist/20 shrink-0">
-        <div class="flex items-center gap-3">
-            <a href="/" class="text-sage-mist hover:text-integral-turquoise transition-colors">
+    <header class="glass flex items-center justify-between gap-3 px-4 py-3 border-b border-sage-mist/20 shrink-0 z-20">
+        <div class="flex items-center gap-3 min-w-0">
+            <a href="/" class="icon-btn shrink-0" aria-label="Back to chat">
                 <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
-                Back to Chat
             </a>
-            <h1 class="text-lg font-fraunces font-bold text-integral-turquoise">Mind Map</h1>
+            <div class="min-w-0">
+                <p class="role-label">Reflective graph</p>
+                <h1 class="text-lg sm:text-xl font-fraunces font-bold text-parchment truncate">Mind Map</h1>
+            </div>
         </div>
-        <div class="flex items-center gap-2">
-            <button onclick="resetView()"
-                class="px-3 py-1.5 text-xs border border-sage-mist text-sage-mist rounded-lg hover:border-integral-turquoise hover:text-integral-turquoise transition-colors">
-                Reset View
+        <div class="flex items-center gap-2 shrink-0">
+            <button onclick="resetView()" class="pill" data-active="false">
+                Reset
             </button>
-            <button id="sync-btn" hx-post="/api/graph/sync" hx-target="#sync-status"
-                class="px-3 py-1.5 text-xs bg-integral-turquoise text-void-green rounded-lg font-medium hover:bg-integral-turquoise/90 transition-colors">
-                Sync Graph
+            <button id="refresh-btn" onclick="location.reload()" class="btn-primary text-xs">
+                Refresh
             </button>
-            <span id="sync-status" class="text-xs text-sage-mist"></span>
         </div>
     </header>
 
-    <div id="mind-map-container" class="flex-1 relative">
+    <div id="mind-map-container" class="flex-1 relative overflow-hidden">
         {% if graph_data.nodes|length == 0 %}
         <div class="absolute inset-0 flex items-center justify-center">
             <div class="text-center">
@@ -32,38 +31,225 @@
         </div>
         {% endif %}
         <div id="mind-map-canvas" class="w-full h-full"></div>
-    </div>
 
-    <div id="stats-overlay" class="fixed bottom-4 left-4 bg-[#152520]/90 border border-sage-mist/20 rounded-lg px-3 py-2 text-xs text-sage-mist space-y-0.5">
-        <div>Nodes: <span id="node-count">{{ graph_data.nodes|length }}</span></div>
-        <div>Edges: <span id="edge-count">{{ graph_data.edges|length }}</span></div>
-    </div>
-
-    <div id="legend-overlay" class="fixed bottom-4 right-4 bg-[#152520]/90 border border-sage-mist/20 rounded-lg px-3 py-2 space-y-1">
-        <div class="text-xs text-sage-mist font-medium mb-1">Categories</div>
-        {% for cat, color in [("Trigger", "#E9C46A"), ("Belief", "#2A9D8F"), ("Emotion", "#F2F0E9"), ("Somatic", "#4A635D"), ("Pattern", "#ffffff"), ("Need", "#E9C46A"), ("Goal", "#2A9D8F"), ("Resource", "#F2F0E9")] %}
-        <div class="flex items-center gap-2 text-xs text-parchment/80">
-            <span class="w-2.5 h-2.5 rounded-full" style="background-color: {{ color }}"></span>
-            {{ cat }}
+        <div class="fixed right-3 top-[76px] z-10 flex items-center gap-2">
+            <input id="graph-search" type="search" class="field !py-2 !text-xs !w-[150px] sm:!w-[190px]" placeholder="Search concepts" oninput="applyGraphFilters()">
+            <select id="category-filter" class="field !py-2 !px-2 !w-[110px] !text-xs" onchange="applyGraphFilters()">
+                <option value="">All</option>
+                <option value="Trigger">Trigger</option>
+                <option value="Belief">Belief</option>
+                <option value="Emotion">Emotion</option>
+                <option value="Somatic">Somatic</option>
+                <option value="Pattern">Pattern</option>
+                <option value="Need">Need</option>
+                <option value="Goal">Goal</option>
+                <option value="Resource">Resource</option>
+                <option value="Person">Person</option>
+                <option value="Episode">Episode</option>
+            </select>
         </div>
-        {% endfor %}
+
+        <aside id="node-inspector"
+               class="hidden fixed right-3 top-[124px] bottom-[64px] w-[300px] max-w-[calc(100vw-24px)] glass-strong rounded-pebble-xs z-10 flex flex-col">
+            <div class="flex items-start justify-between gap-2 p-3 border-b border-sage-mist/20">
+                <div class="min-w-0">
+                    <p class="role-label flex items-center gap-1.5">
+                        <span id="inspector-dot" class="w-2.5 h-2.5 rounded-full inline-block"></span>
+                        <span id="inspector-category"></span>
+                    </p>
+                    <h3 id="inspector-title" class="font-fraunces text-lg text-parchment leading-tight mt-0.5 text-balance"></h3>
+                    <p id="inspector-when" class="text-xs text-sage-mist mt-0.5"></p>
+                </div>
+                <button class="icon-btn shrink-0" onclick="closeInspector()" aria-label="Close details">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="inspector-body" class="p-3 overflow-y-auto text-sm space-y-3"></div>
+        </aside>
+    </div>
+
+    <div id="stats-overlay" class="fixed bottom-4 left-4 glass-strong rounded-pebble-xs px-3 py-2 text-xs text-sage-mist space-y-0.5 z-10">
+        <div>Nodes <span id="node-count">0</span></div>
+        <div>Edges <span id="edge-count">0</span></div>
+        <div>Shown <span id="visible-count">0</span></div>
+    </div>
+
+    <div id="legend-overlay" class="fixed bottom-4 right-4 glass-strong rounded-pebble-xs px-3 py-2 space-y-1 z-10">
+        <div class="text-xs text-sage-mist font-medium mb-1">Categories</div>
+        <div id="legend-items"></div>
     </div>
 </div>
 <script>
 const graphData = {{ graph_data|safe }};
 
+function allGraphNodes() {
+    return [
+        ...(graphData.nodes || []).map((node) => ({ ...node, kind: 'concept' })),
+        ...(graphData.people || []).map((person) => ({ id: person.slug, label: person.label, category: 'Person', kind: 'person' })),
+        ...(graphData.episodes || []).map((episode) => ({ id: `episode:${episode.id}`, label: episode.title, category: 'Episode', kind: 'episode', occurred_at: episode.occurred_at }))
+    ];
+}
+
+function allGraphEdges() {
+    return [
+        ...(graphData.edges || []),
+        ...(graphData.cross_edges || [])
+    ];
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     if (graphData && graphData.nodes && graphData.nodes.length > 0) {
-        window.renderMindMap('mind-map-canvas', graphData);
+        window.renderMindMap('mind-map-canvas', graphData, openInspector);
     }
+    renderLegend();
+    updateCounts();
 });
 
 window.resetView = function() {
-    const svg = document.querySelector('#mind-map-canvas svg');
-    if (svg) {
-        const zoom = d3.zoom().on('zoom', null);
-        d3.select(svg).transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+    const view = window.__mindMapView;
+    if (view) {
+        view.svg.transition().duration(500).call(view.zoom.transform, d3.zoomIdentity);
     }
 };
+
+function renderLegend() {
+    const holder = document.getElementById('legend-items');
+    if (!holder) return;
+    const present = new Set(allGraphNodes().map((node) => node.category));
+    holder.innerHTML = '';
+    Object.entries(COLORS.categories).forEach(([category, color]) => {
+        if (category === 'Other' && !present.has('Other')) return;
+        const button = document.createElement('button');
+        button.className = 'flex items-center gap-2 text-xs text-parchment/80 transition-colors hover:text-parchment';
+        button.onclick = () => setCategoryFilter(category);
+        button.innerHTML = `<span class="w-2.5 h-2.5 rounded-full" style="background-color: ${color}"></span>${category}`;
+        holder.appendChild(button);
+    });
+}
+
+window.setCategoryFilter = function(category) {
+    const select = document.getElementById('category-filter');
+    if (!select) return;
+    select.value = select.value === category ? '' : category;
+    applyGraphFilters();
+};
+
+window.applyGraphFilters = function() {
+    const query = (document.getElementById('graph-search')?.value || '').trim().toLowerCase();
+    const category = document.getElementById('category-filter')?.value || '';
+    const svg = d3.select('#mind-map-canvas svg');
+    if (svg.empty()) return;
+
+    let visible = 0;
+    const matchingIds = new Set();
+    allGraphNodes().forEach((node) => {
+        const matchesQuery = !query || `${node.label} ${node.category} ${node.id}`.toLowerCase().includes(query);
+        const matchesCategory = !category || node.category === category;
+        if (matchesQuery && matchesCategory) {
+            visible += 1;
+            matchingIds.add(node.id);
+        }
+    });
+
+    svg.selectAll('.mind-node')
+        .attr('opacity', (node) => matchingIds.has(node.id) ? 1 : 0.14)
+        .attr('stroke', (node) => matchingIds.has(node.id) ? '#F2D88A' : 'transparent')
+        .attr('stroke-width', (node) => matchingIds.has(node.id) ? 2 : 0);
+    svg.selectAll('text')
+        .attr('opacity', (datum) => {
+            if (!datum) return 1;
+            if (datum.id) return matchingIds.has(datum.id) ? 1 : 0.22;
+            if (datum.source && datum.target) return matchingIds.has(datum.source.id || datum.source) && matchingIds.has(datum.target.id || datum.target) ? 0.9 : 0.12;
+            return 1;
+        });
+    svg.selectAll('line')
+        .attr('opacity', (link) => matchingIds.has(link.source.id || link.source) && matchingIds.has(link.target.id || link.target) ? 0.72 : 0.1);
+
+    const visibleCount = document.getElementById('visible-count');
+    if (visibleCount) visibleCount.textContent = visible;
+};
+
+function nodeById(id) {
+    return allGraphNodes().find((node) => node.id === id);
+}
+
+function edgeEndId(end) {
+    return typeof end === 'object' && end !== null ? end.id : end;
+}
+
+function connectionsFor(nodeId) {
+    const rows = [];
+    allGraphEdges().forEach((edge) => {
+        const from = edgeEndId(edge.from ?? edge.source);
+        const to = edgeEndId(edge.to ?? edge.target);
+        if (from === nodeId) {
+            const other = nodeById(to);
+            if (other) rows.push({ direction: 'out', relation: edge.relation || 'related to', other });
+        } else if (to === nodeId) {
+            const other = nodeById(from);
+            if (other) rows.push({ direction: 'in', relation: edge.relation || 'related to', other });
+        }
+    });
+    return rows;
+}
+
+function inspectorRow(connection) {
+    const color = COLORS.categories[connection.other.category] || COLORS.categories['Other'];
+    const arrow = connection.direction === 'out' ? '&rarr;' : '&larr;';
+    const relation = (connection.relation || '').replace(/_/g, ' ');
+    return `<button class="w-full text-left flex items-center gap-2 py-1 group" onclick="openInspectorById('${connection.other.id.replace(/'/g, "\\'")}')">
+        <span class="w-2 h-2 rounded-full shrink-0" style="background-color: ${color}"></span>
+        <span class="text-sage-mist text-xs shrink-0">${arrow} ${relation}</span>
+        <span class="text-parchment/90 truncate group-hover:text-parchment">${connection.other.label}</span>
+    </button>`;
+}
+
+window.openInspectorById = function(id) {
+    const node = nodeById(id);
+    if (node) openInspector(node);
+};
+
+window.openInspector = function(node) {
+    const inspector = document.getElementById('node-inspector');
+    if (!inspector) return;
+    const color = COLORS.categories[node.category] || COLORS.categories['Other'];
+    document.getElementById('inspector-dot').style.backgroundColor = color;
+    document.getElementById('inspector-category').textContent = node.category;
+    document.getElementById('inspector-title').textContent = node.label;
+    document.getElementById('inspector-when').textContent = node.kind === 'episode' && node.occurred_at ? node.occurred_at : '';
+
+    const connections = connectionsFor(node.id);
+    const people = connections.filter((c) => c.other.kind === 'person');
+    const episodes = connections.filter((c) => c.other.kind === 'episode');
+    const concepts = connections.filter((c) => c.other.kind === 'concept');
+
+    const sections = [];
+    if (people.length) {
+        sections.push(`<div><p class="role-label mb-1">People</p>${people.map(inspectorRow).join('')}</div>`);
+    }
+    if (episodes.length) {
+        sections.push(`<div><p class="role-label mb-1">Moments</p>${episodes.map(inspectorRow).join('')}</div>`);
+    }
+    if (concepts.length) {
+        sections.push(`<div><p class="role-label mb-1">Connected concepts</p>${concepts.map(inspectorRow).join('')}</div>`);
+    }
+    if (!sections.length) {
+        sections.push('<p class="text-sage-mist text-xs">No recorded connections yet. They form as you talk.</p>');
+    }
+    document.getElementById('inspector-body').innerHTML = sections.join('');
+    inspector.classList.remove('hidden');
+};
+
+window.closeInspector = function() {
+    document.getElementById('node-inspector')?.classList.add('hidden');
+};
+
+function updateCounts() {
+    const nodeCount = allGraphNodes().length;
+    const edgeCount = allGraphEdges().length;
+    document.getElementById('node-count').textContent = nodeCount;
+    document.getElementById('edge-count').textContent = edgeCount;
+    document.getElementById('visible-count').textContent = nodeCount;
+}
 </script>
 {% endblock %}

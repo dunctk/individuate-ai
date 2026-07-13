@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="h-screen flex flex-col">
+    <header class="glass flex items-center justify-between gap-3 px-4 py-3 border-b border-sage-mist/20 shrink-0 z-20">
+        <div class="flex items-center gap-3 min-w-0">
+            <a href="/" class="icon-btn shrink-0" aria-label="Back to chat">
+                <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+            </a>
+            <div class="min-w-0">
+                <p class="role-label">Relational field</p>
+                <h1 class="text-lg sm:text-xl font-fraunces font-bold text-parchment truncate">Social Graph</h1>
+            </div>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+            <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
+            <button onclick="reloadSocialGraph()" class="btn-primary text-xs">Refresh</button>
+        </div>
+    </header>
+
+    <main class="flex-1 relative overflow-hidden">
+        <div id="social-graph-canvas" class="w-full h-full"></div>
+
+        {% if graph_data.nodes|length == 0 %}
+        <div id="empty-social-graph" class="absolute inset-0 flex items-center justify-center px-6 text-center">
+            <div>
+                <p class="text-sage-mist text-sm mb-2">No relationships mapped yet</p>
+                <p class="text-sage-mist/60 text-xs">Mention someone important in chat and the graph will grow from profile memory.</p>
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="fixed right-3 top-[76px] z-10 flex items-center gap-2">
+            <input id="social-search" type="search" class="field !py-2 !text-xs !w-[150px] sm:!w-[190px]" placeholder="Search people or signals" oninput="applySocialFilters()">
+            <select id="social-kind-filter" class="field !py-2 !px-2 !w-[110px] !text-xs" onchange="applySocialFilters()">
+                <option value="">All</option>
+                <option value="person">People</option>
+                <option value="event">Events</option>
+                <option value="episode">Episodes</option>
+                <option value="trigger">Triggers</option>
+                <option value="goal">Goals</option>
+                <option value="boundary">Boundaries</option>
+                <option value="pattern">Patterns</option>
+                <option value="need">Needs</option>
+            </select>
+        </div>
+
+        <aside id="social-inspector"
+               class="hidden fixed right-3 top-[124px] bottom-[64px] w-[300px] max-w-[calc(100vw-24px)] glass-strong rounded-pebble-xs z-10 flex flex-col">
+            <div class="flex items-start justify-between gap-2 p-3 border-b border-sage-mist/20">
+                <div class="min-w-0">
+                    <p class="role-label flex items-center gap-1.5">
+                        <span id="social-inspector-dot" class="w-2.5 h-2.5 rounded-full inline-block"></span>
+                        <span id="social-inspector-kind"></span>
+                    </p>
+                    <h3 id="social-inspector-title" class="font-fraunces text-lg text-parchment leading-tight mt-0.5 text-balance"></h3>
+                    <p id="social-inspector-detail" class="text-xs text-sage-mist mt-0.5"></p>
+                </div>
+                <button class="icon-btn shrink-0" onclick="closeSocialInspector()" aria-label="Close details">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="social-inspector-body" class="p-3 overflow-y-auto text-sm space-y-3"></div>
+        </aside>
+
+        <div id="social-legend" class="fixed bottom-4 right-4 glass-strong rounded-pebble-xs px-3 py-2 space-y-1 z-10">
+            <div class="text-xs text-sage-mist font-medium mb-1">Nodes</div>
+            {% for kind, color in [("self", "#F2D88A"), ("person", "#2A9D8F"), ("episode", "#D98C6A"), ("event", "#E9C46A"), ("trigger", "#C46A57"), ("goal", "#9BCF8A"), ("boundary", "#E6A1B0"), ("pattern", "#F2F0E9"), ("need", "#83B7D8")] %}
+            <button class="flex items-center gap-2 text-xs text-parchment/80 transition-colors hover:text-parchment" onclick="setSocialKind('{{ kind }}')">
+                <span class="w-2.5 h-2.5 rounded-full" style="background-color: {{ color }}"></span>
+                {{ kind }}
+            </button>
+            {% endfor %}
+        </div>
+    </main>
+</div>
+
+<script>
+let socialGraphData = {{ graph_data|safe }};
+let socialSimulation = null;
+const SOCIAL_COLORS = {
+    self: '#F2D88A',
+    person: '#2A9D8F',
+    episode: '#D98C6A',
+    event: '#E9C46A',
+    trigger: '#C46A57',
+    goal: '#9BCF8A',
+    boundary: '#E6A1B0',
+    pattern: '#F2F0E9',
+    need: '#83B7D8',
+    other: '#7B8F88'
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    renderSocialGraph();
+});
+
+async function reloadSocialGraph() {
+    const resp = await fetch('/api/social-graph');
+    if (!resp.ok) return;
+    socialGraphData = await resp.json();
+    renderSocialGraph();
+}
+
+function renderSocialGraph() {
+    const container = document.getElementById('social-graph-canvas');
+    if (!container || typeof d3 === 'undefined') return;
+    container.innerHTML = '';
+    const width = container.clientWidth || 900;
+    const height = container.clientHeight || 640;
+    const nodes = (socialGraphData.nodes || []).map((node) => ({ ...node }));
+    const links = (socialGraphData.edges || []).map((edge) => ({ ...edge, source: edge.from, target: edge.to }));
+    if (nodes.length === 0) return;
+
+    const svg = d3.select(container).append('svg')
+        .attr('width', '100%')
+        .attr('height', '100%')
+        .attr('viewBox', [0, 0, width, height])
+        .style('background', '#0F1C18');
+    const g = svg.append('g');
+    svg.call(d3.zoom().scaleExtent([0.35, 3.5]).on('zoom', (event) => g.attr('transform', event.transform)));
+
+    const link = g.append('g')
+        .selectAll('line')
+        .data(links)
+        .join('line')
+        .attr('stroke', '#4A635D')
+        .attr('stroke-width', (d) => Math.max(1.4, Math.min(4, d.weight || 1)))
+        .attr('opacity', 0.62);
+
+    const linkLabel = g.append('g')
+        .selectAll('text')
+        .data(links)
+        .join('text')
+        .text((d) => d.relation)
+        .attr('font-size', '10px')
+        .attr('fill', '#B8C9C1')
+        .attr('text-anchor', 'middle')
+        .attr('opacity', 0.84);
+
+    const node = g.append('g')
+        .selectAll('circle')
+        .data(nodes)
+        .join('circle')
+        .attr('r', (d) => d.kind === 'self' ? 18 : d.kind === 'person' ? 15 : d.kind === 'episode' ? 13 : Math.min(14, 8 + (d.weight || 1)))
+        .attr('fill', (d) => SOCIAL_COLORS[d.kind] || SOCIAL_COLORS.other)
+        .attr('stroke', '#F2F0E9')
+        .attr('stroke-opacity', (d) => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode' ? 0.55 : 0.18)
+        .attr('stroke-width', 1.5)
+        .style('cursor', 'pointer')
+        .on('click', (_, d) => selectSocialNode(d))
+        .call(d3.drag()
+            .on('start', (event) => {
+                if (!event.active) socialSimulation.alphaTarget(0.25).restart();
+                event.subject.fx = event.subject.x;
+                event.subject.fy = event.subject.y;
+            })
+            .on('drag', (event) => {
+                event.subject.fx = event.x;
+                event.subject.fy = event.y;
+            })
+            .on('end', (event) => {
+                if (!event.active) socialSimulation.alphaTarget(0);
+                event.subject.fx = null;
+                event.subject.fy = null;
+            }));
+
+    const label = g.append('g')
+        .selectAll('text')
+        .data(nodes)
+        .join('text')
+        .text((d) => d.label)
+        .attr('font-family', 'Urbanist, sans-serif')
+        .attr('font-size', (d) => d.kind === 'person' || d.kind === 'self' ? '14px' : '12px')
+        .attr('font-weight', (d) => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode' ? '700' : '500')
+        .attr('fill', '#F2F0E9')
+        .attr('x', 18)
+        .attr('y', 5)
+        .style('text-shadow', '0 2px 6px #0F1C18');
+
+    socialSimulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id((d) => d.id).distance((d) => d.relation === 'pattern' ? 190 : 132).strength(0.72))
+        .force('charge', d3.forceManyBody().strength(-520))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collide', d3.forceCollide().radius((d) => d.kind === 'person' ? 58 : 38));
+
+    socialSimulation.on('tick', () => {
+        link.attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y).attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
+        linkLabel.attr('x', (d) => (d.source.x + d.target.x) / 2).attr('y', (d) => (d.source.y + d.target.y) / 2);
+        node.attr('cx', (d) => d.x).attr('cy', (d) => d.y);
+        label.attr('x', (d) => d.x + 18).attr('y', (d) => d.y + 5);
+    });
+}
+
+function socialNodeById(id) {
+    return (socialGraphData.nodes || []).find((node) => node.id === id);
+}
+
+function socialConnectionsFor(nodeId) {
+    const rows = [];
+    (socialGraphData.edges || []).forEach((edge) => {
+        if (edge.from === nodeId) {
+            const other = socialNodeById(edge.to);
+            if (other) rows.push({ direction: 'out', relation: edge.relation || 'related to', other });
+        } else if (edge.to === nodeId) {
+            const other = socialNodeById(edge.from);
+            if (other) rows.push({ direction: 'in', relation: edge.relation || 'related to', other });
+        }
+    });
+    return rows;
+}
+
+function socialInspectorRow(connection) {
+    const color = SOCIAL_COLORS[connection.other.kind] || SOCIAL_COLORS.other;
+    const arrow = connection.direction === 'out' ? '&rarr;' : '&larr;';
+    const relation = (connection.relation || '').replace(/_/g, ' ');
+    return `<button class="w-full text-left flex items-center gap-2 py-1 group" onclick="selectSocialNodeById('${connection.other.id.replace(/'/g, "\\'")}')">
+        <span class="w-2 h-2 rounded-full shrink-0" style="background-color: ${color}"></span>
+        <span class="text-sage-mist text-xs shrink-0">${arrow} ${relation}</span>
+        <span class="text-parchment/90 truncate group-hover:text-parchment">${connection.other.label}</span>
+    </button>`;
+}
+
+window.selectSocialNodeById = function(id) {
+    const node = socialNodeById(id);
+    if (node) selectSocialNode(node);
+};
+
+function selectSocialNode(node) {
+    const inspector = document.getElementById('social-inspector');
+    if (!inspector) return;
+    document.getElementById('social-inspector-dot').style.backgroundColor = SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.other;
+    document.getElementById('social-inspector-kind').textContent = node.kind;
+    document.getElementById('social-inspector-title').textContent = node.label;
+    document.getElementById('social-inspector-detail').textContent = node.detail || '';
+
+    const connections = socialConnectionsFor(node.id);
+    const people = connections.filter((c) => c.other.kind === 'person' || c.other.kind === 'self');
+    const episodes = connections.filter((c) => c.other.kind === 'episode');
+    const rest = connections.filter((c) => !people.includes(c) && !episodes.includes(c));
+
+    const sections = [];
+    if (people.length) {
+        sections.push(`<div><p class="role-label mb-1">People</p>${people.map(socialInspectorRow).join('')}</div>`);
+    }
+    if (episodes.length) {
+        sections.push(`<div><p class="role-label mb-1">Moments</p>${episodes.map(socialInspectorRow).join('')}</div>`);
+    }
+    if (rest.length) {
+        sections.push(`<div><p class="role-label mb-1">Signals</p>${rest.map(socialInspectorRow).join('')}</div>`);
+    }
+    if (!sections.length) {
+        sections.push('<p class="text-sage-mist text-xs">No recorded connections yet. They form as you talk.</p>');
+    }
+    document.getElementById('social-inspector-body').innerHTML = sections.join('');
+    inspector.classList.remove('hidden');
+}
+
+window.closeSocialInspector = function() {
+    document.getElementById('social-inspector')?.classList.add('hidden');
+};
+
+function setSocialKind(kind) {
+    const select = document.getElementById('social-kind-filter');
+    select.value = select.value === kind ? '' : kind;
+    applySocialFilters();
+}
+
+function applySocialFilters() {
+    const query = (document.getElementById('social-search')?.value || '').trim().toLowerCase();
+    const kind = document.getElementById('social-kind-filter')?.value || '';
+    const matching = new Set();
+    (socialGraphData.nodes || []).forEach((node) => {
+        const text = `${node.label} ${node.kind} ${node.detail}`.toLowerCase();
+        if ((!query || text.includes(query)) && (!kind || node.kind === kind)) {
+            matching.add(node.id);
+        }
+    });
+    const svg = d3.select('#social-graph-canvas svg');
+    if (svg.empty()) return;
+    svg.selectAll('circle').attr('opacity', (d) => matching.has(d.id) ? 1 : 0.16);
+    svg.selectAll('text').attr('opacity', (d) => {
+        if (d.id) return matching.has(d.id) ? 1 : 0.22;
+        return matching.has(d.source.id || d.source) && matching.has(d.target.id || d.target) ? 0.85 : 0.1;
+    });
+    svg.selectAll('line').attr('opacity', (d) => matching.has(d.source.id || d.source) && matching.has(d.target.id || d.target) ? 0.72 : 0.08);
+}
+
+</script>
+{% endblock %}

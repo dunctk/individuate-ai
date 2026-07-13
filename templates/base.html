@@ -24,16 +24,18 @@ const COLORS = {
     categories: {
         "Trigger": "#E9C46A",
         "Belief": "#2A9D8F",
-        "Emotion": "#F2F0E9",
-        "Somatic": "#4A635D",
-        "Pattern": "#ffffff",
-        "Need": "#E9C46A",
-        "Goal": "#2A9D8F",
+        "Emotion": "#E091B9",
+        "Somatic": "#9CDCB0",
+        "Pattern": "#C9B8F0",
+        "Need": "#F4A261",
+        "Goal": "#B8D96A",
         "Resource": "#F2F0E9",
-        "Other": "#888888"
+        "Person": "#83B7D8",
+        "Episode": "#D98C6A",
+        "Other": "#8A9B94"
     }
 };
-window.renderMindMap = function(containerId, data) {
+window.renderMindMap = function(containerId, data, onNodeClick) {
     if (typeof d3 === 'undefined') { console.error("D3 not loaded"); return; }
     const container = document.getElementById(containerId);
     if (!container) { console.error("Container not found:", containerId); return; }
@@ -41,8 +43,15 @@ window.renderMindMap = function(containerId, data) {
     let height = container.clientHeight || 600;
     container.innerHTML = '';
     if (!data || !data.nodes || !data.edges) { return; }
-    const nodes = data.nodes.map(d => ({ ...d }));
-    const links = data.edges.map(d => ({ ...d, source: d.from, target: d.to }));
+    const nodes = [
+        ...data.nodes.map(d => ({ ...d, kind: "concept" })),
+        ...(data.people || []).map(d => ({ id: d.slug, label: d.label, category: "Person", kind: "person" })),
+        ...(data.episodes || []).map(d => ({ id: `episode:${d.id}`, label: d.title, category: "Episode", kind: "episode", occurred_at: d.occurred_at }))
+    ];
+    const links = [
+        ...data.edges.map(d => ({ ...d, source: d.from, target: d.to, kind: "concept" })),
+        ...(data.cross_edges || []).map(d => ({ ...d, source: d.from, target: d.to }))
+    ];
     const svg = d3.select(container).append("svg")
         .attr("width", "100%").attr("height", "100%")
         .attr("viewBox", [0, 0, width, height])
@@ -50,21 +59,30 @@ window.renderMindMap = function(containerId, data) {
     const g = svg.append("g");
     const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (event) => { g.attr("transform", event.transform); });
     svg.call(zoom);
+    window.__mindMapView = { svg, zoom };
     const simulation = d3.forceSimulation(nodes)
         .force("link", d3.forceLink(links).id(d => d.id).distance(150))
-        .force("charge", d3.forceCharge().strength(-500))
+        .force("charge", d3.forceManyBody().strength(-500))
         .force("center", d3.forceCenter(width / 2, height / 2))
         .force("collide", d3.forceCollide().radius(50));
     svg.append("defs").selectAll("marker").data(["end"]).enter().append("marker")
         .attr("id", "arrow").attr("viewBox", "0 -5 10 10").attr("refX", 25).attr("refY", 0)
         .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
         .append("path").attr("d", "M0,-5L10,0L0,5").attr("fill", COLORS.link);
-    const link = g.append("g").attr("stroke", COLORS.link).attr("stroke-opacity", 0.6).attr("stroke-width", 2)
-        .selectAll("line").data(links).join("line").attr("marker-end", "url(#arrow)");
+    const link = g.append("g").attr("stroke-opacity", 0.6).attr("stroke-width", 2)
+        .selectAll("line").data(links).join("line")
+        .attr("stroke", d => d.kind === "episode_concept" ? "#D98C6A" : COLORS.link)
+        .attr("marker-end", "url(#arrow)");
     const linkLabel = g.append("g").selectAll("text").data(links).join("text")
         .text(d => d.relation).attr("font-size", "10px").attr("fill", COLORS.text).attr("text-anchor", "middle");
-    const node = g.append("g").selectAll("circle").data(nodes).join("circle")
-        .attr("r", 12).attr("fill", d => COLORS.categories[d.category] || COLORS.categories["Other"])
+    const node = g.append("g").selectAll("path").data(nodes).join("path")
+        .attr("class", "mind-node")
+        .attr("d", d3.symbol().type(d => d.kind === "person" ? d3.symbolDiamond : d.kind === "episode" ? d3.symbolSquare : d3.symbolCircle).size(d => d.kind === "episode" ? 210 : d.kind === "person" ? 190 : 145))
+        .attr("fill", d => COLORS.categories[d.category] || COLORS.categories["Other"])
+        .attr("stroke", d => d.kind === "concept" ? "transparent" : "#F2F0E9")
+        .attr("stroke-width", d => d.kind === "concept" ? 0 : 1.5)
+        .style("cursor", "pointer")
+        .on("click", (event, d) => { if (onNodeClick) { event.stopPropagation(); onNodeClick(d); } })
         .call(d3.drag().on("start", (event) => { if (!event.active) simulation.alphaTarget(0.3).restart(); event.subject.fx = event.subject.x; event.subject.fy = event.subject.y; })
             .on("drag", (event) => { event.subject.fx = event.x; event.subject.fy = event.y; })
             .on("end", (event) => { if (!event.active) simulation.alphaTarget(0); event.subject.fx = null; event.subject.fy = null; }));
@@ -76,7 +94,7 @@ window.renderMindMap = function(containerId, data) {
     simulation.on("tick", () => {
         link.attr("x1", d => d.source.x).attr("y1", d => d.source.y).attr("x2", d => d.target.x).attr("y2", d => d.target.y);
         linkLabel.attr("x", d => (d.source.x + d.target.x) / 2).attr("y", d => (d.source.y + d.target.y) / 2);
-        node.attr("cx", d => d.x).attr("cy", d => d.y);
+        node.attr("transform", d => `translate(${d.x},${d.y})`);
         label.attr("x", d => d.x + 16).attr("y", d => d.y + 5);
     });
 };

@@ -1,4 +1,5 @@
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     middleware::{self, Next},
@@ -9,7 +10,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar};
 use dashmap::DashMap;
 use individuateai::agent::{
-    self, agent_runtime, cookie_key, has_auth_cookie, draft_stream_handler, graph_handler,
+    self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
     stream_handler, RelationshipProfile, User,
 };
 use individuateai::fileserv;
@@ -51,7 +52,10 @@ impl RateLimiter {
 
     fn check(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut entry = self.attempts.entry(key.to_string()).or_insert_with(Vec::new);
+        let mut entry = self
+            .attempts
+            .entry(key.to_string())
+            .or_insert_with(Vec::new);
         entry.retain(|t| now.duration_since(*t) < self.window);
         if entry.len() >= self.max_attempts {
             return false;
@@ -84,7 +88,10 @@ async fn main() {
         .route("/api/signup", post(signup_handler))
         .route("/api/forgot-password", post(forgot_password_handler))
         .route("/api/reset-password", post(reset_password_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_auth));
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_auth,
+        ));
 
     let app = Router::new()
         // Pages
@@ -92,28 +99,36 @@ async fn main() {
         .route("/login", get(login_page))
         .route("/signup", get(signup_page))
         .route("/mind-map", get(mind_map_page))
+        .route("/social-graph", get(social_graph_page))
         .route("/forgot-password", get(forgot_password_page))
-        .route("/reset-password/{token}", get(reset_password_page))
+        .route("/reset-password/:token", get(reset_password_page))
         // Fragments
         .route("/fragments/sidebar", get(sidebar_fragment))
-        .route("/fragments/chat/{session_id}", get(chat_fragment))
+        .route("/fragments/chat/:session_id", get(chat_fragment))
         .route("/fragments/profile-drawer", get(profile_drawer_fragment))
         // API (non-rate-limited)
         .route("/api/logout", get(logout_handler))
         .route("/api/whoami", get(whoami_handler))
-        .route("/api/verify-email/{token}", get(verify_email_handler))
+        .route("/api/verify-email/:token", get(verify_email_handler))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route("/api/sessions/{id}/history", get(chat_history))
+        .route("/api/sessions/:id/history", get(chat_history))
         .route("/api/profiles", get(list_profiles))
-        .route("/api/profiles/{slug}", post(save_profile))
+        .route("/api/profiles/:slug", post(save_profile))
+        .route("/api/social-graph", get(get_social_graph))
+        .route("/api/episodes", get(get_episodes))
+        .route("/api/memory-status", get(memory_status))
+        .route("/api/transcribe", post(transcribe_handler))
         .route("/api/chat", post(chat_handler))
         // SSE streams
         .route("/api/agent-stream", get(stream_handler))
         .route("/api/draft-stream", get(draft_stream_handler))
-        .route("/api/graph/{user_id}", get(graph_handler))
+        .route("/api/graph/:user_id", get(graph_handler))
         // Passkey
         .route("/api/passkey/register/start", post(passkey_register_start))
-        .route("/api/passkey/register/complete", post(passkey_register_complete))
+        .route(
+            "/api/passkey/register/complete",
+            post(passkey_register_complete),
+        )
         .route("/api/passkey/login/start", post(passkey_login_start))
         .route("/api/passkey/login/complete", post(passkey_login_complete))
         // Static
@@ -128,30 +143,46 @@ async fn main() {
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
         .with_state(state);
 
-    let addr = "0.0.0.0:3008";
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3008".to_string());
+    let addr = format!("0.0.0.0:{}", port);
     println!("listening on http://{}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app.into_make_service()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app.into_make_service())
+        .await
+        .unwrap();
 }
 
 // --- Auth Middleware ---
 
-async fn auth_guard(State(state): State<AppState>, req: axum::http::Request<axum::body::Body>, next: Next) -> Response {
+async fn auth_guard(
+    State(state): State<AppState>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let path = req.uri().path().trim_end_matches('/');
     let protected = path.is_empty()
         || path == "/mind-map"
+        || path == "/social-graph"
         || path.starts_with("/fragments")
         || path.starts_with("/api/sessions")
         || path.starts_with("/api/profiles")
         || path.starts_with("/api/chat");
-    let is_api = path.starts_with("/api/") && !path.contains("/login")
-        && !path.contains("/signup") && !path.contains("/passkey/login")
-        && !path.contains("/passkey/register") && !path.contains("forgot-password")
-        && !path.contains("reset-password") && !path.contains("verify-email");
+    let is_api = path.starts_with("/api/")
+        && !path.contains("/login")
+        && !path.contains("/signup")
+        && !path.contains("/passkey/login")
+        && !path.contains("/passkey/register")
+        && !path.contains("forgot-password")
+        && !path.contains("reset-password")
+        && !path.contains("verify-email");
 
     if (protected || is_api) && !has_auth_cookie(req.headers(), &state.key) {
         if path.starts_with("/api/") {
-            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response();
         }
         return Redirect::temporary("/login").into_response();
     }
@@ -214,7 +245,8 @@ fn remove_auth_cookie(_key: &Key, is_secure: bool) -> Cookie<'static> {
 }
 
 fn extract_user_id(jar: &PrivateCookieJar) -> Option<String> {
-    jar.get(agent::AUTH_COOKIE_NAME).map(|c| c.value().to_string())
+    jar.get(agent::AUTH_COOKIE_NAME)
+        .map(|c| c.value().to_string())
 }
 
 fn cookie_is_secure(headers: &HeaderMap) -> bool {
@@ -230,12 +262,32 @@ async fn get_authed_user(headers: &HeaderMap, key: &Key) -> Option<User> {
 
 // --- Page Handlers ---
 
-async fn home_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn home_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
         None => return Redirect::temporary("/login").into_response(),
     };
-    let html = templates::render_home(&state.templates, &user, "");
+    let runtime = agent_runtime().await.unwrap();
+    let mut messages = Vec::new();
+    let session_id = if let Some(id) = params.get("session").filter(|id| !id.trim().is_empty()) {
+        match runtime
+            .get_session_history(user.id.clone(), id.to_string())
+            .await
+        {
+            Ok(history) => {
+                messages = history;
+                id.as_str()
+            }
+            Err(_) => "",
+        }
+    } else {
+        ""
+    };
+    let html = templates::render_home(&state.templates, &user, session_id, &messages);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -255,8 +307,25 @@ async fn mind_map_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         None => return Redirect::temporary("/login").into_response(),
     };
     let runtime = agent_runtime().await.unwrap();
-    let graph = runtime.get_patient_graph(user.id.clone()).await.unwrap_or_default();
+    let graph = runtime
+        .get_mind_map_payload(user.id.clone())
+        .await
+        .unwrap_or_else(|_| serde_json::json!({"nodes":[],"edges":[]}));
     let html = templates::render_mind_map(&state.templates, &graph, &user.id);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn social_graph_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(u) => u,
+        None => return Redirect::temporary("/login").into_response(),
+    };
+    let runtime = agent_runtime().await.unwrap();
+    let graph = runtime
+        .get_social_graph(user.id.clone())
+        .await
+        .unwrap_or_default();
+    let html = templates::render_social_graph(&state.templates, &graph, &user.id);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -268,7 +337,10 @@ async fn sidebar_fragment(State(state): State<AppState>, headers: HeaderMap) -> 
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
     };
     let runtime = agent_runtime().await.unwrap();
-    let sessions = runtime.list_sessions(user.id.clone()).await.unwrap_or_default();
+    let sessions = runtime
+        .list_sessions(user.id.clone())
+        .await
+        .unwrap_or_default();
     let html = templates::render_sidebar(&state.templates, &sessions, &user);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -283,7 +355,10 @@ async fn chat_fragment(
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
     };
     let runtime = agent_runtime().await.unwrap();
-    let messages = runtime.get_session_history(user.id, session_id).await.unwrap_or_default();
+    let messages = runtime
+        .get_session_history(user.id, session_id)
+        .await
+        .unwrap_or_default();
     let html = templates::render_chat_messages(&state.templates, &messages);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -297,17 +372,27 @@ async fn profile_drawer_fragment(
         Some(u) => u,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
     };
-    let slug = params.get("slug").map(|s| s.as_str()).unwrap_or("mother");
     let runtime = agent_runtime().await.unwrap();
-    let profiles = runtime.get_relationship_profiles(user.id.clone()).await.unwrap_or_default();
-    let html = templates::render_profile_drawer(&state.templates, &profiles, slug);
+    let profiles = runtime
+        .get_relationship_profiles(user.id.clone())
+        .await
+        .unwrap_or_default();
+    let selected_slug = params
+        .get("slug")
+        .map(|s| s.as_str())
+        .or_else(|| profiles.first().map(|profile| profile.slug.as_str()))
+        .unwrap_or("");
+    let html = templates::render_profile_drawer(&state.templates, &profiles, selected_slug);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 // --- API Handlers ---
 
 #[derive(Deserialize)]
-struct LoginPayload { email: String, password: String }
+struct LoginPayload {
+    email: String,
+    password: String,
+}
 
 async fn login_handler(
     State(state): State<AppState>,
@@ -316,9 +401,18 @@ async fn login_handler(
 ) -> Response {
     let runtime = match agent_runtime().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
-    match runtime.login(payload.email.clone(), payload.password.clone()).await {
+    match runtime
+        .login(payload.email.clone(), payload.password.clone())
+        .await
+    {
         Ok(user) => {
             let is_secure = cookie_is_secure(&headers);
             let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
@@ -337,12 +431,18 @@ async fn login_handler(
             );
             resp
         }
-        Err(_) => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Invalid credentials"}))).into_response(),
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid credentials"})),
+        )
+            .into_response(),
     }
 }
 
 #[derive(Deserialize)]
-struct SignupPayload { email: String }
+struct SignupPayload {
+    email: String,
+}
 
 async fn signup_handler(
     State(state): State<AppState>,
@@ -351,15 +451,23 @@ async fn signup_handler(
 ) -> Response {
     let runtime = match agent_runtime().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     let random_password = uuid::Uuid::new_v4().to_string();
     match runtime.signup(payload.email.clone(), random_password).await {
         Ok(user) => {
             // Generate email verification token
             if let Ok(verify_token) = runtime.generate_email_verification_token(&user.id).await {
-                let verify_url = format!("{}/api/verify-email/{}",
-                    std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3008".to_string()),
+                let verify_url = format!(
+                    "{}/api/verify-email/{}",
+                    std::env::var("PUBLIC_URL")
+                        .unwrap_or_else(|_| "http://localhost:3008".to_string()),
                     verify_token
                 );
                 tracing::info!("Email verification URL: {}", verify_url);
@@ -378,7 +486,11 @@ async fn signup_handler(
             }
             resp
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -398,18 +510,25 @@ async fn reset_password_page(
 }
 
 #[derive(Deserialize)]
-struct ForgotPasswordPayload { email: String }
+struct ForgotPasswordPayload {
+    email: String,
+}
 
-async fn forgot_password_handler(
-    Json(payload): Json<ForgotPasswordPayload>,
-) -> Response {
+async fn forgot_password_handler(Json(payload): Json<ForgotPasswordPayload>) -> Response {
     let runtime = match agent_runtime().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     match runtime.generate_password_reset_token(&payload.email).await {
         Ok(token) => {
-            let reset_url = format!("{}/reset-password/{}",
+            let reset_url = format!(
+                "{}/reset-password/{}",
                 std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3008".to_string()),
                 token
             );
@@ -418,7 +537,8 @@ async fn forgot_password_handler(
                 "ok": true,
                 "message": "If an account exists with that email, a reset link has been sent.",
                 "dev_reset_url": reset_url,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(e) => {
             // Don't reveal if email exists - always return success
@@ -426,23 +546,35 @@ async fn forgot_password_handler(
             Json(serde_json::json!({
                 "ok": true,
                 "message": "If an account exists with that email, a reset link has been sent.",
-            })).into_response()
+            }))
+            .into_response()
         }
     }
 }
 
 #[derive(Deserialize)]
-struct ResetPasswordPayload { token: String, password: String }
+struct ResetPasswordPayload {
+    token: String,
+    password: String,
+}
 
-async fn reset_password_handler(
-    Json(payload): Json<ResetPasswordPayload>,
-) -> Response {
+async fn reset_password_handler(Json(payload): Json<ResetPasswordPayload>) -> Response {
     if payload.password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Password must be at least 8 characters"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Password must be at least 8 characters"})),
+        )
+            .into_response();
     }
     let runtime = match agent_runtime().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     match runtime.verify_and_reset_password(&payload.token, &payload.password).await {
         Ok(_) => Json(serde_json::json!({"ok": true, "message": "Password reset successfully. You can now log in."})).into_response(),
@@ -452,16 +584,25 @@ async fn reset_password_handler(
 
 // --- Email Verification Handler ---
 
-async fn verify_email_handler(
-    Path(token): Path<String>,
-) -> Response {
+async fn verify_email_handler(Path(token): Path<String>) -> Response {
     let runtime = match agent_runtime().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     match runtime.verify_email_with_token(&token).await {
-        Ok(_) => Json(serde_json::json!({"ok": true, "message": "Email verified successfully."})).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Ok(_) => Json(serde_json::json!({"ok": true, "message": "Email verified successfully."}))
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -486,7 +627,9 @@ async fn whoami_handler(State(state): State<AppState>, headers: HeaderMap) -> Js
 }
 
 #[derive(Deserialize)]
-struct CreateSessionPayload { title: Option<String> }
+struct CreateSessionPayload {
+    title: Option<String>,
+}
 
 async fn create_session(
     State(state): State<AppState>,
@@ -495,25 +638,45 @@ async fn create_session(
 ) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let title = payload.title.unwrap_or_else(|| "New Session".to_string());
     let runtime = agent_runtime().await.unwrap();
     match runtime.create_new_session(user.id, title).await {
         Ok(session) => Json(session).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let runtime = agent_runtime().await.unwrap();
     match runtime.list_sessions(user.id).await {
         Ok(sessions) => Json(sessions).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -524,25 +687,211 @@ async fn chat_history(
 ) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let runtime = agent_runtime().await.unwrap();
     match runtime.get_session_history(user.id, id).await {
         Ok(messages) => Json(messages).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 async fn list_profiles(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let runtime = agent_runtime().await.unwrap();
     match runtime.get_relationship_profiles(user.id).await {
         Ok(profiles) => Json(profiles).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
+}
+
+async fn get_social_graph(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime.get_social_graph(user.id).await {
+        Ok(graph) => Json(graph).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_episodes(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime.get_episodes_with_links(user.id).await {
+        Ok(episodes) => Json(episodes).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn memory_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime.get_memory_status(user.id).await {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn transcribe_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if get_authed_user(&headers, &state.key).await.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized"})),
+        )
+            .into_response();
+    }
+
+    const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Audio is empty"})),
+        )
+            .into_response();
+    }
+    if body.len() > MAX_AUDIO_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Recording is too large"})),
+        )
+            .into_response();
+    }
+
+    let api_key = match std::env::var("DEEPGRAM_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            tracing::error!("DEEPGRAM_API_KEY is not configured");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Voice transcription is unavailable"})),
+            )
+                .into_response();
+        }
+    };
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.starts_with("audio/"))
+        .unwrap_or("audio/webm");
+
+    let response = match reqwest::Client::new()
+        .post("https://api.deepgram.com/v1/listen")
+        .query(&[
+            ("model", "nova-3"),
+            ("smart_format", "true"),
+            ("punctuate", "true"),
+        ])
+        .header("Authorization", format!("Token {api_key}"))
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!("Deepgram request failed: {error}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Voice transcription failed"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::warn!("Deepgram returned status {}", response.status());
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Voice transcription failed"})),
+        )
+            .into_response();
+    }
+
+    let payload: serde_json::Value = match response.json().await {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!("Invalid Deepgram response: {error}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Invalid transcription response"})),
+            )
+                .into_response();
+        }
+    };
+    let transcript = payload["results"]["channels"][0]["alternatives"][0]["transcript"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    Json(serde_json::json!({"transcript": transcript})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -566,7 +915,13 @@ async fn save_profile(
 ) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let runtime = agent_runtime().await.unwrap();
     let profile = RelationshipProfile {
@@ -584,7 +939,11 @@ async fn save_profile(
     };
     match runtime.save_relationship_profile(profile).await {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -604,31 +963,64 @@ async fn chat_handler(
 ) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
-        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Unauthorized"}))).into_response(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
     };
     let runtime = agent_runtime().await.unwrap();
 
     // Use existing session or create new one
     let session_id = match payload.session_id {
         Some(ref id) if !id.is_empty() => id.clone(),
-        _ => match runtime.create_new_session(user.id.clone(), "New Session".into()).await {
+        _ => match runtime
+            .create_new_session(user.id.clone(), "New Session".into())
+            .await
+        {
             Ok(s) => s.id,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
         },
     };
 
     let mode = payload.mode.as_deref().unwrap_or("therapist");
     let result = if mode == "draft" {
-        runtime.draft_message(&user.id, &session_id, "default".into(), "general".into(), payload.message, 50, 50, 50).await
+        runtime
+            .draft_message(
+                &user.id,
+                &session_id,
+                "default".into(),
+                "general".into(),
+                payload.message,
+                50,
+                50,
+                50,
+            )
+            .await
     } else {
-        runtime.respond(&user.id, &session_id, payload.message).await
+        runtime
+            .respond(&user.id, &session_id, payload.message)
+            .await
     };
 
     match result {
-        Ok(response) => Json(serde_json::json!({"session_id": session_id, "response": response})).into_response(),
+        Ok(response) => Json(serde_json::json!({"session_id": session_id, "response": response}))
+            .into_response(),
         Err(e) => {
             tracing::error!("Chat handler error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
         }
     }
 }
@@ -636,7 +1028,9 @@ async fn chat_handler(
 // --- Passkey Handlers ---
 
 #[derive(Deserialize)]
-struct PasskeyEmailPayload { email: String }
+struct PasskeyEmailPayload {
+    email: String,
+}
 
 #[derive(Serialize)]
 struct PasskeyStartResponse {
@@ -652,14 +1046,26 @@ async fn passkey_register_start(
     let runtime = agent_runtime().await.unwrap();
     let can_register = match get_authed_user(&headers, &state.key).await {
         Some(user) => runtime.start_passkey_registration(user.id).await,
-        None => runtime.start_passkey_registration_email(payload.email).await,
+        None => {
+            runtime
+                .start_passkey_registration_email(payload.email)
+                .await
+        }
     };
     match can_register {
         Ok((req_id, challenge)) => {
             let options = serde_json::to_value(&challenge).unwrap_or_default();
-            Json(PasskeyStartResponse { challenge_id: req_id, options }).into_response()
+            Json(PasskeyStartResponse {
+                challenge_id: req_id,
+                options,
+            })
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -677,7 +1083,10 @@ async fn passkey_register_complete(
     let runtime = agent_runtime().await.unwrap();
     let response: webauthn_rs_proto::RegisterPublicKeyCredential =
         serde_json::from_value(payload.credential).unwrap();
-    match runtime.finish_passkey_registration(payload.challenge_id, response).await {
+    match runtime
+        .finish_passkey_registration(payload.challenge_id, response)
+        .await
+    {
         Ok(user) => {
             let is_secure = cookie_is_secure(&headers);
             let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
@@ -692,20 +1101,30 @@ async fn passkey_register_complete(
             }
             resp
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
-async fn passkey_login_start(
-    Json(payload): Json<PasskeyEmailPayload>,
-) -> Response {
+async fn passkey_login_start(Json(payload): Json<PasskeyEmailPayload>) -> Response {
     let runtime = agent_runtime().await.unwrap();
     match runtime.start_passkey_login(payload.email).await {
         Ok((req_id, challenge)) => {
             let options = serde_json::to_value(&challenge).unwrap_or_default();
-            Json(PasskeyStartResponse { challenge_id: req_id, options }).into_response()
+            Json(PasskeyStartResponse {
+                challenge_id: req_id,
+                options,
+            })
+            .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -717,7 +1136,10 @@ async fn passkey_login_complete(
     let runtime = agent_runtime().await.unwrap();
     let response: webauthn_rs_proto::PublicKeyCredential =
         serde_json::from_value(payload.credential).unwrap();
-    match runtime.finish_passkey_login(payload.challenge_id, response).await {
+    match runtime
+        .finish_passkey_login(payload.challenge_id, response)
+        .await
+    {
         Ok(user) => {
             let is_secure = cookie_is_secure(&headers);
             let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
@@ -732,7 +1154,11 @@ async fn passkey_login_complete(
             }
             resp
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -740,10 +1166,28 @@ async fn passkey_login_complete(
 
 async fn passkey_js_handler() -> impl IntoResponse {
     let js = include_str!("../public/passkey.js");
-    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], js)
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        js,
+    )
 }
 
 async fn static_asset_handler(Path(filename): Path<String>) -> Response {
+    if filename == "mandala-avatar.mp4" {
+        return match tokio::fs::read(&filename).await {
+            Ok(video) => ([(header::CONTENT_TYPE, "video/mp4")], video).into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        };
+    }
+    if filename == "mandala-avatar.jpg" {
+        return match tokio::fs::read(&filename).await {
+            Ok(image) => ([(header::CONTENT_TYPE, "image/jpeg")], image).into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        };
+    }
     let uri: Uri = format!("/{}", filename).parse().unwrap();
     fileserv::static_file_handler(uri).await
 }

@@ -29,13 +29,14 @@
         <div class="flex items-center gap-1">
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
             <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
+            <a href="/social-graph" class="pill no-underline text-inherit" data-active="false">Social Graph</a>
         </div>
     </header>
 
     <!-- Chat scroll region — the "living rhizome" of the conversation -->
     <main id="chat-stage" class="flex-1 overflow-y-auto relative min-h-0">
         <div id="chat-empty"
-             class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none px-6 text-center">
+             class="absolute inset-0 {% if messages|length > 0 %}hidden{% else %}flex{% endif %} flex-col items-center justify-center pointer-events-none px-6 text-center">
             <div class="spiral-empty mb-6" aria-hidden="true">
                 <svg viewBox="0 0 200 200" fill="none" stroke="currentColor" stroke-width="1.2">
                     <path d="M100,100 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M100,98 m-6,2 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 M100,95 m-11,5 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 M100,90 m-17,7 a17,17 0 1,0 34,0 a17,17 0 1,0 -34,0 M100,85 m-24,9 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0 M100,79 m-33,11 a33,33 0 1,0 66,0 a33,33 0 1,0 -66,0 M100,72 m-44,15 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M100,64 m-56,21 a56,56 0 1,0 112,0 a56,56 0 1,0 -112,0 M100,55 m-70,23 a70,70 0 1,0 140,0 a70,70 0 1,0 -140,0 M100,44 m-86,30 a86,86 0 1,0 172,0 a86,86 0 1,0 -172,0"/>
@@ -43,28 +44,41 @@
             </div>
             <h2 class="font-fraunces font-soft text-2xl text-parchment/90 mb-2 text-balance">A space for what's growing</h2>
             <p class="text-sm text-sage-light max-w-xs text-balance leading-relaxed">
-                Speak the way you would to a careful stranger. The rhizome takes shape as you write.
+                Begin wherever you are &mdash; a moment, a feeling, a person on your mind. What you share takes root here and is remembered.
             </p>
         </div>
 
         <div id="chat-messages" class="px-4 sm:px-6 py-6 space-y-5 max-w-3xl mx-auto relative z-[1]"
-             {% if session_id %}hx-get="/fragments/chat/{{ session_id }}" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
-        </div>
-
-        <!-- Mandala thinking loader — floats at the foot while the therapist is responding -->
-        <div id="thinking" class="hidden px-6 pb-4 pt-1 max-w-3xl mx-auto">
-            <div class="flex items-center gap-3">
-                <div class="mandala" aria-hidden="true">
-                    <svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="1.4">
-                        <circle cx="32" cy="32" r="4"/>
-                        <circle cx="32" cy="32" r="11" stroke-dasharray="3 4"/>
-                        <circle cx="32" cy="32" r="18" stroke-dasharray="2 6"/>
-                        <circle cx="32" cy="32" r="26" stroke-dasharray="1 8"/>
-                        <path d="M32 6 L32 14 M32 50 L32 58 M6 32 L14 32 M50 32 L58 32 M14 14 L19 19 M45 45 L50 50 M14 50 L19 45 M45 19 L50 14"/>
-                    </svg>
+             {% if session_id and messages|length == 0 %}hx-get="/fragments/chat/{{ session_id }}" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
+            {% for message in messages %}
+            {% if message.role == 'user' %}
+            <div class="flex flex-row-reverse gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}">
+                <div class="avatar-orb avatar-user">{{ username[:1]|upper }}</div>
+                <div class="flex flex-col items-end min-w-0 max-w-[78%]">
+                    <span class="role-label mb-1 text-right">You</span>
+                    <div class="bubble bubble-user">{{ message.content_html|safe }}</div>
                 </div>
-                <div class="font-fraunces text-sm italic text-sage-light tracking-mycelium">listening through the roots…</div>
             </div>
+            {% else %}
+            <div class="flex flex-row gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}">
+                <div class="avatar-orb avatar-therapist avatar-video-wrap" aria-label="Therapist">
+                    <img class="avatar-still" src="/mandala-avatar.jpg" alt="">
+                    <span class="avatar-video-fallback">T</span>
+                </div>
+                <div class="flex flex-col items-start min-w-0 max-w-[78%]">
+                    <span class="role-label mb-1">Therapist</span>
+                    <div class="bubble bubble-therapist">{{ message.content_html|safe }}</div>
+                </div>
+            </div>
+            {% endif %}
+            {% endfor %}
+        </div>
+        <div id="memory-signal" class="memory-signal" role="status" aria-live="polite" aria-atomic="true">
+            <span class="memory-signal-orbit" aria-hidden="true"></span>
+            <span class="memory-signal-copy">
+                <span class="memory-signal-kicker">Saved to memory</span>
+                <span id="memory-signal-headline" class="memory-signal-headline">New pattern</span>
+            </span>
         </div>
     </main>
 
@@ -83,11 +97,6 @@
                             class="field !py-1.5 !px-2.5 !w-auto text-xs min-w-[140px]"></select>
                     </div>
                 </div>
-                <div id="presets" class="flex gap-1.5 overflow-x-auto no-scrollbar pb-2 -mx-1 px-1">
-                    <button onclick="submitPreset('I need to set a boundary')" class="chip">Boundary</button>
-                    <button onclick="submitPreset('I need to apologize')" class="chip">Apologize</button>
-                    <button onclick="submitPreset('I need to express a need')" class="chip">Need</button>
-                </div>
             </div>
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
                 <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
@@ -97,6 +106,11 @@
                             class="field !rounded-2xl !py-3 !px-4 pr-12"/>
                         <kbd class="hidden sm:flex absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-sage-mist/60 border border-sage-mist/20 rounded px-1.5 py-0.5 pointer-events-none">↵</kbd>
                     </div>
+                    <button id="voice-input" type="button" class="icon-btn shrink-0" aria-label="Record voice message" title="Record voice message" onclick="toggleVoiceInput()">
+                        <svg id="voice-input-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>
+                        </svg>
+                    </button>
                     <button id="seed-send" type="submit" class="seed-orb" aria-label="Send">
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.4">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6"/>
@@ -115,6 +129,20 @@ let currentMode = 'therapist';
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
 let currentUsername = '{{ username }}';
+let memoryStatusSnapshot = null;
+let memoryWatchToken = 0;
+let voiceRecorder = null;
+let voiceChunks = [];
+const waitingMessages = [
+    'Letting the symbol constellate...',
+    'Listening for the pattern beneath the story...',
+    'Tracking the system, not just the symptom...',
+    'Holding shadow and signal together...',
+    'Letting the spiral find the wider view...',
+    'Sensing the field before naming it...',
+    'Looking for what wants to integrate...',
+    'Waiting for the turquoise pattern to emerge...'
+];
 
 function toggleSidebar() {
     const sidebar = document.getElementById('sidebar');
@@ -168,72 +196,341 @@ function renderBubble(role, content) {
     const label = isUser ? 'You' : 'Therapist';
     const initial = isUser ? (currentUsername || 'Y').slice(0,1).toUpperCase() : 'T';
     const avatarCls = isUser ? 'avatar-user' : 'avatar-therapist';
+    const avatarExtraCls = isUser ? '' : ' avatar-video-wrap';
+    const avatarContent = isUser ? initial : therapistAvatarMarkup();
     const bubbleCls = isUser ? 'bubble-user' : 'bubble-therapist';
     const rowCls = isUser ? 'flex-row-reverse' : 'flex-row';
     const alignCls = isUser ? 'items-end' : 'items-start';
     return '' +
       '<div class="flex ' + rowCls + ' gap-2.5 items-start animate-grow-in">' +
-        '<div class="avatar-orb ' + avatarCls + '">' + initial + '</div>' +
+        '<div class="avatar-orb ' + avatarCls + avatarExtraCls + '" aria-label="' + label + '">' + avatarContent + '</div>' +
         '<div class="flex flex-col ' + alignCls + ' min-w-0 max-w-[78%]">' +
           '<span class="role-label mb-1 ' + (isUser ? 'text-right' : '') + '">' + label + '</span>' +
-          '<div class="bubble ' + bubbleCls + '">' + escapeHtml(content) + '</div>' +
+          '<div class="bubble ' + bubbleCls + '">' + formatChatContent(content) + '</div>' +
         '</div>' +
       '</div>';
 }
 
-async function addMessage(role, content) {
+function therapistAvatarMarkup(active = false) {
+    if (active) {
+        return '<video class="avatar-video" autoplay muted loop playsinline preload="metadata">' +
+            '<source src="/mandala-avatar.mp4" type="video/mp4">' +
+          '</video><span class="avatar-video-fallback">T</span>';
+    }
+    return '<img class="avatar-still" src="/mandala-avatar.jpg" alt="">' +
+        '<span class="avatar-video-fallback">T</span>';
+}
+
+function addMessage(role, content) {
     const container = document.getElementById('chat-messages');
     const empty = document.getElementById('chat-empty');
     if (empty) empty.classList.add('hidden');
     const wrapper = document.createElement('div');
     wrapper.innerHTML = renderBubble(role, content);
-    container.appendChild(wrapper.firstElementChild);
+    const message = wrapper.firstElementChild;
+    container.appendChild(message);
     scrollChatToBottom();
+    return message;
+}
+
+function addStreamingAssistantMessage() {
+    const message = addMessage('therapist', '');
+    const avatar = message.querySelector('.avatar-video-wrap');
+    if (avatar) {
+        avatar.classList.add('avatar-thinking');
+        avatar.innerHTML = therapistAvatarMarkup(true);
+        avatar.querySelector('video')?.play?.().catch(() => {});
+    }
+    const bubble = message.querySelector('.bubble');
+    bubble.classList.add('bubble-streaming');
+    bubble.innerHTML = renderWaitingMessage();
+    return { message, bubble, avatar };
+}
+
+function randomWaitingMessage() {
+    return waitingMessages[Math.floor(Math.random() * waitingMessages.length)];
+}
+
+function renderWaitingMessage(message = randomWaitingMessage()) {
+    return '<p class="waiting-message">' + escapeHtml(message) + ' <span class="stream-caret"></span></p>';
 }
 
 function scrollChatToBottom() {
     const stage = document.getElementById('chat-stage');
+    if (!stage) return;
     stage.scrollTop = stage.scrollHeight;
 }
 
-function setThinking(on) {
-    const el = document.getElementById('thinking');
-    if (!el) return;
-    el.classList.toggle('hidden', !on);
+function scheduleScrollChatToBottom() {
+    requestAnimationFrame(() => {
+        scrollChatToBottom();
+        setTimeout(scrollChatToBottom, 80);
+    });
+}
+
+async function fetchMemoryStatus() {
+    const resp = await fetch('/api/memory-status', { cache: 'no-store' });
+    if (!resp.ok) throw new Error('Memory status unavailable');
+    return await resp.json();
+}
+
+function memoryStatusKey(status) {
+    if (!status) return '';
+    return [
+        status.mind_signature,
+        status.social_signature,
+        status.mind_nodes,
+        status.mind_edges,
+        status.social_nodes,
+        status.social_edges
+    ].join(':');
+}
+
+async function ensureMemoryStatusBaseline() {
+    if (memoryStatusSnapshot) return memoryStatusSnapshot;
+    try {
+        memoryStatusSnapshot = await fetchMemoryStatus();
+    } catch (_) {
+        memoryStatusSnapshot = null;
+    }
+    return memoryStatusSnapshot;
+}
+
+function showMemorySignal(headline = 'New pattern') {
+    const signal = document.getElementById('memory-signal');
+    if (!signal) return;
+    const label = document.getElementById('memory-signal-headline');
+    if (label) label.textContent = headline || 'New pattern';
+    signal.classList.remove('memory-signal-active');
+    void signal.offsetWidth;
+    signal.classList.add('memory-signal-active');
+    setTimeout(() => signal.classList.remove('memory-signal-active'), 3200);
+}
+
+function watchMemoryWrite() {
+    const baseline = memoryStatusSnapshot;
+    if (!baseline) return;
+    const token = ++memoryWatchToken;
+    const started = Date.now();
+
+    async function poll() {
+        if (token !== memoryWatchToken) return;
+        try {
+            const next = await fetchMemoryStatus();
+            if (memoryStatusKey(next) !== memoryStatusKey(baseline)) {
+                memoryStatusSnapshot = next;
+                showMemorySignal('Memory updated');
+                return;
+            }
+        } catch (_) {
+            return;
+        }
+        if (Date.now() - started < 90000) {
+            setTimeout(poll, 1800);
+        }
+    }
+
+    setTimeout(poll, 900);
+}
+
+async function ensureSession() {
+    if (currentSessionId) return currentSessionId;
+    const resp = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'New Session' })
+    });
+    if (!resp.ok) throw new Error('Could not create session');
+    const session = await resp.json();
+    currentSessionId = session.id;
+    const shell = document.getElementById('app-shell');
+    if (shell) shell.dataset.sessionId = currentSessionId;
+    refreshSidebar();
+    return currentSessionId;
+}
+
+function buildChatStreamUrl(prompt) {
+    const params = new URLSearchParams({
+        prompt,
+        session_id: currentSessionId,
+        user_id: currentUserId
+    });
+    if (currentMode === 'draft') {
+        params.set('relationship_slug', 'default');
+        params.set('intent', 'general');
+        params.set('accountability', '50');
+        params.set('spirituality', '50');
+        params.set('directness', '50');
+        return '/api/draft-stream?' + params.toString();
+    }
+    return '/api/agent-stream?' + params.toString();
+}
+
+function streamAssistantResponse(prompt) {
+    return new Promise((resolve, reject) => {
+        const { message, bubble, avatar } = addStreamingAssistantMessage();
+        const source = new EventSource(buildChatStreamUrl(prompt));
+        let assembled = '';
+        let settled = false;
+        let responseSettled = false;
+        let hasFirstToken = false;
+        let memoryUpdated = false;
+        const waitingTimer = setInterval(() => {
+            if (!hasFirstToken && !settled) {
+                bubble.innerHTML = renderWaitingMessage();
+                scheduleScrollChatToBottom();
+            }
+        }, 2600);
+
+        function finishResponse(value) {
+            if (responseSettled) return;
+            responseSettled = true;
+            clearInterval(waitingTimer);
+            bubble.classList.remove('bubble-streaming');
+            bubble.innerHTML = formatChatContent(value || assembled);
+            if (avatar) {
+                avatar.classList.remove('avatar-thinking');
+                avatar.innerHTML = therapistAvatarMarkup(false);
+            }
+            resolve({ text: value || assembled, memoryUpdated });
+        }
+
+        source.onmessage = (event) => {
+            if (event.data === '[RESPONSE_DONE]') {
+                finishResponse(assembled);
+                return;
+            }
+            if (event.data.startsWith('[MEMORY_UPDATED]')) {
+                memoryUpdated = true;
+                const headline = event.data.replace('[MEMORY_UPDATED]', '').trim() || 'Memory updated';
+                showMemorySignal(headline);
+                fetchMemoryStatus().then((status) => {
+                    memoryStatusSnapshot = status;
+                }).catch(() => {});
+                return;
+            }
+            if (event.data === '[DONE]') {
+                settled = true;
+                source.close();
+                finishResponse(assembled);
+                return;
+            }
+            if (event.data.startsWith('error:') || event.data === '[error]') {
+                clearInterval(waitingTimer);
+                if (!assembled.trim()) message.remove();
+                source.close();
+                reject(new Error(event.data.replace(/^error:/, '') || 'Stream failed'));
+                return;
+            }
+            hasFirstToken = true;
+            assembled += event.data;
+            bubble.innerHTML = formatStreamingChatContent(assembled) || renderWaitingMessage();
+            scheduleScrollChatToBottom();
+        };
+
+        source.onerror = () => {
+            if (settled) return;
+            clearInterval(waitingTimer);
+            source.close();
+            bubble.classList.remove('bubble-streaming');
+            if (responseSettled) return;
+            reject(new Error('Stream connection failed'));
+        };
+    });
+}
+
+function setChatBusy(on) {
     const orb = document.getElementById('seed-send');
     if (orb) orb.toggleAttribute('disabled', on);
-    if (on) scrollChatToBottom();
+}
+
+function setVoiceRecording(on) {
+    const button = document.getElementById('voice-input');
+    const icon = document.getElementById('voice-input-icon');
+    if (!button || !icon) return;
+    button.setAttribute('aria-label', on ? 'Stop recording' : 'Record voice message');
+    button.title = on ? 'Stop recording' : 'Record voice message';
+    button.dataset.recording = on ? 'true' : 'false';
+    icon.innerHTML = on
+        ? '<rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" fill="none"/>'
+        : '<path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>';
+}
+
+async function toggleVoiceInput() {
+    if (voiceRecorder && voiceRecorder.state === 'recording') {
+        voiceRecorder.stop();
+        return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+        showToast('Voice input is not supported in this browser', 'error');
+        return;
+    }
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+            .find(type => MediaRecorder.isTypeSupported(type)) || '';
+        voiceChunks = [];
+        voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        voiceRecorder.ondataavailable = event => {
+            if (event.data.size > 0) voiceChunks.push(event.data);
+        };
+        voiceRecorder.onstop = async () => {
+            stream.getTracks().forEach(track => track.stop());
+            setVoiceRecording(false);
+            const input = document.getElementById('chat-input');
+            const audio = new Blob(voiceChunks, { type: voiceRecorder.mimeType || 'audio/webm' });
+            voiceRecorder = null;
+            if (!audio.size) return;
+            try {
+                setChatBusy(true);
+                const response = await fetch('/api/transcribe', {
+                    method: 'POST',
+                    headers: { 'Content-Type': audio.type },
+                    body: audio
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Transcription failed');
+                if (result.transcript) {
+                    input.value = input.value.trim()
+                        ? input.value.trimEnd() + ' ' + result.transcript
+                        : result.transcript;
+                    input.focus();
+                } else {
+                    showToast('No speech detected', 'error');
+                }
+            } catch (error) {
+                showToast('Error: ' + error.message, 'error');
+            } finally {
+                setChatBusy(false);
+            }
+        };
+        voiceRecorder.start();
+        setVoiceRecording(true);
+    } catch (error) {
+        showToast('Microphone access was not granted', 'error');
+    }
 }
 
 async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
+    await ensureMemoryStatusBaseline();
+    await ensureSession();
     input.value = '';
     addMessage('user', text);
-    setThinking(true);
+    setChatBusy(true);
     try {
-        const resp = await fetch('/api/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: currentSessionId,
-                message: text,
-                mode: currentMode
-            })
-        });
-        if (!resp.ok) throw new Error('Chat request failed');
-        const data = await resp.json();
-        if (data.session_id) currentSessionId = data.session_id;
-        if (data.response) addMessage('therapist', data.response);
+        const response = await streamAssistantResponse(text);
+        if (response.text.trim() && !response.memoryUpdated) {
+            watchMemoryWrite();
+        }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     } finally {
-        setThinking(false);
+        setChatBusy(false);
     }
 }
-
-function buildStreamUrl(sessionId) { return '/api/chat-stream/' + sessionId; }
 
 function submitPreset(preset) {
     document.getElementById('chat-input').value = preset;
@@ -262,6 +559,41 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+function formatChatContent(str) {
+    const paragraphs = String(str || '')
+        .trim()
+        .split(/\n{2,}/)
+        .filter(Boolean)
+        .map((paragraph) => {
+            const escaped = escapeHtml(paragraph.trim())
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+            return '<p>' + escaped + '</p>';
+        });
+    return paragraphs.length ? paragraphs.join('') : '';
+}
+
+function formatStreamingChatContent(str) {
+    const paragraphs = String(str || '')
+        .split(/\n{2,}/)
+        .filter((paragraph) => paragraph.length > 0)
+        .map((paragraph) => {
+            const tokens = paragraph.split(/(\s+)/);
+            let wordIndex = 0;
+            const html = tokens.map((token) => {
+                if (!token) return '';
+                if (/^\s+$/.test(token)) return token.replace(/\n/g, '<br>');
+                const escaped = escapeHtml(token);
+                const cls = wordIndex >= Math.max(0, tokens.length - 18) ? ' stream-word-new' : '';
+                const delay = Math.min(wordIndex, 10) * 18;
+                wordIndex += 1;
+                return '<span class="stream-word' + cls + '" style="animation-delay:' + delay + 'ms">' + escaped + '</span>';
+            }).join('');
+            return '<p>' + html + '</p>';
+        });
+    return paragraphs.length ? paragraphs.join('') : '';
 }
 
 async function registerAdditionalPasskey() {
@@ -305,11 +637,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     const target = document.getElementById('chat-messages');
     if (target) mo.observe(target, { childList: true });
+    if (target && target.children.length > 0) scheduleScrollChatToBottom();
+    ensureMemoryStatusBaseline();
 });
 
 // After an htmx swap loads chat history, scroll to foot
 document.body.addEventListener('htmx:afterSwap', (e) => {
-    if (e.detail.target.id === 'chat-messages') scrollChatToBottom();
+    if (e.detail.target.id === 'chat-messages') scheduleScrollChatToBottom();
 });
 </script>
 {% endblock %}

@@ -4,15 +4,18 @@
     <div class="avatar-orb avatar-user">Y</div>
     <div class="flex flex-col items-end min-w-0 max-w-[78%]">
         <span class="role-label mb-1 text-right">You</span>
-        <div class="bubble bubble-user">{{ message.content }}</div>
+        <div class="bubble bubble-user">{{ message.content_html|safe }}</div>
     </div>
 </div>
 {% else %}
 <div class="flex flex-row gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}">
-    <div class="avatar-orb avatar-therapist">T</div>
+    <div class="avatar-orb avatar-therapist avatar-video-wrap" aria-label="Therapist">
+        <img class="avatar-still" src="/mandala-avatar.jpg" alt="">
+        <span class="avatar-video-fallback">T</span>
+    </div>
     <div class="flex flex-col items-start min-w-0 max-w-[78%]">
         <span class="role-label mb-1">Therapist</span>
-        <div class="bubble bubble-therapist">{{ message.content }}</div>
+        <div class="bubble bubble-therapist">{{ message.content_html|safe }}</div>
     </div>
 </div>
 {% endif %}

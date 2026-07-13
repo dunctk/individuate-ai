@@ -74,4 +74,15 @@ Since this is mobile-first, we focus on thumb-reach and gestures.
 
 > *"Imagine if **Headspace** designed a chat interface for **Carl Jung**, built by **modern Swiss typographers**."*
 
-Would you like me to generate a **Tailwind CSS config** snippet that captures these specific colors and font families so you can drop it straight into your project?
+-----
+
+### **7. Iterative UI Improvement Loop**
+
+The mind-map screen now carries a four-step human review loop:
+
+1. **Orient**: Can a returning user quickly tell what exists and what matters?
+2. **Inspect**: Can they find a trigger, belief, need, or pattern without fighting graph density?
+3. **Clarify**: Do labels and categories feel specific enough to trust?
+4. **Act**: Does the map lead back to a concrete next move?
+
+Progress is tracked in the UI itself with a persistent active step saved to `localStorage` under `mindMapLoopStep`. Current implementation pass: **added loop panel, graph search, category focus, visible counts, and derived connectedness/clarity scores**.

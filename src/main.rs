@@ -7,11 +7,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar};
+use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
+use base64::Engine;
 use dashmap::DashMap;
 use individuateai::agent::{
     self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
-    stream_handler, RelationshipProfile, User,
+    stream_handler, AuthSession, RelationshipProfile, User,
 };
 use individuateai::fileserv;
 use individuateai::templates;
@@ -19,7 +20,6 @@ use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 struct AppState {
@@ -78,16 +78,16 @@ async fn main() {
         rate_limiter: RateLimiter::new(10, 60), // 10 attempts per 60s window
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::Any)
-        .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any);
-
     let rate_limited_routes = Router::new()
-        .route("/api/login", post(login_handler))
-        .route("/api/signup", post(signup_handler))
-        .route("/api/forgot-password", post(forgot_password_handler))
-        .route("/api/reset-password", post(reset_password_handler))
+        .route("/api/recovery/login", post(recovery_login_handler))
+        .route("/api/passkey/register/start", post(passkey_register_start))
+        .route(
+            "/api/passkey/register/complete",
+            post(passkey_register_complete),
+        )
+        .route("/api/passkey/revoke", post(passkey_revoke_handler))
+        .route("/api/passkey/login/start", post(passkey_login_start))
+        .route("/api/passkey/login/complete", post(passkey_login_complete))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_auth,
@@ -100,8 +100,6 @@ async fn main() {
         .route("/signup", get(signup_page))
         .route("/mind-map", get(mind_map_page))
         .route("/social-graph", get(social_graph_page))
-        .route("/forgot-password", get(forgot_password_page))
-        .route("/reset-password/:token", get(reset_password_page))
         // Fragments
         .route("/fragments/sidebar", get(sidebar_fragment))
         .route("/fragments/chat/:session_id", get(chat_fragment))
@@ -109,7 +107,6 @@ async fn main() {
         // API (non-rate-limited)
         .route("/api/logout", get(logout_handler))
         .route("/api/whoami", get(whoami_handler))
-        .route("/api/verify-email/:token", get(verify_email_handler))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/history", get(chat_history))
         .route("/api/profiles", get(list_profiles))
@@ -123,22 +120,12 @@ async fn main() {
         .route("/api/agent-stream", get(stream_handler))
         .route("/api/draft-stream", get(draft_stream_handler))
         .route("/api/graph/:user_id", get(graph_handler))
-        // Passkey
-        .route("/api/passkey/register/start", post(passkey_register_start))
-        .route(
-            "/api/passkey/register/complete",
-            post(passkey_register_complete),
-        )
-        .route("/api/passkey/login/start", post(passkey_login_start))
-        .route("/api/passkey/login/complete", post(passkey_login_complete))
         // Static
         .route("/pkg/*path", get(fileserv::static_file_handler))
         .route("/passkey.js", get(passkey_js_handler))
         .route("/:filename", get(static_asset_handler))
         // Rate-limited auth routes
         .merge(rate_limited_routes)
-        // CORS (outermost)
-        .layer(cors)
         // Auth middleware
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
         .with_state(state);
@@ -172,9 +159,7 @@ async fn auth_guard(
         && !path.contains("/signup")
         && !path.contains("/passkey/login")
         && !path.contains("/passkey/register")
-        && !path.contains("forgot-password")
-        && !path.contains("reset-password")
-        && !path.contains("verify-email");
+        && !path.contains("recovery/login");
 
     if (protected || is_api) && !has_auth_cookie(req.headers(), &state.key) {
         if path.starts_with("/api/") {
@@ -224,12 +209,14 @@ async fn rate_limit_auth(
 
 // --- Cookie helpers ---
 
-fn set_auth_cookie(_key: &Key, user_id: &str, is_secure: bool) -> Cookie<'static> {
-    Cookie::build((agent::AUTH_COOKIE_NAME, user_id.to_string()))
+fn set_auth_cookie(_key: &Key, session: &AuthSession, is_secure: bool) -> Cookie<'static> {
+    let value = serde_json::to_string(session).expect("auth session serializes");
+    Cookie::build((agent::AUTH_COOKIE_NAME, value))
         .path("/")
         .secure(is_secure)
         .http_only(true)
-        .max_age(time::Duration::days(30))
+        .same_site(SameSite::Lax)
+        .max_age(time::Duration::days(365))
         .build()
 }
 
@@ -238,15 +225,17 @@ fn remove_auth_cookie(_key: &Key, is_secure: bool) -> Cookie<'static> {
         .path("/")
         .secure(is_secure)
         .http_only(true)
+        .same_site(SameSite::Lax)
         .max_age(time::Duration::seconds(0))
         .build();
     c.make_removal();
     c
 }
 
-fn extract_user_id(jar: &PrivateCookieJar) -> Option<String> {
+fn extract_auth_session(jar: &PrivateCookieJar) -> Option<AuthSession> {
     jar.get(agent::AUTH_COOKIE_NAME)
-        .map(|c| c.value().to_string())
+        .and_then(|c| serde_json::from_str::<AuthSession>(c.value()).ok())
+        .filter(|session| session.dek.len() == individuateai::security::DEK_LEN)
 }
 
 fn cookie_is_secure(headers: &HeaderMap) -> bool {
@@ -255,9 +244,11 @@ fn cookie_is_secure(headers: &HeaderMap) -> bool {
 
 async fn get_authed_user(headers: &HeaderMap, key: &Key) -> Option<User> {
     let jar = PrivateCookieJar::from_headers(headers, key.clone());
-    let user_id = extract_user_id(&jar)?;
+    let session = extract_auth_session(&jar)?;
     let runtime = agent_runtime().await.ok()?;
-    runtime.get_user(user_id).await.ok()
+    runtime.cache_dek(&session.user_id, session.dek).ok()?;
+    runtime.migrate_user_content(&session.user_id).await.ok()?;
+    runtime.get_user(session.user_id).await.ok()
 }
 
 // --- Page Handlers ---
@@ -388,225 +379,13 @@ async fn profile_drawer_fragment(
 
 // --- API Handlers ---
 
-#[derive(Deserialize)]
-struct LoginPayload {
-    email: String,
-    password: String,
-}
-
-async fn login_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    payload: axum::extract::Form<LoginPayload>,
-) -> Response {
-    let runtime = match agent_runtime().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    match runtime
-        .login(payload.email.clone(), payload.password.clone())
-        .await
-    {
-        Ok(user) => {
-            let is_secure = cookie_is_secure(&headers);
-            let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
-            let mut jar = cookie::CookieJar::new();
-            jar.private_mut(&state.key).add(cookie);
-            let mut resp = Json(serde_json::json!(user)).into_response();
-            if let Some(h) = jar.delta().last() {
-                resp.headers_mut().insert(
-                    header::SET_COOKIE,
-                    header::HeaderValue::from_str(&h.encoded().to_string()).unwrap(),
-                );
-            }
-            resp.headers_mut().insert(
-                header::HeaderName::from_static("hx-redirect"),
-                header::HeaderValue::from_static("/"),
-            );
-            resp
-        }
-        Err(_) => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid credentials"})),
-        )
-            .into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-struct SignupPayload {
-    email: String,
-}
-
-async fn signup_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<SignupPayload>,
-) -> Response {
-    let runtime = match agent_runtime().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    let random_password = uuid::Uuid::new_v4().to_string();
-    match runtime.signup(payload.email.clone(), random_password).await {
-        Ok(user) => {
-            // Generate email verification token
-            if let Ok(verify_token) = runtime.generate_email_verification_token(&user.id).await {
-                let verify_url = format!(
-                    "{}/api/verify-email/{}",
-                    std::env::var("PUBLIC_URL")
-                        .unwrap_or_else(|_| "http://localhost:3008".to_string()),
-                    verify_token
-                );
-                tracing::info!("Email verification URL: {}", verify_url);
-            }
-
-            let is_secure = cookie_is_secure(&headers);
-            let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
-            let mut jar = cookie::CookieJar::new();
-            jar.private_mut(&state.key).add(cookie);
-            let mut resp = Json(serde_json::json!(user)).into_response();
-            if let Some(h) = jar.delta().last() {
-                resp.headers_mut().insert(
-                    header::SET_COOKIE,
-                    header::HeaderValue::from_str(&h.encoded().to_string()).unwrap(),
-                );
-            }
-            resp
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
-// --- Password Reset Handlers ---
-
-async fn forgot_password_page(State(state): State<AppState>) -> impl IntoResponse {
-    let html = templates::render_forgot_password(&state.templates);
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-}
-
-async fn reset_password_page(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> impl IntoResponse {
-    let html = templates::render_reset_password(&state.templates, &token);
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
-}
-
-#[derive(Deserialize)]
-struct ForgotPasswordPayload {
-    email: String,
-}
-
-async fn forgot_password_handler(Json(payload): Json<ForgotPasswordPayload>) -> Response {
-    let runtime = match agent_runtime().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    match runtime.generate_password_reset_token(&payload.email).await {
-        Ok(token) => {
-            let reset_url = format!(
-                "{}/reset-password/{}",
-                std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3008".to_string()),
-                token
-            );
-            tracing::info!("Password reset URL: {}", reset_url);
-            Json(serde_json::json!({
-                "ok": true,
-                "message": "If an account exists with that email, a reset link has been sent.",
-                "dev_reset_url": reset_url,
-            }))
-            .into_response()
-        }
-        Err(e) => {
-            // Don't reveal if email exists - always return success
-            tracing::warn!("Password reset request failed: {}", e);
-            Json(serde_json::json!({
-                "ok": true,
-                "message": "If an account exists with that email, a reset link has been sent.",
-            }))
-            .into_response()
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct ResetPasswordPayload {
-    token: String,
-    password: String,
-}
-
-async fn reset_password_handler(Json(payload): Json<ResetPasswordPayload>) -> Response {
-    if payload.password.len() < 8 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Password must be at least 8 characters"})),
-        )
-            .into_response();
-    }
-    let runtime = match agent_runtime().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    match runtime.verify_and_reset_password(&payload.token, &payload.password).await {
-        Ok(_) => Json(serde_json::json!({"ok": true, "message": "Password reset successfully. You can now log in."})).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
-    }
-}
-
-// --- Email Verification Handler ---
-
-async fn verify_email_handler(Path(token): Path<String>) -> Response {
-    let runtime = match agent_runtime().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
-        }
-    };
-    match runtime.verify_email_with_token(&token).await {
-        Ok(_) => Json(serde_json::json!({"ok": true, "message": "Email verified successfully."}))
-            .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
-}
-
 async fn logout_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
+    if let Some(session) = extract_auth_session(&jar) {
+        if let Ok(runtime) = agent_runtime().await {
+            runtime.forget_dek(&session.user_id);
+        }
+    }
     let is_secure = cookie_is_secure(&headers);
     let cookie = remove_auth_cookie(&state.key, is_secure);
     let mut jar = cookie::CookieJar::new();
@@ -619,6 +398,52 @@ async fn logout_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
         );
     }
     resp
+}
+
+#[derive(Deserialize)]
+struct RecoveryLoginPayload {
+    email: String,
+    recovery_key: String,
+}
+
+async fn recovery_login_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RecoveryLoginPayload>,
+) -> Response {
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    match runtime
+        .login_with_recovery(payload.email, payload.recovery_key)
+        .await
+    {
+        Ok((user, dek)) => {
+            let session = AuthSession {
+                user_id: user.id,
+                dek,
+            };
+            let cookie = set_auth_cookie(&state.key, &session, cookie_is_secure(&headers));
+            let mut jar = cookie::CookieJar::new();
+            jar.private_mut(&state.key).add(cookie);
+            let mut response = Json(serde_json::json!({"redirect": "/"})).into_response();
+            if let Some(header) = jar.delta().last() {
+                response.headers_mut().insert(
+                    header::SET_COOKIE,
+                    header::HeaderValue::from_str(&header.encoded().to_string()).unwrap(),
+                );
+            }
+            response
+        }
+        Err(_) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid recovery credentials"})),
+        )
+            .into_response(),
+    }
 }
 
 async fn whoami_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<Option<User>> {
@@ -1036,6 +861,8 @@ struct PasskeyEmailPayload {
 struct PasskeyStartResponse {
     challenge_id: String,
     options: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_key: Option<String>,
 }
 
 async fn passkey_register_start(
@@ -1053,11 +880,15 @@ async fn passkey_register_start(
         }
     };
     match can_register {
-        Ok((req_id, challenge)) => {
-            let options = serde_json::to_value(&challenge).unwrap_or_default();
+        Ok(start) => {
+            let mut options = serde_json::to_value(&start.challenge).unwrap_or_default();
+            options["publicKey"]["extensions"] = serde_json::json!({
+                "prf": { "eval": { "first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&start.prf_salt) } }
+            });
             Json(PasskeyStartResponse {
-                challenge_id: req_id,
+                challenge_id: start.challenge_id,
                 options,
+                recovery_key: start.recovery_key,
             })
             .into_response()
         }
@@ -1073,6 +904,12 @@ async fn passkey_register_start(
 struct PasskeyCompletePayload {
     challenge_id: String,
     credential: serde_json::Value,
+    prf_output: Option<String>,
+    prf_enabled: Option<bool>,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    confirm_recovery: bool,
 }
 
 async fn passkey_register_complete(
@@ -1081,18 +918,49 @@ async fn passkey_register_complete(
     Json(payload): Json<PasskeyCompletePayload>,
 ) -> Response {
     let runtime = agent_runtime().await.unwrap();
+    if payload.prf_enabled != Some(true) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "This authenticator does not support the required PRF extension"}))).into_response();
+    }
     let response: webauthn_rs_proto::RegisterPublicKeyCredential =
-        serde_json::from_value(payload.credential).unwrap();
+        match serde_json::from_value(payload.credential) {
+            Ok(response) => response,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid passkey response"})),
+                )
+                    .into_response()
+            }
+        };
+    let prf_output = match payload.prf_output.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    }) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing PRF output"})),
+            )
+                .into_response()
+        }
+    };
     match runtime
-        .finish_passkey_registration(payload.challenge_id, response)
+        .finish_passkey_registration(payload.challenge_id, response, prf_output, payload.label)
         .await
     {
-        Ok(user) => {
+        Ok((user, dek, recovery_key)) => {
             let is_secure = cookie_is_secure(&headers);
-            let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
+            let session = AuthSession {
+                user_id: user.id,
+                dek,
+            };
+            let cookie = set_auth_cookie(&state.key, &session, is_secure);
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
-            let mut resp = Json(serde_json::json!({"redirect": "/"})).into_response();
+            let mut resp = Json(serde_json::json!({"redirect": "/", "recovery_key": recovery_key}))
+                .into_response();
             if let Some(h) = jar.delta().last() {
                 resp.headers_mut().insert(
                     header::SET_COOKIE,
@@ -1112,11 +980,22 @@ async fn passkey_register_complete(
 async fn passkey_login_start(Json(payload): Json<PasskeyEmailPayload>) -> Response {
     let runtime = agent_runtime().await.unwrap();
     match runtime.start_passkey_login(payload.email).await {
-        Ok((req_id, challenge)) => {
-            let options = serde_json::to_value(&challenge).unwrap_or_default();
+        Ok((req_id, challenge, prf_salts)) => {
+            let mut options = serde_json::to_value(&challenge).unwrap_or_default();
+            let eval_by_credential: serde_json::Map<String, serde_json::Value> = prf_salts
+                .into_iter()
+                .map(|(credential_id, salt)| (
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
+                    serde_json::json!({"first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(salt)}),
+                ))
+                .collect();
+            options["publicKey"]["extensions"] = serde_json::json!({
+                "prf": { "evalByCredential": eval_by_credential }
+            });
             Json(PasskeyStartResponse {
                 challenge_id: req_id,
                 options,
+                recovery_key: None,
             })
             .into_response()
         }
@@ -1135,14 +1014,41 @@ async fn passkey_login_complete(
 ) -> Response {
     let runtime = agent_runtime().await.unwrap();
     let response: webauthn_rs_proto::PublicKeyCredential =
-        serde_json::from_value(payload.credential).unwrap();
+        match serde_json::from_value(payload.credential) {
+            Ok(response) => response,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid passkey response"})),
+                )
+                    .into_response()
+            }
+        };
+    let prf_output = match payload.prf_output.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    }) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing PRF output"})),
+            )
+                .into_response()
+        }
+    };
     match runtime
-        .finish_passkey_login(payload.challenge_id, response)
+        .finish_passkey_login(payload.challenge_id, response, prf_output)
         .await
     {
-        Ok(user) => {
+        Ok((user, dek)) => {
             let is_secure = cookie_is_secure(&headers);
-            let cookie = set_auth_cookie(&state.key, &user.id, is_secure);
+            let session = AuthSession {
+                user_id: user.id,
+                dek,
+            };
+            let cookie = set_auth_cookie(&state.key, &session, is_secure);
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
             let mut resp = Json(serde_json::json!({"redirect": "/"})).into_response();
@@ -1157,6 +1063,65 @@ async fn passkey_login_complete(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn passkey_revoke_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<PasskeyCompletePayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+    };
+    let response: webauthn_rs_proto::PublicKeyCredential =
+        match serde_json::from_value(payload.credential) {
+            Ok(response) => response,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid passkey response"})),
+                )
+                    .into_response()
+            }
+        };
+    let prf_output = match payload.prf_output.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    }) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing PRF output"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+        }
+    };
+    match runtime
+        .revoke_passkey(
+            payload.challenge_id,
+            response,
+            prf_output,
+            &user.id,
+            payload.confirm_recovery,
+        )
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
         )
             .into_response(),
     }

@@ -7,3 +7,6 @@ dev:
 
 run:
     cargo run
+
+e2e:
+    npm run test:e2e

@@ -38,14 +38,18 @@ document.getElementById('create-passkey-btn').addEventListener('click', async ()
         });
         if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Registration start failed'); }
         const { challenge_id, options } = await resp.json();
-        const cred = await window.registerPasskey(options);
+        const passkey = await window.registerPasskey(options);
         const verify = await fetch('/api/passkey/register/complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge_id, credential: cred })
+            body: JSON.stringify({ challenge_id, credential: passkey.credential, prf_output: passkey.prf_output, prf_enabled: passkey.prf_enabled })
         });
         if (!verify.ok) { const e = await verify.json(); throw new Error(e.error || 'Verification failed'); }
         const result = await verify.json();
+        if (result.recovery_key) {
+            const recovery = prompt('Save this recovery key somewhere safe. It is the only fallback if you lose every passkey:\n\n' + result.recovery_key);
+            if (recovery === null) { return; }
+        }
         if (result.redirect) { window.location.href = result.redirect; }
     } catch (e) {
         errEl.textContent = e.message;

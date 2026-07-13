@@ -26,12 +26,21 @@ function base64UrlEncode(buffer) {
 
 window.registerPasskey = async function(optionsJson) {
     try {
-        console.log("Register Passkey Options:", optionsJson);
-        const options = optionsJson; // Assuming optionsJson is the object from Rust
+        const options = structuredClone(optionsJson);
 
         // Convert challenge from Base64URL to Buffer
         options.publicKey.challenge = base64UrlDecode(options.publicKey.challenge);
         options.publicKey.user.id = base64UrlDecode(options.publicKey.user.id);
+
+        if (options.publicKey.extensions?.prf?.eval?.first) {
+            options.publicKey.extensions.prf.eval.first = base64UrlDecode(options.publicKey.extensions.prf.eval.first);
+        }
+        if (options.publicKey.extensions?.prf?.evalByCredential) {
+            for (const entry of Object.values(options.publicKey.extensions.prf.evalByCredential)) {
+                if (entry.first) entry.first = base64UrlDecode(entry.first);
+                if (entry.second) entry.second = base64UrlDecode(entry.second);
+            }
+        }
         
         if (options.publicKey.excludeCredentials) {
             for (let cred of options.publicKey.excludeCredentials) {
@@ -40,6 +49,8 @@ window.registerPasskey = async function(optionsJson) {
         }
 
         const cred = await navigator.credentials.create(options);
+        const extensions = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+        const prf = extensions.prf || {};
         
         // Convert response buffers to Base64URL for server
         const response = {
@@ -56,8 +67,11 @@ window.registerPasskey = async function(optionsJson) {
             response.authenticatorAttachment = cred.authenticatorAttachment;
         }
         
-        console.log("Register Response:", response);
-        return response;
+        return {
+            credential: response,
+            prf_enabled: prf.enabled === true,
+            prf_output: prf.results?.first ? base64UrlEncode(prf.results.first) : null,
+        };
     } catch (e) {
         console.error("Passkey Register Error:", e);
         throw e;
@@ -66,10 +80,19 @@ window.registerPasskey = async function(optionsJson) {
 
 window.loginPasskey = async function(optionsJson) {
     try {
-        console.log("Login Passkey Options:", optionsJson);
-        const options = optionsJson;
+        const options = structuredClone(optionsJson);
 
         options.publicKey.challenge = base64UrlDecode(options.publicKey.challenge);
+
+        if (options.publicKey.extensions?.prf?.eval?.first) {
+            options.publicKey.extensions.prf.eval.first = base64UrlDecode(options.publicKey.extensions.prf.eval.first);
+        }
+        if (options.publicKey.extensions?.prf?.evalByCredential) {
+            for (const entry of Object.values(options.publicKey.extensions.prf.evalByCredential)) {
+                if (entry.first) entry.first = base64UrlDecode(entry.first);
+                if (entry.second) entry.second = base64UrlDecode(entry.second);
+            }
+        }
         
         if (options.publicKey.allowCredentials) {
             for (let cred of options.publicKey.allowCredentials) {
@@ -78,6 +101,8 @@ window.loginPasskey = async function(optionsJson) {
         }
 
         const cred = await navigator.credentials.get(options);
+        const extensions = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+        const prf = extensions.prf || {};
 
         const response = {
             id: cred.id,
@@ -90,8 +115,11 @@ window.loginPasskey = async function(optionsJson) {
                 userHandle: cred.response.userHandle ? base64UrlEncode(cred.response.userHandle) : null,
             }
         };
-        console.log("Login Response:", response);
-        return response;
+        return {
+            credential: response,
+            prf_enabled: prf.enabled === true,
+            prf_output: prf.results?.first ? base64UrlEncode(prf.results.first) : null,
+        };
     } catch (e) {
         console.error("Passkey Login Error:", e);
         throw e;

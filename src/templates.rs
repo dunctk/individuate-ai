@@ -74,16 +74,6 @@ pub fn create_env() -> Environment<'static> {
         include_str!("../templates/social_graph.html"),
     )
     .unwrap();
-    env.add_template(
-        "forgot_password",
-        include_str!("../templates/forgot_password.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "reset_password",
-        include_str!("../templates/reset_password.html"),
-    )
-    .unwrap();
     env
 }
 
@@ -195,22 +185,6 @@ pub fn render_profile_drawer(
         .unwrap()
 }
 
-pub fn render_forgot_password(env: &Environment) -> String {
-    env.get_template("forgot_password")
-        .unwrap()
-        .render(json!({}))
-        .unwrap()
-}
-
-pub fn render_reset_password(env: &Environment, token: &str) -> String {
-    env.get_template("reset_password")
-        .unwrap()
-        .render(json!({
-            "token": token,
-        }))
-        .unwrap()
-}
-
 pub fn render_mind_map(env: &Environment, graph: &serde_json::Value, user_id: &str) -> String {
     let graph_json = graph.clone();
     env.get_template("mind_map")
@@ -250,8 +224,6 @@ mod tests {
             "profile_drawer",
             "mind_map",
             "social_graph",
-            "forgot_password",
-            "reset_password",
         ] {
             env.get_template(name).expect("template registered");
         }

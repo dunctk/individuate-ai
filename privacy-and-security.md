@@ -45,16 +45,16 @@ deliberately do not, and the simplest design that meets those requirements.
   all extractors) sends `provider.data_collection = "deny"`, restricting
   routing to providers that do not retain or train on prompts.
   `OPENROUTER_DATA_COLLECTION=allow` is the escape hatch.
-- **Scoping and auth.** Argon2 password hashing; every graph/stream/session
-  handler verifies the authenticated cookie matches the requested user;
-  session ownership is checked before streaming. `data/` is gitignored
-  wholesale so no database or backup can be committed.
+- **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
+  session handler verifies the authenticated private cookie matches the
+  requested user; session ownership is checked before streaming. `data/` is
+  gitignored wholesale so no database or backup can be committed.
 
 Layer 1 protects against stolen disks, leaked backups, file-level exfiltration,
 and commit accidents. It does not protect against a compromised running server,
 because `MEMORY_DB_KEY` lives in the deployment environment.
 
-## Layer 2 — per-user encryption (planned)
+## Layer 2 — per-user encryption (implemented)
 
 One key hierarchy, hotel-lock model: **one DEK per user, many independent
 sealed copies of it. The server can never unseal any of them.**
@@ -154,11 +154,12 @@ remains underneath as the outer layer.
 
 ## Rollout phases
 
-1. Key hierarchy: DEK + wraps table, PRF plumbing in the passkey JS/handlers,
-   DEK-in-cookie. Nothing encrypted yet — keys flow end to end.
-2. Encrypt content columns with a per-user migration on next login.
-3. In-app vector recall over encrypted embeddings.
-4. Recovery-key UX, passkey management UI (add/remove/labels), then optional
-   DEK rotation on revocation.
+1. **Implemented:** key hierarchy, DEK + wraps table, PRF plumbing in the
+   passkey JS/handlers, and DEK-in-cookie.
+2. **Implemented:** encrypted content columns with per-user migration on next
+   login.
+3. **Implemented:** in-app vector recall over encrypted embeddings.
+4. **Implemented:** recovery-key UX and passkey add/revoke support. Optional
+   DEK rotation on revocation remains a later hardening step.
 
 Each phase ships independently; the app works normally between phases.

@@ -5,7 +5,8 @@ use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 pub async fn static_file_handler(uri: Uri) -> Response {
-    let res = get_static_file(uri.clone(), "target/site").await.unwrap();
+    let site_root = std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+    let res = get_static_file(uri.clone(), &site_root).await.unwrap();
     if res.status() == StatusCode::OK {
         return res;
     }

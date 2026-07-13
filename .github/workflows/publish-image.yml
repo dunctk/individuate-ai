@@ -1,0 +1,46 @@
+name: Publish container image
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-container-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository }}
+      COOLIFY_DEPLOY_HOOK_URL: ${{ secrets.COOLIFY_DEPLOY_HOOK_URL }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        run: |
+          printf '%s' "$GITHUB_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish immutable image
+        run: |
+          set -eu
+          image="${IMAGE_NAME,,}"
+          docker build --pull --tag "$image:${GITHUB_SHA}" --tag "$image:latest" .
+          docker push "$image:${GITHUB_SHA}"
+          docker push "$image:latest"
+
+      - name: Trigger Coolify deployment
+        if: ${{ env.COOLIFY_DEPLOY_HOOK_URL != '' }}
+        run: |
+          curl --fail --show-error --silent --retry 3 \
+            --request GET "$COOLIFY_DEPLOY_HOOK_URL"

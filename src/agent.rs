@@ -10,6 +10,14 @@ pub struct User {
     pub username: String,
 }
 
+/// The only authenticated session material the server accepts.  The DEK is
+/// encrypted by the private cookie; it is never persisted in SQLite.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuthSession {
+    pub user_id: String,
+    pub dek: Vec<u8>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -169,21 +177,16 @@ mod runtime {
         PatientGraph, RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode,
         User,
     };
+    use crate::security;
     use std::{
         collections::{hash_map::DefaultHasher, HashMap, HashSet},
         hash::{Hash, Hasher},
         path::Path as FsPath,
-        sync::{Arc, Once},
+        sync::Arc,
         time::Instant,
     };
 
     use anyhow::{Context, Result};
-    use argon2::{
-        password_hash::{
-            rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-        },
-        Argon2,
-    };
     use axum::{
         extract::{Path, Query},
         http::{HeaderMap, StatusCode},
@@ -191,32 +194,26 @@ mod runtime {
         response::Json,
     };
     use axum_extra::extract::cookie::{Key, PrivateCookieJar};
+    use base64::Engine;
     use dashmap::DashMap;
     use rig::streaming::StreamingPrompt;
     use rig::{
         agent::AgentBuilder,
         client::{CompletionClient, EmbeddingsClient},
         completion::{message::Text, AssistantContent, Message, Prompt},
-        embeddings::EmbeddingsBuilder,
+        embeddings::EmbeddingModel,
         providers::{openai, openrouter},
-        Embed,
     };
     use rig::{completion::ToolDefinition, tool::Tool};
-    use rig_sqlite::{Column, ColumnValue, SqliteVectorStore, SqliteVectorStoreTable};
-    use rusqlite::ffi::{sqlite3, sqlite3_api_routines, sqlite3_auto_extension};
     use rusqlite::OptionalExtension;
     use schemars::{schema_for, JsonSchema};
     use serde::{Deserialize, Serialize};
-    use sqlite_vec::sqlite3_vec_init;
     use tokio::sync::{mpsc, OnceCell, RwLock};
     use tokio::time::{sleep, timeout, Duration};
     use tokio_rusqlite::Connection;
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::StreamExt;
     use webauthn_rs::prelude::*;
-
-    type SqliteExtensionFn =
-        unsafe extern "C" fn(*mut sqlite3, *mut *mut i8, *const sqlite3_api_routines) -> i32;
 
     const THERAPIST_SYSTEM_PROMPT: &str = r###"
         You are IndividuateAI, a Jungian, gestalt-informed, somatic-aware therapist. Keep responses grounded and practical, usually under ~180 words; go longer only when the user brings heavy material that deserves room. If the user shares safety-critical content, encourage professional or emergency support.
@@ -310,8 +307,6 @@ mod runtime {
         Avoid generic words like therapy session, check-in, conversation, or support unless necessary.
     "###;
 
-    pub(crate) const AUTH_COOKIE_NAME: &str = "auth_token";
-
     /// Cookie signing/encryption key derived (HKDF, via `Key::derive_from`)
     /// from the mandatory COOKIE_SECRET env var. Fails closed: no secret, no
     /// server — there is deliberately no built-in fallback key.
@@ -344,11 +339,6 @@ mod runtime {
         pub nodes_to_remove_ids: Vec<String>,
         #[serde(default)]
         pub edges_to_remove: Vec<GraphEdge>,
-    }
-
-    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
-    struct GraphReadArgs {
-        pub user_id: String,
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -555,110 +545,25 @@ mod runtime {
         }
     }
 
-    #[derive(Debug, thiserror::Error)]
-    enum GraphToolError {
-        #[error("{0}")]
-        Message(String),
-    }
-
-    #[derive(Clone)]
-    struct GraphReaderTool {
-        conn: Connection,
-    }
-
-    #[derive(Clone)]
-    struct GraphManagerTool {
-        conn: Connection,
-    }
-
     #[derive(Clone)]
     struct CurrentDateTimeTool;
 
-    #[derive(Embed, Clone, Debug, Serialize, Deserialize)]
-    pub struct MemoryFragment {
-        pub id: String,
-        pub title: String,
-        #[embed]
-        pub content: String,
-        pub tags: String,
+    #[derive(Clone, Debug)]
+    struct PendingRegistration {
+        created_at: Instant,
+        user_id: String,
+        state: PasskeyRegistration,
+        dek: [u8; security::DEK_LEN],
+        prf_salt: [u8; 32],
+        recovery_key: Option<String>,
     }
 
-    impl SqliteVectorStoreTable for MemoryFragment {
-        fn name() -> &'static str {
-            "therapy_memory"
-        }
-
-        fn schema() -> Vec<Column> {
-            vec![
-                Column::new("id", "TEXT PRIMARY KEY"),
-                Column::new("title", "TEXT"),
-                Column::new("content", "TEXT"),
-                Column::new("tags", "TEXT"),
-            ]
-        }
-
-        fn id(&self) -> String {
-            self.id.clone()
-        }
-
-        fn column_values(&self) -> Vec<(&'static str, Box<dyn ColumnValue>)> {
-            vec![
-                ("id", Box::new(self.id.clone())),
-                ("title", Box::new(self.title.clone())),
-                ("content", Box::new(self.content.clone())),
-                ("tags", Box::new(self.tags.clone())),
-            ]
-        }
-    }
-
-    fn seed_memory() -> Vec<MemoryFragment> {
-        vec![
-            MemoryFragment {
-                id: "persona".into(),
-                title: "Therapist voice".into(),
-                content: "Organic Integral tone: Jungian, shadow-aware, dream-friendly, somatic. Encourage slow, embodied pacing. Balance empathy with gentle accountability.".into(),
-                tags: "persona,style".into(),
-            },
-            MemoryFragment {
-                id: "session-frame".into(),
-                title: "Session structure".into(),
-                content: "Flow: (1) Mirror what you heard. (2) Name pattern/archetype/image. (3) Offer one grounded practice (breath, journaling, active imagination). (4) Close with a concise reflective question.".into(),
-                tags: "structure,flow".into(),
-            },
-            MemoryFragment {
-                id: "guardrails".into(),
-                title: "Safety + scope".into(),
-                content: "Not a crisis line. Avoid medical diagnosis or prescriptions. If user signals self-harm, redirect to emergency services or trusted humans. Keep advice within coaching/therapeutic support bounds.".into(),
-                tags: "safety,boundaries".into(),
-            },
-            MemoryFragment {
-                id: "slider-meaning".into(),
-                title: "Controls meaning".into(),
-                content: "Accountability slider: higher -> more direct commitments and follow-ups; lower -> gentle encouragement. Spirituality slider: higher -> archetypes, mythic images, symbolism; lower -> plain, pragmatic. Directness slider: higher -> blunt clarity; lower -> soft phrasing.".into(),
-                tags: "ui,controls".into(),
-            },
-            MemoryFragment {
-                id: "drafting-voice".into(),
-                title: "Drafting voice".into(),
-                content: "When asked to draft a message, write as the user in clear, human first-person language. Be emotionally honest, concrete, and concise. Avoid therapist framing unless explicitly requested.".into(),
-                tags: "drafting,style".into(),
-            },
-            MemoryFragment {
-                id: "drafting-boundaries".into(),
-                title: "Drafting boundaries".into(),
-                content: "When writing difficult relationship messages, protect the user's boundaries, avoid manipulation, and prefer warmth plus clarity over over-explaining.".into(),
-                tags: "drafting,boundaries".into(),
-            },
-        ]
-    }
-
-    fn init_sqlite_extensions() {
-        static SQLITE_VEC: Once = Once::new();
-        SQLITE_VEC.call_once(|| unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute::<*const (), SqliteExtensionFn>(
-                sqlite3_vec_init as *const (),
-            )));
-        });
+    #[derive(Clone, Debug)]
+    pub struct PasskeyRegistrationStart {
+        pub challenge_id: String,
+        pub challenge: CreationChallengeResponse,
+        pub prf_salt: Vec<u8>,
+        pub recovery_key: Option<String>,
     }
 
     async fn ensure_data_dir(db_path: &str) -> Result<()> {
@@ -818,7 +723,6 @@ mod runtime {
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -826,6 +730,8 @@ mod runtime {
                     user_id TEXT,
                     title TEXT NOT NULL,
                     preview TEXT NOT NULL DEFAULT '',
+                    title_ciphertext BLOB,
+                    preview_ciphertext BLOB,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id)
@@ -835,17 +741,20 @@ mod runtime {
                     session_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    content_ciphertext BLOB,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 );
                 CREATE TABLE IF NOT EXISTS patient_graphs (
                     user_id TEXT PRIMARY KEY,
                     graph_json TEXT NOT NULL,
+                    graph_ciphertext BLOB,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS social_graphs (
                     user_id TEXT PRIMARY KEY,
                     graph_json TEXT NOT NULL,
+                    graph_ciphertext BLOB,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE TABLE IF NOT EXISTS social_relationships (
@@ -856,6 +765,10 @@ mod runtime {
                     from_label TEXT NOT NULL,
                     to_label TEXT NOT NULL,
                     evidence TEXT NOT NULL,
+                    from_label_ciphertext BLOB,
+                    to_label_ciphertext BLOB,
+                    relation_ciphertext BLOB,
+                    evidence_ciphertext BLOB,
                     weight INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -868,6 +781,7 @@ mod runtime {
                     display_name TEXT NOT NULL,
                     relationship_type TEXT NOT NULL,
                     profile_json TEXT NOT NULL,
+                    payload_ciphertext BLOB,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, slug),
@@ -881,6 +795,9 @@ mod runtime {
                     occurred_at TEXT,
                     session_id TEXT,
                     user_quotes TEXT NOT NULL DEFAULT '[]',
+                    title_ciphertext BLOB,
+                    narrative_ciphertext BLOB,
+                    user_quotes_ciphertext BLOB,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, id)
@@ -893,6 +810,7 @@ mod runtime {
                     to_kind TEXT NOT NULL,
                     to_id TEXT NOT NULL,
                     evidence TEXT NOT NULL DEFAULT '',
+                    evidence_ciphertext BLOB,
                     weight INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -909,19 +827,26 @@ mod runtime {
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_passkeys_user_id ON passkeys(user_id);
-                CREATE TABLE IF NOT EXISTS password_reset_tokens (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                CREATE TABLE IF NOT EXISTS key_wraps (
+                    credential_id BLOB PRIMARY KEY,
                     user_id TEXT NOT NULL,
-                    token TEXT NOT NULL UNIQUE,
-                    expires_at TEXT NOT NULL,
-                    used INTEGER NOT NULL DEFAULT 0,
+                    public_key BLOB,
+                    prf_salt BLOB NOT NULL,
+                    wrapped_dek BLOB NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'passkey',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_reset_tokens_token ON password_reset_tokens(token);
+                CREATE INDEX IF NOT EXISTS idx_key_wraps_user_id ON key_wraps(user_id);
                 "###,
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)?;
+            // Do not leave the legacy sqlite-vec copy of therapy text or
+            // embeddings in the encrypted database.  New rows use the
+            // per-user encrypted_memory table above.
+            conn.execute_batch("DROP TABLE IF EXISTS therapy_memory_embeddings; DROP TABLE IF EXISTS therapy_memory;")
+                .map_err(tokio_rusqlite::Error::Rusqlite)?;
 
             if table_exists(conn, "users").map_err(tokio_rusqlite::Error::Rusqlite)?
                 && !table_has_column(conn, "users", "email_verified")
@@ -933,6 +858,59 @@ mod runtime {
                 )
                 .map_err(tokio_rusqlite::Error::Rusqlite)?;
             }
+
+            if table_has_column(conn, "users", "password_hash")
+                .map_err(tokio_rusqlite::Error::Rusqlite)?
+            {
+                conn.execute("ALTER TABLE users DROP COLUMN password_hash", [])
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
+            }
+
+            conn.execute("DROP TABLE IF EXISTS password_reset_tokens", [])
+                .map_err(tokio_rusqlite::Error::Rusqlite)?;
+
+            for (table, column, definition) in [
+                ("sessions", "title_ciphertext", "BLOB"),
+                ("sessions", "preview_ciphertext", "BLOB"),
+                ("messages", "content_ciphertext", "BLOB"),
+                ("patient_graphs", "graph_ciphertext", "BLOB"),
+                ("social_graphs", "graph_ciphertext", "BLOB"),
+                ("social_relationships", "from_label_ciphertext", "BLOB"),
+                ("social_relationships", "to_label_ciphertext", "BLOB"),
+                ("social_relationships", "relation_ciphertext", "BLOB"),
+                ("social_relationships", "evidence_ciphertext", "BLOB"),
+                ("relationship_profiles", "payload_ciphertext", "BLOB"),
+                ("episodes", "title_ciphertext", "BLOB"),
+                ("episodes", "narrative_ciphertext", "BLOB"),
+                ("episodes", "user_quotes_ciphertext", "BLOB"),
+                ("memory_links", "evidence_ciphertext", "BLOB"),
+            ] {
+                if table_exists(conn, table).map_err(tokio_rusqlite::Error::Rusqlite)?
+                    && !table_has_column(conn, table, column)
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?
+                {
+                    conn.execute(
+                        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                        [],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                }
+            }
+
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS encrypted_memory (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    title_ciphertext BLOB NOT NULL,
+                    content_ciphertext BLOB NOT NULL,
+                    embedding_ciphertext BLOB,
+                    tags_ciphertext BLOB,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_encrypted_memory_user_id ON encrypted_memory(user_id);",
+            )
+            .map_err(tokio_rusqlite::Error::Rusqlite)?;
 
             if table_exists(conn, "sessions").map_err(tokio_rusqlite::Error::Rusqlite)?
                 && !table_has_column(conn, "sessions", "user_id")
@@ -953,14 +931,6 @@ mod runtime {
                 .map_err(tokio_rusqlite::Error::Rusqlite)?;
             }
 
-            if table_exists(conn, "users").map_err(tokio_rusqlite::Error::Rusqlite)?
-                && !table_has_column(conn, "users", "password_hash")
-                    .map_err(tokio_rusqlite::Error::Rusqlite)?
-            {
-                conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT", [])
-                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
-            }
-
             Ok(())
         })
         .await
@@ -969,27 +939,20 @@ mod runtime {
 
     async fn ensure_local_test_user(conn: &Connection) -> Result<()> {
         let email = std::env::var("LOCAL_TEST_EMAIL").unwrap_or_default();
-        let password = std::env::var("LOCAL_TEST_PASSWORD").unwrap_or_default();
-        if email.is_empty() || password.is_empty() {
+        if email.is_empty() {
             return Ok(());
         }
 
         let id = Uuid::new_v4().to_string();
-        let salt = SaltString::generate(&mut OsRng);
-        let argon2 = Argon2::default();
-        let password_hash = argon2
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| anyhow::anyhow!("Hashing failed: {}", e))?
-            .to_string();
 
         conn.call(move |conn| {
             conn.execute(
                 r###"
-                INSERT INTO users (id, username, password_hash)
-                VALUES (?1, ?2, ?3)
-                ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+                INSERT INTO users (id, username)
+                VALUES (?1, ?2)
+                ON CONFLICT(username) DO NOTHING
                 "###,
-                rusqlite::params![id, email, password_hash],
+                rusqlite::params![id, email],
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)
         })
@@ -998,105 +961,7 @@ mod runtime {
         Ok(())
     }
 
-    async fn table_has_rows(conn: &Connection, table: &str) -> Result<bool> {
-        let stmt = format!("SELECT EXISTS(SELECT 1 FROM {table} LIMIT 1)");
-        let exists = conn
-            .call(move |conn| {
-                conn.query_row(&stmt, [], |row| row.get::<_, i64>(0))
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-            })
-            .await
-            .with_context(|| format!("Checking rows for table {table}"))?;
-
-        Ok(exists == 1)
-    }
-
-    async fn read_graph(conn: &Connection, user_id: &str) -> Result<PatientGraph> {
-        let user_id_owned = user_id.to_string();
-        let stored: Option<String> = conn
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT graph_json FROM patient_graphs WHERE user_id = ?1",
-                    [user_id_owned],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(tokio_rusqlite::Error::Rusqlite)
-            })
-            .await
-            .context("Fetching patient graph")?;
-
-        if let Some(raw) = stored {
-            let graph =
-                serde_json::from_str::<PatientGraph>(&raw).context("Parsing patient graph JSON")?;
-            return Ok(graph);
-        }
-
-        let graph = PatientGraph {
-            user_id: user_id.to_string(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-        };
-        write_graph(conn, &graph).await?;
-        Ok(graph)
-    }
-
-    async fn read_social_graph(conn: &Connection, user_id: &str) -> Result<SocialGraph> {
-        let user_id_owned = user_id.to_string();
-        let stored: Option<String> = conn
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT graph_json FROM social_graphs WHERE user_id = ?1",
-                    [user_id_owned],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(tokio_rusqlite::Error::Rusqlite)
-            })
-            .await
-            .context("Fetching social graph")?;
-
-        if let Some(raw) = stored {
-            let graph =
-                serde_json::from_str::<SocialGraph>(&raw).context("Parsing social graph JSON")?;
-            return Ok(graph);
-        }
-
-        Ok(SocialGraph {
-            user_id: user_id.to_string(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-        })
-    }
-
-    async fn read_patient_graph_snapshot(conn: &Connection, user_id: &str) -> Result<PatientGraph> {
-        let user_id_owned = user_id.to_string();
-        let stored: Option<String> = conn
-            .call(move |conn| {
-                conn.query_row(
-                    "SELECT graph_json FROM patient_graphs WHERE user_id = ?1",
-                    [user_id_owned],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(tokio_rusqlite::Error::Rusqlite)
-            })
-            .await
-            .context("Fetching patient graph snapshot")?;
-
-        if let Some(raw) = stored {
-            let graph =
-                serde_json::from_str::<PatientGraph>(&raw).context("Parsing patient graph JSON")?;
-            return Ok(graph);
-        }
-
-        Ok(PatientGraph {
-            user_id: user_id.to_string(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
-        })
-    }
-
+    #[cfg(test)]
     async fn upsert_episode_record(conn: &Connection, mut episode: Episode) -> Result<()> {
         episode.id = normalize_slug(&episode.id);
         if episode.user_id.trim().is_empty()
@@ -1156,6 +1021,7 @@ mod runtime {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn existing_episode_quotes(
         conn: &Connection,
         user_id: &str,
@@ -1180,6 +1046,7 @@ mod runtime {
             .unwrap_or_default())
     }
 
+    #[cfg(test)]
     async fn list_episode_records(conn: &Connection, user_id: String) -> Result<Vec<Episode>> {
         conn.call(move |conn| {
             let mut stmt = conn.prepare(
@@ -1214,6 +1081,7 @@ mod runtime {
         .context("Listing episodes")
     }
 
+    #[cfg(test)]
     async fn upsert_memory_link_record(conn: &Connection, mut link: MemoryLink) -> Result<()> {
         link.from_kind = normalize_slug(&link.from_kind);
         link.from_id = normalize_slug(&link.from_id);
@@ -1263,6 +1131,7 @@ mod runtime {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn list_memory_link_records(
         conn: &Connection,
         user_id: String,
@@ -1357,27 +1226,6 @@ mod runtime {
             }
             sleep(Duration::from_millis(28)).await;
         }
-    }
-
-    async fn write_graph(conn: &Connection, graph: &PatientGraph) -> Result<()> {
-        let user_id = graph.user_id.clone();
-        let payload = serde_json::to_string(graph).context("Serializing patient graph")?;
-        conn.call(move |conn| {
-            conn.execute(
-                r###"
-                INSERT INTO patient_graphs (user_id, graph_json)
-                VALUES (?1, ?2)
-                ON CONFLICT(user_id)
-                DO UPDATE SET graph_json = excluded.graph_json,
-                              updated_at = CURRENT_TIMESTAMP
-                "###,
-                rusqlite::params![user_id, payload],
-            )
-            .map_err(tokio_rusqlite::Error::Rusqlite)
-        })
-        .await
-        .context("Persisting patient graph")?;
-        Ok(())
     }
 
     fn apply_graph_update(graph: &mut PatientGraph, update: GraphUpdateArgs) -> GraphUpdateSummary {
@@ -3048,7 +2896,7 @@ mod runtime {
 
     impl Tool for CurrentDateTimeTool {
         const NAME: &'static str = "current_datetime";
-        type Error = GraphToolError;
+        type Error = std::convert::Infallible;
         type Args = CurrentDateTimeArgs;
         type Output = CurrentDateTime;
 
@@ -3065,74 +2913,26 @@ mod runtime {
         }
     }
 
-    impl Tool for GraphReaderTool {
-        const NAME: &'static str = "read_mind_map";
-        type Error = GraphToolError;
-        type Args = GraphReadArgs;
-        type Output = PatientGraph;
-
-        async fn definition(&self, _prompt: String) -> ToolDefinition {
-            ToolDefinition {
-                name: Self::NAME.to_string(),
-                description: "Read the current patient mind map from SQLite.".to_string(),
-                parameters: serde_json::json!(schema_for!(GraphReadArgs)),
-            }
-        }
-
-        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-            read_graph(&self.conn, &args.user_id)
-                .await
-                .map_err(|err| GraphToolError::Message(err.to_string()))
-        }
-    }
-
-    impl Tool for GraphManagerTool {
-        const NAME: &'static str = "update_mind_map";
-        type Error = GraphToolError;
-        type Args = GraphUpdateArgs;
-        type Output = GraphUpdateSummary;
-
-        async fn definition(&self, _prompt: String) -> ToolDefinition {
-            ToolDefinition {
-                name: Self::NAME.to_string(),
-                description: "Apply incremental updates to the patient mind map.".to_string(),
-                parameters: serde_json::json!(schema_for!(GraphUpdateArgs)),
-            }
-        }
-
-        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-            let mut graph = read_graph(&self.conn, &args.user_id)
-                .await
-                .map_err(|err| GraphToolError::Message(err.to_string()))?;
-            let summary = apply_graph_update(&mut graph, args);
-            write_graph(&self.conn, &graph)
-                .await
-                .map_err(|err| GraphToolError::Message(err.to_string()))?;
-            Ok(summary)
-        }
-    }
-
     pub struct AgentRuntime {
         therapist_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
-        histories: RwLock<HashMap<String, Vec<Message>>>,
+        // Conversation context is an ephemeral cache, never a second durable
+        // copy. Entries expire after the same short inactivity window as DEKs.
+        histories: RwLock<HashMap<String, (Instant, Vec<Message>)>>,
         conn: Connection,
         #[allow(dead_code)]
         openai_client: openai::CompletionsClient,
         openrouter_client: openrouter::Client,
         #[allow(dead_code)]
         embedding_client: openai::Client,
-        graph_reader: GraphReaderTool,
-        graph_writer: GraphManagerTool,
         webauthn: Webauthn,
-        pending_registrations: DashMap<String, (Instant, String, PasskeyRegistration)>,
+        pending_registrations: DashMap<String, PendingRegistration>,
         pending_logins: DashMap<String, (Instant, PasskeyAuthentication)>,
+        active_deks: DashMap<String, (Instant, Vec<u8>)>,
     }
 
     impl AgentRuntime {
         async fn new() -> Result<Self> {
-            init_sqlite_extensions();
-
             let db_path =
                 std::env::var("MEMORY_DB_PATH").unwrap_or_else(|_| "data/memory.sqlite".into());
             ensure_data_dir(&db_path).await?;
@@ -3148,52 +2948,34 @@ mod runtime {
 
             let openai_key =
                 std::env::var("OPENAI_API_KEY").context("Set OPENAI_API_KEY for embeddings")?;
-            let openai_client: openai::CompletionsClient = openai::CompletionsClient::builder()
-                .api_key(openai_key.clone())
+            let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
+            let mut completions_builder =
+                openai::CompletionsClient::builder().api_key(openai_key.clone());
+            let mut embedding_builder = openai::Client::builder().api_key(openai_key);
+            if let Some(base_url) = openai_base_url.as_deref() {
+                completions_builder = completions_builder.base_url(base_url);
+                embedding_builder = embedding_builder.base_url(base_url);
+            }
+            let openai_client: openai::CompletionsClient = completions_builder
                 .build()
                 .context("Building OpenAI completions client")?;
-            let embedding_client: openai::Client = openai::Client::builder()
-                .api_key(openai_key)
+            let embedding_client: openai::Client = embedding_builder
                 .build()
                 .context("Building OpenAI embedding client")?;
-            let embedding_model_name = std::env::var("EMBEDDING_MODEL")
-                .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
-            let embedding_model = embedding_client.embedding_model(embedding_model_name);
-
-            let vector_store: SqliteVectorStore<_, MemoryFragment> =
-                SqliteVectorStore::new(conn.clone(), &embedding_model)
-                    .await
-                    .context("Initializing sqlite vector store")?;
-
-            if !table_has_rows(&conn, MemoryFragment::name())
-                .await
-                .unwrap_or(true)
-            {
-                let builder_result =
-                    EmbeddingsBuilder::new(embedding_model.clone()).documents(seed_memory());
-                match builder_result {
-                    Ok(builder) => match builder.build().await {
-                        Ok(embeddings) => {
-                            if let Err(e) = vector_store.add_rows(embeddings).await {
-                                tracing::warn!("Failed to seed vector store: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Vector store build failed: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("Vector store documents failed: {}", e);
-                    }
-                }
-            }
+            // Embeddings are indexed per user in `encrypted_memory`.  The
+            // former sqlite-vec table is intentionally never opened: it
+            // duplicated therapy text in plaintext and allowed inversion
+            // attacks against the database copy.
 
             let openrouter_key =
                 std::env::var("OPENROUTER_API_KEY").context("Set OPENROUTER_API_KEY")?;
             let openrouter_model = std::env::var("OPENROUTER_MODEL")
                 .unwrap_or_else(|_| "moonshotai/kimi-k2-thinking".to_string());
-            let openrouter_client = openrouter::Client::builder()
-                .api_key(openrouter_key)
+            let mut openrouter_builder = openrouter::Client::builder().api_key(openrouter_key);
+            if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
+                openrouter_builder = openrouter_builder.base_url(&base_url);
+            }
+            let openrouter_client = openrouter_builder
                 .build()
                 .context("Building OpenRouter client")?;
 
@@ -3211,8 +2993,6 @@ mod runtime {
                     .additional_params(openrouter_privacy_params())
                     .build();
 
-            let graph_reader = GraphReaderTool { conn: conn.clone() };
-            let graph_writer = GraphManagerTool { conn: conn.clone() };
             // Initialize WebAuthn
             let rp_id = std::env::var("RP_ID").unwrap_or_else(|_| "localhost".to_string());
             let rp_origin =
@@ -3230,62 +3010,152 @@ mod runtime {
                 openai_client,
                 openrouter_client,
                 embedding_client,
-                graph_reader,
-                graph_writer,
                 conn,
                 webauthn,
                 pending_registrations: DashMap::new(),
                 pending_logins: DashMap::new(),
+                active_deks: DashMap::new(),
             })
         }
 
         // --- Auth & User Management ---
 
-        async fn create_user(&self, username: String, password: String) -> Result<User> {
+        fn remember_dek(&self, user_id: &str, dek: Vec<u8>) {
+            if dek.len() == security::DEK_LEN {
+                self.active_deks
+                    .insert(user_id.to_string(), (Instant::now(), dek));
+            }
+        }
+
+        pub fn cache_dek(&self, user_id: &str, dek: Vec<u8>) -> Result<()> {
+            if dek.len() != security::DEK_LEN {
+                return Err(anyhow::anyhow!("invalid DEK"));
+            }
+            self.remember_dek(user_id, dek);
+            Ok(())
+        }
+
+        fn active_dek(&self, user_id: &str) -> Result<Vec<u8>> {
+            let mut entry = self
+                .active_deks
+                .get_mut(user_id)
+                .ok_or_else(|| anyhow::anyhow!("user key is not unlocked"))?;
+            if entry.value().0.elapsed() > Duration::from_secs(30 * 60) {
+                return Err(anyhow::anyhow!("user key expired"));
+            }
+            entry.value_mut().0 = Instant::now();
+            Ok(entry.value().1.clone())
+        }
+
+        pub fn forget_dek(&self, user_id: &str) {
+            self.active_deks.remove(user_id);
+        }
+
+        /// Encrypt rows created by pre-DEK releases the first time a user is
+        /// unlocked.  The legacy columns are cleared in the same transaction
+        /// so a backup cannot retain a second plaintext copy.
+        pub async fn migrate_user_content(&self, user_id: &str) -> Result<()> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            self.conn.call(move |conn| {
+                let tx = conn.unchecked_transaction().map_err(tokio_rusqlite::Error::Rusqlite)?;
+
+                {
+                    let mut stmt = tx.prepare("SELECT id, title, preview FROM sessions WHERE user_id = ?1 AND (title_ciphertext IS NULL OR preview_ciphertext IS NULL)").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows = stmt.query_map([uid.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    for row in rows {
+                        let (id, title, preview) = row.map_err(tokio_rusqlite::Error::Rusqlite)?;
+                        let title = security::encrypt(&dek, title.as_bytes(), format!("sessions:{}:title", id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let preview = security::encrypt(&dek, preview.as_bytes(), format!("sessions:{}:preview", id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE sessions SET title = '', preview = '', title_ciphertext = ?1, preview_ciphertext = ?2 WHERE id = ?3", rusqlite::params![title, preview, id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare("SELECT m.id, m.session_id, m.content FROM messages m JOIN sessions s ON s.id = m.session_id WHERE s.user_id = ?1 AND m.content_ciphertext IS NULL").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows = stmt.query_map([uid.clone()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    for row in rows {
+                        let (id, session_id, content) = row.map_err(tokio_rusqlite::Error::Rusqlite)?;
+                        let encrypted = security::encrypt(&dek, content.as_bytes(), format!("messages:{}", session_id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE messages SET content = '', content_ciphertext = ?1 WHERE id = ?2", rusqlite::params![encrypted, id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                for (table, cipher, plain, aad_prefix) in [
+                    ("patient_graphs", "graph_ciphertext", "graph_json", "patient_graphs"),
+                    ("social_graphs", "graph_ciphertext", "graph_json", "social_graphs"),
+                ] {
+                    let query = format!("SELECT {plain}, user_id FROM {table} WHERE user_id = ?1 AND {cipher} IS NULL");
+                    let mut stmt = tx.prepare(&query).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows = stmt.query_map([uid.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    for row in rows {
+                        let (plain, row_uid) = row.map_err(tokio_rusqlite::Error::Rusqlite)?;
+                        let encrypted = security::encrypt(&dek, plain.as_bytes(), format!("{}:{}", aad_prefix, row_uid).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute(&format!("UPDATE {table} SET {plain} = '', {cipher} = ?1 WHERE user_id = ?2"), rusqlite::params![encrypted, row_uid]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare("SELECT slug, profile_json FROM relationship_profiles WHERE user_id = ?1 AND payload_ciphertext IS NULL").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows: Vec<(String, String)> = stmt.query_map([uid.clone()], |row| Ok((row.get(0)?, row.get(1)?))).map_err(tokio_rusqlite::Error::Rusqlite)?.collect::<Result<_, _>>().map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    drop(stmt);
+                    for (slug, payload) in rows {
+                        let encrypted = security::encrypt(&dek, payload.as_bytes(), format!("relationship_profiles:{}:{}", uid, slug).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE relationship_profiles SET display_name = '', relationship_type = '', profile_json = '', payload_ciphertext = ?1 WHERE user_id = ?2 AND slug = ?3", rusqlite::params![encrypted, uid, slug]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare("SELECT id, title, narrative, user_quotes FROM episodes WHERE user_id = ?1 AND title_ciphertext IS NULL").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows: Vec<(String, String, String, String)> = stmt.query_map([uid.clone()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).map_err(tokio_rusqlite::Error::Rusqlite)?.collect::<Result<_, _>>().map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    drop(stmt);
+                    for (id, title, narrative, quotes) in rows {
+                        let title_ciphertext = security::encrypt(&dek, title.as_bytes(), format!("episodes:{}:{}:title", uid, id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let narrative_ciphertext = security::encrypt(&dek, narrative.as_bytes(), format!("episodes:{}:{}:narrative", uid, id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let quotes_ciphertext = security::encrypt(&dek, quotes.as_bytes(), format!("episodes:{}:{}:quotes", uid, id).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE episodes SET title = '', narrative = '', user_quotes = '[]', title_ciphertext = ?1, narrative_ciphertext = ?2, user_quotes_ciphertext = ?3 WHERE user_id = ?4 AND id = ?5", rusqlite::params![title_ciphertext, narrative_ciphertext, quotes_ciphertext, uid, id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare("SELECT from_kind, from_id, relation, to_kind, to_id, evidence FROM memory_links WHERE user_id = ?1 AND evidence_ciphertext IS NULL").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows: Vec<(String, String, String, String, String, String)> = stmt.query_map([uid.clone()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).map_err(tokio_rusqlite::Error::Rusqlite)?.collect::<Result<_, _>>().map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    drop(stmt);
+                    for (from_kind, from_id, relation, to_kind, to_id, evidence) in rows {
+                        let aad = format!("memory_links:{}:{}:{}:{}:{}:{}", uid, from_kind, from_id, relation, to_kind, to_id);
+                        let encrypted = security::encrypt(&dek, evidence.as_bytes(), aad.as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE memory_links SET evidence = '', evidence_ciphertext = ?1 WHERE user_id = ?2 AND from_kind = ?3 AND from_id = ?4 AND relation = ?5 AND to_kind = ?6 AND to_id = ?7", rusqlite::params![encrypted, uid, from_kind, from_id, relation, to_kind, to_id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                {
+                    let mut stmt = tx.prepare("SELECT from_slug, to_slug, relation, from_label, to_label, evidence FROM social_relationships WHERE user_id = ?1 AND from_label_ciphertext IS NULL").map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows: Vec<(String, String, String, String, String, String)> = stmt.query_map([uid.clone()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).map_err(tokio_rusqlite::Error::Rusqlite)?.collect::<Result<_, _>>().map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    drop(stmt);
+                    for (from_slug, to_slug, relation, from_label, to_label, evidence) in rows {
+                        let mut hasher = DefaultHasher::new();
+                        relation.hash(&mut hasher);
+                        let relation_key = format!("r{:016x}", hasher.finish());
+                        let aad = format!("social_relationships:{}:{}:{}", uid, from_slug, to_slug);
+                        let from_ciphertext = security::encrypt(&dek, from_label.as_bytes(), format!("{}:from", aad).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let to_ciphertext = security::encrypt(&dek, to_label.as_bytes(), format!("{}:to", aad).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let relation_ciphertext = security::encrypt(&dek, relation.as_bytes(), format!("{}:relation", aad).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        let evidence_ciphertext = security::encrypt(&dek, evidence.as_bytes(), format!("{}:evidence", aad).as_bytes()).map_err(|_| tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidQuery))?;
+                        tx.execute("UPDATE social_relationships SET relation = ?1, from_label = '', to_label = '', evidence = '', from_label_ciphertext = ?2, to_label_ciphertext = ?3, relation_ciphertext = ?4, evidence_ciphertext = ?5 WHERE user_id = ?6 AND from_slug = ?7 AND to_slug = ?8 AND relation = ?9", rusqlite::params![relation_key, from_ciphertext, to_ciphertext, relation_ciphertext, evidence_ciphertext, uid, from_slug, to_slug, relation]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                }
+                tx.commit().map_err(tokio_rusqlite::Error::Rusqlite)
+            }).await.context("Migrating user content encryption")
+        }
+
+        async fn create_user(&self, username: String) -> Result<User> {
             let id = Uuid::new_v4().to_string();
             let id_clone = id.clone();
             let username_clone = username.clone();
-            let salt = SaltString::generate(&mut OsRng);
-            let argon2 = Argon2::default();
-            let password_hash = argon2
-                .hash_password(password.as_bytes(), &salt)
-                .map_err(|e| anyhow::anyhow!("Hashing failed: {}", e))?
-                .to_string();
 
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "INSERT INTO users (id, username, password_hash) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![id_clone, username_clone, password_hash],
+                        "INSERT INTO users (id, username) VALUES (?1, ?2)",
+                        rusqlite::params![id_clone, username_clone],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
                 .await?;
-
-            Ok(User { id, username })
-        }
-
-        async fn verify_user(&self, username: String, password: String) -> Result<User> {
-            let username_clone = username.clone();
-            let (id, stored_hash) = self
-                .conn
-                .call(move |conn| {
-                    conn.query_row(
-                        "SELECT id, password_hash FROM users WHERE username = ?1",
-                        [username_clone],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await
-                .context("User not found")?;
-
-            let parsed_hash = PasswordHash::new(&stored_hash)
-                .map_err(|e| anyhow::anyhow!("Invalid hash format: {}", e))?;
-
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed_hash)
-                .map_err(|e| anyhow::anyhow!("Invalid password: {}", e))?;
 
             Ok(User { id, username })
         }
@@ -3350,7 +3220,7 @@ mod runtime {
         pub async fn start_passkey_registration_email(
             &self,
             email: String,
-        ) -> Result<(String, CreationChallengeResponse)> {
+        ) -> Result<PasskeyRegistrationStart> {
             let email = email.trim().to_string();
             if email.is_empty() {
                 return Err(anyhow::anyhow!("Email is required"));
@@ -3364,10 +3234,7 @@ mod runtime {
                     }
                     user
                 }
-                None => {
-                    let random_password = Uuid::new_v4().to_string();
-                    self.create_user(email, random_password).await?
-                }
+                None => self.create_user(email).await?,
             };
 
             self.start_passkey_registration(user.id).await
@@ -3376,7 +3243,7 @@ mod runtime {
         pub async fn start_passkey_registration(
             &self,
             user_id: String,
-        ) -> Result<(String, CreationChallengeResponse)> {
+        ) -> Result<PasskeyRegistrationStart> {
             let user = self.get_user_by_id(user_id.clone()).await?;
             let user_uuid = Uuid::parse_str(&user.id).unwrap_or_else(|_| Uuid::new_v4());
 
@@ -3413,48 +3280,133 @@ mod runtime {
                 )
                 .map_err(|e| anyhow::anyhow!("WebAuthn start failed: {}", e))?;
 
-            let req_id = Uuid::new_v4().to_string();
-            self.pending_registrations
-                .insert(req_id.clone(), (Instant::now(), user.id.clone(), state));
+            let (dek, recovery_key, prf_salt) = if let Some(entry) = self.active_deks.get(&user.id)
+            {
+                let dek: [u8; security::DEK_LEN] = entry
+                    .value()
+                    .1
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid active DEK"))?;
+                // Every credential gets its own PRF salt. Login sends the
+                // matching salt for the credential selected by the authenticator.
+                (dek, None, security::generate_salt())
+            } else {
+                (
+                    security::generate_dek(),
+                    Some(
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(security::random_bytes::<32>()),
+                    ),
+                    security::generate_salt(),
+                )
+            };
 
-            Ok((req_id, challenge))
+            let req_id = Uuid::new_v4().to_string();
+            self.pending_registrations.insert(
+                req_id.clone(),
+                PendingRegistration {
+                    created_at: Instant::now(),
+                    user_id: user.id,
+                    state,
+                    dek,
+                    prf_salt: prf_salt.clone(),
+                    recovery_key: recovery_key.clone(),
+                },
+            );
+
+            Ok(PasskeyRegistrationStart {
+                challenge_id: req_id,
+                challenge,
+                prf_salt: prf_salt.to_vec(),
+                recovery_key,
+            })
         }
 
         pub async fn finish_passkey_registration(
             &self,
             req_id: String,
             response: RegisterPublicKeyCredential,
-        ) -> Result<User> {
-            let (_, (_, user_id, state)) = self
+            prf_output: Vec<u8>,
+            label: String,
+        ) -> Result<(User, Vec<u8>, Option<String>)> {
+            let pending = self
                 .pending_registrations
                 .remove(&req_id)
+                .map(|(_, value)| value)
                 .ok_or_else(|| anyhow::anyhow!("Registration expired or invalid"))?;
+
+            if pending.created_at.elapsed() > Duration::from_secs(300) {
+                return Err(anyhow::anyhow!("Registration expired or invalid"));
+            }
+            if prf_output.len() != security::DEK_LEN {
+                return Err(anyhow::anyhow!(
+                    "This authenticator does not provide the required PRF extension"
+                ));
+            }
 
             let passkey = self
                 .webauthn
-                .finish_passkey_registration(&response, &state)
+                .finish_passkey_registration(&response, &pending.state)
                 .map_err(|e| anyhow::anyhow!("WebAuthn verification failed: {}", e))?;
 
             let cred_id_blob: Vec<u8> = passkey.cred_id().as_ref().to_vec();
             let passkey_blob = serde_cbor_2::to_vec(&passkey).context("Serializing passkey")?;
-
-            let user_id_for_insert = user_id.clone();
+            let aad = format!("passkey:{}", pending.user_id);
+            let wrapped_dek = security::seal(&pending.dek, &prf_output, aad.as_bytes())?;
+            let recovery_wrap = pending
+                .recovery_key
+                .as_ref()
+                .map(|key| {
+                    security::seal(
+                        &pending.dek,
+                        key.as_bytes(),
+                        format!("recovery:{}", pending.user_id).as_bytes(),
+                    )
+                })
+                .transpose()?;
+            let user_id_for_insert = pending.user_id.clone();
+            let prf_salt = pending.prf_salt.to_vec();
+            let label = if label.trim().is_empty() {
+                "Passkey".to_string()
+            } else {
+                label.trim().chars().take(80).collect()
+            };
+            let public_key = passkey_blob.clone();
+            let recovery_key = pending.recovery_key.clone();
+            let recovery_credential_id = recovery_key
+                .as_ref()
+                .map(|_| format!("recovery:{}", pending.user_id).into_bytes());
+            let pending_user_id = pending.user_id.clone();
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                    "INSERT INTO passkeys (user_id, credential_id, passkey) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![user_id_for_insert, cred_id_blob, passkey_blob],
-                ).map_err(tokio_rusqlite::Error::Rusqlite)
+                        "INSERT INTO passkeys (user_id, credential_id, passkey) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![user_id_for_insert, cred_id_blob, passkey_blob],
+                    ).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    conn.execute(
+                        "INSERT INTO key_wraps (credential_id, user_id, public_key, prf_salt, wrapped_dek, label, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'passkey')",
+                        rusqlite::params![passkey.cred_id().as_ref(), pending_user_id.clone(), public_key, prf_salt, wrapped_dek, label],
+                    ).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    if let (Some(recovery_id), Some(recovery_wrap)) = (recovery_credential_id, recovery_wrap) {
+                        conn.execute(
+                            "INSERT INTO key_wraps (credential_id, user_id, prf_salt, wrapped_dek, label, kind) VALUES (?1, ?2, ?3, ?4, 'Recovery key', 'recovery')",
+                            rusqlite::params![recovery_id, pending_user_id, pending.prf_salt.to_vec(), recovery_wrap],
+                        ).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                    Ok::<_, tokio_rusqlite::Error>(())
                 })
                 .await?;
 
-            self.get_user_by_id(user_id).await
+            self.remember_dek(&pending.user_id, pending.dek.to_vec());
+            let user = self.get_user_by_id(pending.user_id).await?;
+            Ok((user, pending.dek.to_vec(), recovery_key))
         }
 
         pub async fn start_passkey_login(
             &self,
             username: String,
-        ) -> Result<(String, RequestChallengeResponse)> {
+        ) -> Result<(String, RequestChallengeResponse, Vec<(Vec<u8>, Vec<u8>)>)> {
             let username_clone = username.clone();
             let user = match self
                 .conn
@@ -3487,6 +3439,19 @@ mod runtime {
                 })
                 .await?;
 
+            let prf_salts = self
+                .conn
+                .call({
+                    let user_id = user.id.clone();
+                    move |conn| {
+                        let mut stmt = conn.prepare("SELECT credential_id, prf_salt FROM key_wraps WHERE user_id = ?1 AND kind = 'passkey'")?;
+                        let rows = stmt.query_map([user_id], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+                        rows.collect::<Result<Vec<_>, _>>()
+                            .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?;
+
             let allow_creds: Vec<Passkey> = passkey_blobs
                 .into_iter()
                 .map(|blob| serde_cbor_2::from_slice(&blob).context("Deserializing passkey"))
@@ -3501,14 +3466,15 @@ mod runtime {
             self.pending_logins
                 .insert(req_id.clone(), (Instant::now(), state));
 
-            Ok((req_id, challenge))
+            Ok((req_id, challenge, prf_salts))
         }
 
         pub async fn finish_passkey_login(
             &self,
             req_id: String,
             response: PublicKeyCredential,
-        ) -> Result<User> {
+            prf_output: Vec<u8>,
+        ) -> Result<(User, Vec<u8>)> {
             let (_, (_, state)) = self
                 .pending_logins
                 .remove(&req_id)
@@ -3518,6 +3484,12 @@ mod runtime {
                 .webauthn
                 .finish_passkey_authentication(&response, &state)
                 .map_err(|e| anyhow::anyhow!("WebAuthn login verification failed: {}", e))?;
+
+            if prf_output.len() != security::DEK_LEN {
+                return Err(anyhow::anyhow!(
+                    "This authenticator did not return the required PRF output"
+                ));
+            }
 
             let cred_id_blob = auth_result.cred_id().as_ref().to_vec();
             let new_counter = auth_result.counter();
@@ -3587,26 +3559,241 @@ mod runtime {
                 })
                 .await?;
 
-            Ok(user)
+            let key_material = self
+                .conn
+                .call({
+                    let credential_id = cred_id_blob.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT user_id, prf_salt, wrapped_dek FROM key_wraps WHERE credential_id = ?1 AND kind = 'passkey'",
+                            [credential_id],
+                            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?)),
+                        )
+                        .optional()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("No encrypted user key is associated with this passkey"))?;
+            let aad = format!("passkey:{}", key_material.0);
+            let dek = security::open(&key_material.2, &prf_output, aad.as_bytes())?;
+            self.remember_dek(&key_material.0, dek.to_vec());
+            Ok((user, dek.to_vec()))
+        }
+
+        pub async fn login_with_recovery(
+            &self,
+            username: String,
+            recovery_key: String,
+        ) -> Result<(User, Vec<u8>)> {
+            let user = self
+                .get_user_by_username(&username)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Invalid recovery credentials"))?;
+            let credential_id = format!("recovery:{}", user.id).into_bytes();
+            let user_id = user.id.clone();
+            let wrapped = self
+                .conn
+                .call({
+                    let credential_id = credential_id.clone();
+                    let user_id = user_id.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT wrapped_dek FROM key_wraps WHERE credential_id = ?1 AND user_id = ?2 AND kind = 'recovery'",
+                            rusqlite::params![credential_id, user_id],
+                            |row| row.get::<_, Vec<u8>>(0),
+                        )
+                        .optional()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Invalid recovery credentials"))?;
+            let aad = format!("recovery:{}", user_id);
+            let dek = security::open(&wrapped, recovery_key.trim().as_bytes(), aad.as_bytes())?;
+            self.remember_dek(&user.id, dek.to_vec());
+            Ok((user, dek.to_vec()))
+        }
+
+        /// Revoke a passkey only after a fresh WebAuthn assertion.  The
+        /// recovery wrap is deliberately retained, and removing the final
+        /// passkey requires an explicit confirmation that the user has it.
+        pub async fn revoke_passkey(
+            &self,
+            req_id: String,
+            response: PublicKeyCredential,
+            prf_output: Vec<u8>,
+            expected_user_id: &str,
+            confirm_recovery: bool,
+        ) -> Result<()> {
+            let credential_id = response.get_credential_id().to_vec();
+            let (user, _) = self
+                .finish_passkey_login(req_id, response, prf_output)
+                .await?;
+            if user.id != expected_user_id {
+                return Err(anyhow::anyhow!("Passkey does not belong to this account"));
+            }
+            let user_id = user.id.clone();
+            let (passkey_count, recovery_exists): (i64, bool) = self
+                .conn
+                .call({
+                    let user_id = user_id.clone();
+                    move |conn| {
+                        let passkey_count: i64 = conn.query_row("SELECT COUNT(*) FROM key_wraps WHERE user_id = ?1 AND kind = 'passkey'", [&user_id], |row| row.get(0)).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                        let recovery_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM key_wraps WHERE user_id = ?1 AND kind = 'recovery')", [&user_id], |row| row.get::<_, i64>(0).map(|value| value == 1)).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                        Ok::<_, tokio_rusqlite::Error>((passkey_count, recovery_exists))
+                    }
+                })
+                .await?;
+            if passkey_count <= 1 && (!recovery_exists || !confirm_recovery) {
+                return Err(anyhow::anyhow!(
+                    "Confirm that you hold the recovery key before removing the last passkey"
+                ));
+            }
+            self.conn
+                .call(move |conn| {
+                    conn.execute("DELETE FROM key_wraps WHERE credential_id = ?1 AND user_id = ?2 AND kind = 'passkey'", rusqlite::params![credential_id, user_id.clone()]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    conn.execute("DELETE FROM passkeys WHERE credential_id = ?1 AND user_id = ?2", rusqlite::params![credential_id, user_id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    Ok::<_, tokio_rusqlite::Error>(())
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("Revoking passkey: {}", error))?;
+            Ok(())
         }
 
         // --- Persistence Helpers ---
 
+        async fn read_patient_graph_secure(&self, user_id: &str) -> Result<PatientGraph> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            let encrypted: Option<Vec<u8>> = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT graph_ciphertext FROM patient_graphs WHERE user_id = ?1",
+                        [uid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let Some(payload) = encrypted else {
+                return Ok(PatientGraph {
+                    user_id: user_id.to_string(),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                });
+            };
+            let plaintext = security::decrypt(
+                &dek,
+                &payload,
+                format!("patient_graphs:{}", user_id).as_bytes(),
+            )?;
+            serde_json::from_slice(&plaintext).context("Parsing encrypted patient graph")
+        }
+
+        async fn write_patient_graph_secure(&self, graph: &PatientGraph) -> Result<()> {
+            let dek = self.active_dek(&graph.user_id)?;
+            let payload = serde_json::to_vec(graph).context("Serializing patient graph")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("patient_graphs:{}", graph.user_id).as_bytes(),
+            )?;
+            let user_id = graph.user_id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO patient_graphs (user_id, graph_json, graph_ciphertext) VALUES (?1, '', ?2) ON CONFLICT(user_id) DO UPDATE SET graph_json = '', graph_ciphertext = excluded.graph_ciphertext, updated_at = CURRENT_TIMESTAMP",
+                        rusqlite::params![user_id, encrypted],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Persisting encrypted patient graph")
+                .map(|_| ())
+        }
+
+        async fn read_social_graph_secure(&self, user_id: &str) -> Result<SocialGraph> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            let encrypted: Option<Vec<u8>> = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT graph_ciphertext FROM social_graphs WHERE user_id = ?1",
+                        [uid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let Some(payload) = encrypted else {
+                return Ok(SocialGraph {
+                    user_id: user_id.to_string(),
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                });
+            };
+            let plaintext = security::decrypt(
+                &dek,
+                &payload,
+                format!("social_graphs:{}", user_id).as_bytes(),
+            )?;
+            serde_json::from_slice(&plaintext).context("Parsing encrypted social graph")
+        }
+
+        async fn write_social_graph_secure(&self, graph: &SocialGraph) -> Result<()> {
+            let dek = self.active_dek(&graph.user_id)?;
+            let payload = serde_json::to_vec(graph).context("Serializing social graph")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("social_graphs:{}", graph.user_id).as_bytes(),
+            )?;
+            let user_id = graph.user_id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO social_graphs (user_id, graph_json, graph_ciphertext) VALUES (?1, '', ?2) ON CONFLICT(user_id) DO UPDATE SET graph_json = '', graph_ciphertext = excluded.graph_ciphertext, updated_at = CURRENT_TIMESTAMP",
+                        rusqlite::params![user_id, encrypted],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Persisting encrypted social graph")
+                .map(|_| ())
+        }
+
         async fn create_session(&self, user_id: String, title: String) -> Result<Session> {
             let id = Uuid::new_v4().to_string();
+            let dek = self.active_dek(&user_id)?;
+            let encrypted_title = security::encrypt(
+                &dek,
+                title.as_bytes(),
+                format!("sessions:{}:title", id).as_bytes(),
+            )?;
+            let preview = "Begin exploring what's here.".to_string();
+            let encrypted_preview = security::encrypt(
+                &dek,
+                preview.as_bytes(),
+                format!("sessions:{}:preview", id).as_bytes(),
+            )?;
             let s = Session {
                 id: id.clone(),
                 user_id: user_id.clone(),
                 title: title.clone(),
                 date: "Just now".into(),
-                preview: "Begin exploring what's here.".into(),
+                preview: preview.clone(),
             };
 
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "INSERT INTO sessions (id, user_id, title, preview) VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![id, user_id, title, "Begin exploring what's here."],
+                        "INSERT INTO sessions (id, user_id, title, preview, title_ciphertext, preview_ciphertext) VALUES (?1, ?2, '', '', ?3, ?4)",
+                        rusqlite::params![id, user_id, encrypted_title, encrypted_preview],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
@@ -3616,27 +3803,29 @@ mod runtime {
         }
 
         async fn get_sessions(&self, user_id: String) -> Result<Vec<Session>> {
+            let dek = self.active_dek(&user_id)?;
             self.conn.call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT id, title, created_at, user_id, preview FROM sessions WHERE user_id = ?1 ORDER BY updated_at DESC"
+                    "SELECT id, title_ciphertext, preview_ciphertext, created_at, user_id FROM sessions WHERE user_id = ?1 ORDER BY updated_at DESC"
                 )?;
                 let rows = stmt.query_map([user_id], |row| {
                     let id: String = row.get(0)?;
-                    let title: String = row.get(1)?;
-                    let date: String = row.get(2)?;
-                    let uid: String = row.get(3)?;
-                    let preview: String = row.get(4)?;
-                    Ok(Session {
-                        id,
-                        user_id: uid,
-                        title,
-                        date,
-                        preview,
-                    })
+                    let title: Vec<u8> = row.get(1)?;
+                    let preview: Vec<u8> = row.get(2)?;
+                    let date: String = row.get(3)?;
+                    let uid: String = row.get(4)?;
+                    Ok((id, title, preview, date, uid))
                 })?;
                 let mut sessions = Vec::new();
                 for r in rows {
-                    sessions.push(r?);
+                    let (id, title, preview, date, uid) = r?;
+                    sessions.push(Session {
+                        title: String::from_utf8(security::decrypt(&dek, &title, format!("sessions:{}:title", id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        preview: String::from_utf8(security::decrypt(&dek, &preview, format!("sessions:{}:preview", id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        id,
+                        user_id: uid,
+                        date,
+                    });
                 }
                 Ok(sessions)
             }).await.context("Fetching sessions")
@@ -3648,12 +3837,32 @@ mod runtime {
             role: String,
             content: String,
         ) -> Result<()> {
+            let user_id: String = self
+                .conn
+                .call({
+                    let session_id = session_id.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT user_id FROM sessions WHERE id = ?1",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?;
+            let dek = self.active_dek(&user_id)?;
+            let encrypted_content = security::encrypt(
+                &dek,
+                content.as_bytes(),
+                format!("messages:{}", session_id).as_bytes(),
+            )?;
             let session_id_for_touch = session_id.clone();
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "INSERT INTO messages (session_id, role, content) VALUES (?1, ?2, ?3)",
-                        rusqlite::params![session_id, role, content],
+                        "INSERT INTO messages (session_id, role, content, content_ciphertext) VALUES (?1, ?2, '', ?3)",
+                        rusqlite::params![session_id, role, encrypted_content],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
@@ -3671,20 +3880,35 @@ mod runtime {
         }
 
         async fn get_history(&self, session_id: String) -> Result<Vec<ChatLog>> {
+            let user_id: String = self
+                .conn
+                .call({
+                    let session_id = session_id.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT user_id FROM sessions WHERE id = ?1",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?;
+            let dek = self.active_dek(&user_id)?;
             self.conn
                 .call(move |conn| {
                     let mut stmt = conn.prepare(
-                        "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+                        "SELECT id, role, content_ciphertext FROM messages WHERE session_id = ?1 ORDER BY id ASC",
                     )?;
+                    let aad_session_id = session_id.clone();
                     let rows = stmt.query_map([session_id], |row| {
-                        Ok(ChatLog {
-                            role: row.get(0)?,
-                            content: row.get(1)?,
-                        })
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?))
                     })?;
                     let mut logs = Vec::new();
                     for r in rows {
-                        logs.push(r?);
+                        let (_id, role, encrypted) = r?;
+                        let content = String::from_utf8(security::decrypt(&dek, &encrypted, format!("messages:{}", aad_session_id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        logs.push(ChatLog { role, content });
                     }
                     Ok(logs)
                 })
@@ -3707,12 +3931,37 @@ mod runtime {
             } else {
                 summary.preview.trim().to_string()
             };
+            let user_id: String = self
+                .conn
+                .call({
+                    let session_id = session_id.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT user_id FROM sessions WHERE id = ?1",
+                            [session_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?;
+            let dek = self.active_dek(&user_id)?;
+            let encrypted_title = security::encrypt(
+                &dek,
+                title.as_bytes(),
+                format!("sessions:{}:title", session_id).as_bytes(),
+            )?;
+            let encrypted_preview = security::encrypt(
+                &dek,
+                preview.as_bytes(),
+                format!("sessions:{}:preview", session_id).as_bytes(),
+            )?;
 
             self.conn
                 .call(move |conn| {
                     conn.execute(
-                        "UPDATE sessions SET title = ?1, preview = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
-                        rusqlite::params![title, preview, session_id],
+                        "UPDATE sessions SET title = '', preview = '', title_ciphertext = ?1, preview_ciphertext = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                        rusqlite::params![encrypted_title, encrypted_preview, session_id],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
@@ -3796,14 +4045,15 @@ mod runtime {
             slug: String,
         ) -> Result<Option<RelationshipProfile>> {
             let normalized_slug = normalize_slug(&slug);
+            let dek = self.active_dek(&user_id)?;
             let user_id_for_query = user_id.clone();
             let slug_for_query = normalized_slug.clone();
             self.conn
                 .call(move |conn| {
                     conn.query_row(
-                        "SELECT profile_json FROM relationship_profiles WHERE user_id = ?1 AND slug = ?2",
+                        "SELECT payload_ciphertext FROM relationship_profiles WHERE user_id = ?1 AND slug = ?2",
                         rusqlite::params![user_id_for_query, slug_for_query],
-                        |row| row.get::<_, String>(0),
+                        |row| row.get::<_, Vec<u8>>(0),
                     )
                     .optional()
                     .map_err(tokio_rusqlite::Error::Rusqlite)
@@ -3811,8 +4061,9 @@ mod runtime {
                 .await
                 .context("Fetching relationship profile")?
                 .map(|raw| {
+                    let raw = security::decrypt(&dek, &raw, format!("relationship_profiles:{}:{}", user_id, normalized_slug).as_bytes())?;
                     let record: RelationshipProfileRecord =
-                        serde_json::from_str(&raw).context("Parsing relationship profile JSON")?;
+                        serde_json::from_slice(&raw).context("Parsing relationship profile JSON")?;
                     Ok(record.with_identity(user_id, normalized_slug))
                 })
                 .transpose()
@@ -3822,14 +4073,15 @@ mod runtime {
             &self,
             user_id: String,
         ) -> Result<Vec<RelationshipProfile>> {
+            let dek = self.active_dek(&user_id)?;
             let user_id_for_query = user_id.clone();
             self.conn
                 .call(move |conn| {
                     let mut stmt = conn.prepare(
-                        "SELECT slug, profile_json FROM relationship_profiles WHERE user_id = ?1 ORDER BY updated_at DESC",
+                        "SELECT slug, payload_ciphertext FROM relationship_profiles WHERE user_id = ?1 ORDER BY updated_at DESC",
                     )?;
                     let rows = stmt.query_map([user_id_for_query], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })?;
                     let mut items = Vec::new();
                     for row in rows {
@@ -3841,8 +4093,9 @@ mod runtime {
                 .context("Listing relationship profiles")?
                 .into_iter()
                 .map(|(slug, raw)| {
+                    let raw = security::decrypt(&dek, &raw, format!("relationship_profiles:{}:{}", user_id, slug).as_bytes())?;
                     let record: RelationshipProfileRecord =
-                        serde_json::from_str(&raw).context("Parsing relationship profile JSON")?;
+                        serde_json::from_slice(&raw).context("Parsing relationship profile JSON")?;
                     Ok(record.with_identity(user_id.clone(), slug))
                 })
                 .collect()
@@ -3862,7 +4115,7 @@ mod runtime {
             } else {
                 profile.relationship_type.trim().to_string()
             };
-            let payload = serde_json::to_string(&RelationshipProfileRecord {
+            let payload = serde_json::to_vec(&RelationshipProfileRecord {
                 display_name: display_name.clone(),
                 relationship_type: relationship_type.clone(),
                 background: profile.background.trim().to_string(),
@@ -3874,21 +4127,28 @@ mod runtime {
                 boundaries: profile.boundaries,
             })
             .context("Serializing relationship profile")?;
+            let dek = self.active_dek(&user_id)?;
+            let encrypted_payload = security::encrypt(
+                &dek,
+                &payload,
+                format!("relationship_profiles:{}:{}", user_id, slug).as_bytes(),
+            )?;
 
             self.conn
                 .call(move |conn| {
                     conn.execute(
                         r###"
-                        INSERT INTO relationship_profiles (user_id, slug, display_name, relationship_type, profile_json)
-                        VALUES (?1, ?2, ?3, ?4, ?5)
+                        INSERT INTO relationship_profiles (user_id, slug, display_name, relationship_type, profile_json, payload_ciphertext)
+                        VALUES (?1, ?2, '', '', '', ?3)
                         ON CONFLICT(user_id, slug)
                         DO UPDATE SET
-                            display_name = excluded.display_name,
-                            relationship_type = excluded.relationship_type,
-                            profile_json = excluded.profile_json,
+                            display_name = '',
+                            relationship_type = '',
+                            profile_json = '',
+                            payload_ciphertext = excluded.payload_ciphertext,
                             updated_at = CURRENT_TIMESTAMP
                         "###,
-                        rusqlite::params![user_id, slug, display_name, relationship_type, payload],
+                        rusqlite::params![user_id, slug, encrypted_payload],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
@@ -3901,55 +4161,35 @@ mod runtime {
         }
 
         async fn write_social_graph(&self, graph: &SocialGraph) -> Result<()> {
-            let user_id = graph.user_id.clone();
-            let payload = serde_json::to_string(graph).context("Serializing social graph")?;
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        r###"
-                        INSERT INTO social_graphs (user_id, graph_json)
-                        VALUES (?1, ?2)
-                        ON CONFLICT(user_id)
-                        DO UPDATE SET graph_json = excluded.graph_json,
-                                      updated_at = CURRENT_TIMESTAMP
-                        "###,
-                        rusqlite::params![user_id, payload],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await
-                .context("Persisting social graph")?;
-            Ok(())
+            self.write_social_graph_secure(graph).await
         }
 
         async fn list_social_relationships(
             &self,
             user_id: String,
         ) -> Result<Vec<SocialRelationshipRecord>> {
+            let dek = self.active_dek(&user_id)?;
             self.conn
                 .call(move |conn| {
                     let mut stmt = conn.prepare(
                         r###"
-                        SELECT from_slug, from_label, to_slug, to_label, relation, evidence, weight
+                        SELECT from_slug, to_slug, from_label_ciphertext, to_label_ciphertext, relation_ciphertext, evidence_ciphertext, weight
                         FROM social_relationships
                         WHERE user_id = ?1
                         ORDER BY updated_at DESC
                         "###,
                     )?;
-                    let rows = stmt.query_map([user_id], |row| {
-                        Ok(SocialRelationshipRecord {
-                            from_slug: row.get(0)?,
-                            from_label: row.get(1)?,
-                            to_slug: row.get(2)?,
-                            to_label: row.get(3)?,
-                            relation: row.get(4)?,
-                            evidence: row.get(5)?,
-                            weight: row.get::<_, i64>(6)?.max(1) as usize,
-                        })
+                    let rows = stmt.query_map([user_id.clone()], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Vec<u8>>(4)?, row.get::<_, Vec<u8>>(5)?, row.get::<_, i64>(6)?.max(1) as usize))
                     })?;
                     let mut items = Vec::new();
                     for row in rows {
-                        items.push(row?);
+                        let (from_slug, to_slug, from_label, to_label, relation, evidence, weight) = row?;
+                        let aad = format!("social_relationships:{}:{}:{}", user_id, from_slug, to_slug);
+                        let decode = |value: Vec<u8>, field: &str| -> rusqlite::Result<String> {
+                            String::from_utf8(security::decrypt(&dek, &value, format!("{}:{}", aad, field).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)
+                        };
+                        items.push(SocialRelationshipRecord { from_slug, to_slug, from_label: decode(from_label, "from")?, to_label: decode(to_label, "to")?, relation: decode(relation, "relation")?, evidence: decode(evidence, "evidence")?, weight });
                     }
                     Ok(items)
                 })
@@ -3980,6 +4220,28 @@ mod runtime {
                 .chars()
                 .take(240)
                 .collect::<String>();
+            let dek = self.active_dek(&user_id)?;
+            let mut relation_hasher = DefaultHasher::new();
+            relation.hash(&mut relation_hasher);
+            let relation_key = format!("r{:016x}", relation_hasher.finish());
+            let aad = format!("social_relationships:{}:{}:{}", user_id, from_slug, to_slug);
+            let from_label_ciphertext = security::encrypt(
+                &dek,
+                from_label.as_bytes(),
+                format!("{}:from", aad).as_bytes(),
+            )?;
+            let to_label_ciphertext =
+                security::encrypt(&dek, to_label.as_bytes(), format!("{}:to", aad).as_bytes())?;
+            let relation_ciphertext = security::encrypt(
+                &dek,
+                relation.as_bytes(),
+                format!("{}:relation", aad).as_bytes(),
+            )?;
+            let evidence_ciphertext = security::encrypt(
+                &dek,
+                evidence.as_bytes(),
+                format!("{}:evidence", aad).as_bytes(),
+            )?;
             let weight = relationship.weight.max(1) as i64;
 
             self.conn
@@ -3987,26 +4249,21 @@ mod runtime {
                     conn.execute(
                         r###"
                         INSERT INTO social_relationships
-                            (user_id, from_slug, to_slug, relation, from_label, to_label, evidence, weight)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                            (user_id, from_slug, to_slug, relation, from_label, to_label, evidence, weight, from_label_ciphertext, to_label_ciphertext, relation_ciphertext, evidence_ciphertext)
+                        VALUES (?1, ?2, ?3, ?4, '', '', '', ?5, ?6, ?7, ?8, ?9)
                         ON CONFLICT(user_id, from_slug, to_slug, relation)
                         DO UPDATE SET
-                            from_label = excluded.from_label,
-                            to_label = excluded.to_label,
-                            evidence = excluded.evidence,
+                            from_label = '',
+                            to_label = '',
+                            evidence = '',
+                            from_label_ciphertext = excluded.from_label_ciphertext,
+                            to_label_ciphertext = excluded.to_label_ciphertext,
+                            relation_ciphertext = excluded.relation_ciphertext,
+                            evidence_ciphertext = excluded.evidence_ciphertext,
                             weight = social_relationships.weight + excluded.weight,
                             updated_at = CURRENT_TIMESTAMP
                         "###,
-                        rusqlite::params![
-                            user_id,
-                            from_slug,
-                            to_slug,
-                            relation,
-                            from_label,
-                            to_label,
-                            evidence,
-                            weight
-                        ],
+                        rusqlite::params![user_id, from_slug, to_slug, relation_key, weight, from_label_ciphertext, to_label_ciphertext, relation_ciphertext, evidence_ciphertext],
                     )
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
@@ -4017,23 +4274,129 @@ mod runtime {
         }
 
         async fn upsert_episode(&self, episode: Episode) -> Result<()> {
-            upsert_episode_record(&self.conn, episode.clone()).await?;
+            let dek = self.active_dek(&episode.user_id)?;
+            let mut episode = episode;
+            episode.id = normalize_slug(&episode.id);
+            if episode.user_id.trim().is_empty()
+                || episode.id.is_empty()
+                || episode.title.trim().is_empty()
+                || episode.narrative.trim().is_empty()
+            {
+                return Ok(());
+            }
+            episode.title = episode.title.trim().chars().take(160).collect();
+            episode.narrative = episode.narrative.trim().chars().take(2400).collect();
+            let existing_quotes = self
+                .list_episodes(episode.user_id.clone())
+                .await?
+                .into_iter()
+                .find(|item| item.id == episode.id)
+                .map(|item| item.user_quotes)
+                .unwrap_or_default();
+            let quotes = serde_json::to_vec(&merge_unique_strings(
+                &existing_quotes,
+                &episode.user_quotes,
+                16,
+            ))?;
+            let uid = episode.user_id.clone();
+            let id = episode.id.clone();
+            let title = security::encrypt(
+                &dek,
+                episode.title.as_bytes(),
+                format!("episodes:{}:{}:title", uid, id).as_bytes(),
+            )?;
+            let narrative = security::encrypt(
+                &dek,
+                episode.narrative.as_bytes(),
+                format!("episodes:{}:{}:narrative", uid, id).as_bytes(),
+            )?;
+            let user_quotes = security::encrypt(
+                &dek,
+                &quotes,
+                format!("episodes:{}:{}:quotes", uid, id).as_bytes(),
+            )?;
+            let occurred_at = episode.occurred_at.clone();
+            let session_id = episode.session_id.clone();
+            self.conn.call(move |conn| {
+                conn.execute(
+                    "INSERT INTO episodes (user_id, id, title, narrative, occurred_at, session_id, user_quotes, title_ciphertext, narrative_ciphertext, user_quotes_ciphertext) VALUES (?1, ?2, '', '', ?3, ?4, '[]', ?5, ?6, ?7) ON CONFLICT(user_id, id) DO UPDATE SET title = '', narrative = '', title_ciphertext = excluded.title_ciphertext, narrative_ciphertext = excluded.narrative_ciphertext, occurred_at = COALESCE(excluded.occurred_at, episodes.occurred_at), session_id = COALESCE(excluded.session_id, episodes.session_id), user_quotes = '[]', user_quotes_ciphertext = excluded.user_quotes_ciphertext, updated_at = CURRENT_TIMESTAMP",
+                    rusqlite::params![uid, id, occurred_at, session_id, title, narrative, user_quotes],
+                ).map_err(tokio_rusqlite::Error::Rusqlite)
+            }).await?;
             if let Err(err) = self.index_episode_memory(&episode).await {
-                tracing::warn!("Episode vector indexing failed: {}", err);
+                tracing::warn!(error = %err, "Episode vector indexing failed");
             }
             Ok(())
         }
 
         async fn list_episodes(&self, user_id: String) -> Result<Vec<Episode>> {
-            list_episode_records(&self.conn, user_id).await
+            let dek = self.active_dek(&user_id)?;
+            self.conn.call(move |conn| {
+                let mut stmt = conn.prepare("SELECT user_id, id, title_ciphertext, narrative_ciphertext, occurred_at, session_id, user_quotes_ciphertext, created_at, updated_at FROM episodes WHERE user_id = ?1 ORDER BY updated_at DESC")?;
+                let rows = stmt.query_map([user_id.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Vec<u8>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?)))?;
+                let mut items = Vec::new();
+                for row in rows {
+                    let (uid, id, title, narrative, occurred_at, session_id, quotes, created_at, updated_at) = row?;
+                    let title = String::from_utf8(security::decrypt(&dek, &title, format!("episodes:{}:{}:title", uid, id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let narrative = String::from_utf8(security::decrypt(&dek, &narrative, format!("episodes:{}:{}:narrative", uid, id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let quotes = security::decrypt(&dek, &quotes, format!("episodes:{}:{}:quotes", uid, id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    items.push(Episode { user_id: uid, id, title, narrative, occurred_at, session_id, user_quotes: serde_json::from_slice(&quotes).unwrap_or_default(), created_at, updated_at });
+                }
+                Ok(items)
+            }).await.context("Listing encrypted episodes")
         }
 
         async fn upsert_memory_link(&self, link: MemoryLink) -> Result<()> {
-            upsert_memory_link_record(&self.conn, link).await
+            let dek = self.active_dek(&link.user_id)?;
+            let mut link = link;
+            link.from_kind = normalize_slug(&link.from_kind);
+            link.from_id = normalize_slug(&link.from_id);
+            link.relation = normalize_slug(&link.relation);
+            link.to_kind = normalize_slug(&link.to_kind);
+            link.to_id = normalize_slug(&link.to_id);
+            if link.user_id.trim().is_empty()
+                || link.from_kind.is_empty()
+                || link.from_id.is_empty()
+                || link.relation.is_empty()
+                || link.to_kind.is_empty()
+                || link.to_id.is_empty()
+            {
+                return Ok(());
+            }
+            let evidence = link.evidence.trim().chars().take(240).collect::<String>();
+            let encrypted_evidence = security::encrypt(
+                &dek,
+                evidence.as_bytes(),
+                format!(
+                    "memory_links:{}:{}:{}:{}:{}:{}",
+                    link.user_id,
+                    link.from_kind,
+                    link.from_id,
+                    link.relation,
+                    link.to_kind,
+                    link.to_id
+                )
+                .as_bytes(),
+            )?;
+            let user_id = link.user_id.clone();
+            self.conn.call(move |conn| {
+                conn.execute("INSERT INTO memory_links (user_id, from_kind, from_id, relation, to_kind, to_id, evidence, evidence_ciphertext, weight) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8) ON CONFLICT(user_id, from_kind, from_id, relation, to_kind, to_id) DO UPDATE SET evidence = '', evidence_ciphertext = excluded.evidence_ciphertext, weight = memory_links.weight + excluded.weight, updated_at = CURRENT_TIMESTAMP", rusqlite::params![user_id, link.from_kind, link.from_id, link.relation, link.to_kind, link.to_id, encrypted_evidence, link.weight.max(1) as i64]).map_err(tokio_rusqlite::Error::Rusqlite)
+            }).await.context("Persisting encrypted memory link").map(|_| ())
         }
 
         async fn list_memory_links(&self, user_id: String) -> Result<Vec<MemoryLink>> {
-            list_memory_link_records(&self.conn, user_id).await
+            let dek = self.active_dek(&user_id)?;
+            self.conn.call(move |conn| {
+                let mut stmt = conn.prepare("SELECT user_id, from_kind, from_id, relation, to_kind, to_id, evidence_ciphertext, weight, created_at, updated_at FROM memory_links WHERE user_id = ?1 ORDER BY updated_at DESC")?;
+                let rows = stmt.query_map([user_id.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, Vec<u8>>(6)?, row.get::<_, i64>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?)))?;
+                let mut items = Vec::new();
+                for row in rows {
+                    let (uid, from_kind, from_id, relation, to_kind, to_id, evidence, weight, created_at, updated_at) = row?;
+                    let evidence = String::from_utf8(security::decrypt(&dek, &evidence, format!("memory_links:{}:{}:{}:{}:{}:{}", uid, from_kind, from_id, relation, to_kind, to_id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    items.push(MemoryLink { user_id: uid, from_kind, from_id, relation, to_kind, to_id, evidence, weight: weight.max(1) as usize, created_at, updated_at });
+                }
+                Ok(items)
+            }).await.context("Listing encrypted memory links")
         }
 
         async fn index_episode_memory(&self, episode: &Episode) -> Result<()> {
@@ -4043,47 +4406,94 @@ mod runtime {
             }
             let memory_id = format!("episode:{}:{}", episode.user_id, episode_id);
             let user_id = episode.user_id.clone();
-            let memory_id_for_delete = memory_id.clone();
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        "DELETE FROM therapy_memory_embeddings WHERE rowid IN (SELECT rowid FROM therapy_memory WHERE id = ?1)",
-                        rusqlite::params![memory_id_for_delete],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
-                    conn.execute(
-                        "DELETE FROM therapy_memory WHERE id = ?1",
-                        rusqlite::params![memory_id],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await
-                .context("Deleting previous episode vector row")?;
-
             let embedding_model_name = std::env::var("EMBEDDING_MODEL")
                 .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
             let embedding_model = self.embedding_client.embedding_model(embedding_model_name);
-            let vector_store: SqliteVectorStore<_, MemoryFragment> =
-                SqliteVectorStore::new(self.conn.clone(), &embedding_model)
-                    .await
-                    .context("Initializing vector store for episode")?;
-            let fragment = MemoryFragment {
-                id: format!("episode:{}:{}", user_id, episode_id),
-                title: episode.title.clone(),
-                content: format!("{}\n\n{}", episode.title, episode.narrative),
-                tags: format!("episode,user:{}", user_id),
-            };
-            let embeddings = EmbeddingsBuilder::new(embedding_model)
-                .documents(vec![fragment])
-                .context("Building episode embedding document")?
-                .build()
+            let content = format!("{}\n\n{}", episode.title, episode.narrative);
+            let embedding = embedding_model
+                .embed_text(&content)
                 .await
-                .context("Embedding episode memory")?;
-            vector_store
-                .add_rows(embeddings)
-                .await
-                .context("Writing episode vector row")?;
+                .map_err(|error| anyhow::anyhow!("Embedding episode memory: {}", error))?;
+            let dek = self.active_dek(&user_id)?;
+            let title_ciphertext = security::encrypt(
+                &dek,
+                episode.title.as_bytes(),
+                format!("encrypted_memory:{}:title", memory_id).as_bytes(),
+            )?;
+            let content_ciphertext = security::encrypt(
+                &dek,
+                content.as_bytes(),
+                format!("encrypted_memory:{}:content", memory_id).as_bytes(),
+            )?;
+            let embedding_ciphertext = security::encrypt(
+                &dek,
+                &serde_json::to_vec(&embedding.vec)?,
+                format!("encrypted_memory:{}:embedding", memory_id).as_bytes(),
+            )?;
+            let tags_ciphertext = security::encrypt(
+                &dek,
+                format!("episode,user:{}", user_id).as_bytes(),
+                format!("encrypted_memory:{}:tags", memory_id).as_bytes(),
+            )?;
+            self.conn.call(move |conn| {
+                conn.execute("INSERT INTO encrypted_memory (id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, tags_ciphertext) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET title_ciphertext = excluded.title_ciphertext, content_ciphertext = excluded.content_ciphertext, embedding_ciphertext = excluded.embedding_ciphertext, tags_ciphertext = excluded.tags_ciphertext", rusqlite::params![memory_id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, tags_ciphertext]).map_err(tokio_rusqlite::Error::Rusqlite)
+            }).await.context("Writing encrypted episode vector row")?;
             Ok(())
+        }
+
+        async fn encrypted_memory_recall(
+            &self,
+            user_id: &str,
+            query: &str,
+        ) -> Result<Vec<MemoryCandidate>> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            let indexed: i64 = self
+                .conn
+                .call({
+                    let uid = uid.clone();
+                    move |conn| {
+                        conn.query_row(
+                            "SELECT COUNT(*) FROM encrypted_memory WHERE user_id = ?1",
+                            [uid],
+                            |row| row.get(0),
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    }
+                })
+                .await?;
+            if indexed == 0 {
+                for episode in self.list_episodes(uid.clone()).await.unwrap_or_default() {
+                    let _ = self.index_episode_memory(&episode).await;
+                }
+            }
+            let model_name = std::env::var("EMBEDDING_MODEL")
+                .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
+            let model = self.embedding_client.embedding_model(model_name);
+            let query_vec = model
+                .embed_text(query)
+                .await
+                .map_err(|error| anyhow::anyhow!("Embedding memory query: {}", error))?
+                .vec;
+            self.conn.call(move |conn| {
+                let mut stmt = conn.prepare("SELECT id, title_ciphertext, content_ciphertext, embedding_ciphertext FROM encrypted_memory WHERE user_id = ?1")?;
+                let rows = stmt.query_map([uid.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?)))?;
+                let mut hits = Vec::new();
+                for row in rows {
+                    let (id, title, content, embedding) = row?;
+                    let title = String::from_utf8(security::decrypt(&dek, &title, format!("encrypted_memory:{}:title", id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let content = String::from_utf8(security::decrypt(&dek, &content, format!("encrypted_memory:{}:content", id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let embedding = security::decrypt(&dek, &embedding, format!("encrypted_memory:{}:embedding", id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let vector: Vec<f64> = serde_json::from_slice(&embedding).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let (dot, left, right) = query_vec.iter().zip(vector.iter()).fold((0.0, 0.0, 0.0), |(dot, left, right), (a, b)| (dot + a * b, left + a * a, right + b * b));
+                    let cosine = if left > 0.0 && right > 0.0 { dot / (left.sqrt() * right.sqrt()) } else { 0.0 };
+                    if cosine > 0.05 {
+                        hits.push(MemoryCandidate { score: (cosine * 100.0) as i32, summary: format!("[vector memory] {}: {}", title, content) });
+                    }
+                }
+                hits.sort_by(|left, right| right.score.cmp(&left.score));
+                Ok(hits)
+            }).await.context("Searching encrypted memory")
         }
 
         async fn refresh_social_graph(&self, user_id: String) -> Result<SocialGraph> {
@@ -4125,11 +4535,12 @@ mod runtime {
             user_id: String,
             limit: i64,
         ) -> Result<Vec<(String, String, String, String)>> {
+            let dek = self.active_dek(&user_id)?;
             self.conn
                 .call(move |conn| {
                     let mut stmt = conn.prepare(
                         r###"
-                        SELECT m.role, m.content, s.title, COALESCE(m.created_at, s.updated_at, s.created_at, '')
+                        SELECT m.session_id, m.role, m.content_ciphertext, s.title_ciphertext, COALESCE(m.created_at, s.updated_at, s.created_at, '')
                         FROM messages m
                         JOIN sessions s ON s.id = m.session_id
                         WHERE s.user_id = ?1
@@ -4141,13 +4552,17 @@ mod runtime {
                         Ok((
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     })?;
                     let mut items = Vec::new();
                     for row in rows {
-                        items.push(row?);
+                        let (session_id, role, content, title, created_at) = row?;
+                        let content = String::from_utf8(security::decrypt(&dek, &content, format!("messages:{}", session_id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let title = String::from_utf8(security::decrypt(&dek, &title, format!("sessions:{}:title", session_id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        items.push((role, content, title, created_at));
                     }
                     Ok(items)
                 })
@@ -4477,7 +4892,10 @@ mod runtime {
                 .await?;
             let recent_history = self.get_history(session_id).await.unwrap_or_default();
             let all_logs = self.get_user_memory_logs(user_id.clone(), 250).await?;
-            let graph = self.read_patient_graph(user_id).await.unwrap_or_default();
+            let graph = self
+                .read_patient_graph(user_id.clone())
+                .await
+                .unwrap_or_default();
 
             let display_name = profile
                 .as_ref()
@@ -4533,6 +4951,10 @@ mod runtime {
                     score,
                     summary: format!("[{} | {}] {}: {}", created_at, title, role, content),
                 });
+            }
+            memory_candidates.sort_by(|left, right| right.score.cmp(&left.score));
+            if let Ok(vector_hits) = self.encrypted_memory_recall(&user_id, &user_request).await {
+                memory_candidates.extend(vector_hits);
             }
             memory_candidates.sort_by(|left, right| right.score.cmp(&left.score));
             let broader_memories: Vec<String> = memory_candidates
@@ -4655,6 +5077,10 @@ mod runtime {
                 });
             }
             memory_candidates.sort_by(|left, right| right.score.cmp(&left.score));
+            if let Ok(vector_hits) = self.encrypted_memory_recall(&user_id, &prompt).await {
+                memory_candidates.extend(vector_hits);
+            }
+            memory_candidates.sort_by(|left, right| right.score.cmp(&left.score));
             let broader_memories: Vec<String> = memory_candidates
                 .into_iter()
                 .take(8)
@@ -4762,10 +5188,7 @@ mod runtime {
         }
 
         async fn read_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
-            self.graph_reader
-                .call(GraphReadArgs { user_id })
-                .await
-                .context("Reading patient graph")
+            self.read_patient_graph_secure(&user_id).await
         }
 
         fn spawn_memory_update(
@@ -4842,7 +5265,9 @@ mod runtime {
                 nodes_to_remove_ids: delta.obsolete_concept_ids,
                 edges_to_remove: delta.obsolete_connections,
             };
-            let summary = self.graph_writer.call(update).await?;
+            let mut graph = self.read_patient_graph_secure(&user_id).await?;
+            let summary = apply_graph_update(&mut graph, update);
+            self.write_patient_graph_secure(&graph).await?;
             eprintln!(
                 "[graph_update] +{} nodes +{} edges -{} nodes -{} edges ({} nodes, {} edges)",
                 summary.added_nodes,
@@ -4890,22 +5315,52 @@ mod runtime {
             reply: String,
         ) -> Result<Option<String>> {
             let source_text = format!("User: {}\nAssistant: {}", prompt, reply);
-            let graph_headline = self
-                .update_graph_from_exchange(user_id.clone(), prompt.clone(), reply)
-                .await?;
-            let profile_headline = self
-                .sync_relationship_profiles_from_text(user_id.clone(), source_text.clone())
-                .await?;
-            let episode_headline = self
-                .sync_episodes_from_text(user_id.clone(), session_id, prompt)
-                .await?;
-            let social_headline = self
-                .sync_social_relationships_from_text(user_id, source_text)
-                .await?;
-            Ok(graph_headline
-                .or(profile_headline)
-                .or(episode_headline)
-                .or(social_headline))
+            let mut headline = None;
+
+            // These extractors are independent. A transient provider or
+            // schema failure in one must not prevent the remaining memory
+            // projections from being persisted.
+            match timeout(
+                Duration::from_secs(30),
+                self.update_graph_from_exchange(user_id.clone(), prompt.clone(), reply),
+            )
+            .await
+            {
+                Ok(Ok(value)) => headline = headline.or(value),
+                Ok(Err(error)) => eprintln!("[graph_update] {}", error),
+                Err(_) => eprintln!("[graph_update] timed out after 30 seconds"),
+            }
+            match timeout(
+                Duration::from_secs(30),
+                self.sync_relationship_profiles_from_text(user_id.clone(), source_text.clone()),
+            )
+            .await
+            {
+                Ok(Ok(value)) => headline = headline.or(value),
+                Ok(Err(error)) => eprintln!("[relationship_profile_update] {}", error),
+                Err(_) => eprintln!("[relationship_profile_update] timed out after 30 seconds"),
+            }
+            match timeout(
+                Duration::from_secs(30),
+                self.sync_episodes_from_text(user_id.clone(), session_id, prompt),
+            )
+            .await
+            {
+                Ok(Ok(value)) => headline = headline.or(value),
+                Ok(Err(error)) => eprintln!("[episode_update] {}", error),
+                Err(_) => eprintln!("[episode_update] timed out after 30 seconds"),
+            }
+            match timeout(
+                Duration::from_secs(30),
+                self.sync_social_relationships_from_text(user_id, source_text),
+            )
+            .await
+            {
+                Ok(Ok(value)) => headline = headline.or(value),
+                Ok(Err(error)) => eprintln!("[social_relationship_update] {}", error),
+                Err(_) => eprintln!("[social_relationship_update] timed out after 30 seconds"),
+            }
+            Ok(headline)
         }
 
         // --- Agent Logic ---
@@ -4922,6 +5377,8 @@ mod runtime {
 
             let mut history = {
                 let mut guard = self.histories.write().await;
+                guard
+                    .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(session_id) {
                     let db_logs = self.get_history(session_id.to_string()).await?;
                     let mut msgs = Vec::new();
@@ -4937,9 +5394,12 @@ mod runtime {
                             });
                         }
                     }
-                    guard.insert(session_id.to_string(), msgs);
+                    guard.insert(session_id.to_string(), (Instant::now(), msgs));
                 }
-                guard.remove(session_id).unwrap_or_default()
+                guard
+                    .remove(session_id)
+                    .map(|(_, history)| history)
+                    .unwrap_or_default()
             };
 
             let memory_context = self
@@ -4972,7 +5432,7 @@ mod runtime {
                 .await?;
 
             let mut guard = self.histories.write().await;
-            guard.insert(session_id.to_string(), history);
+            guard.insert(session_id.to_string(), (Instant::now(), history));
 
             self.spawn_session_summary_update(session_id.to_string());
             self.spawn_memory_update(
@@ -5015,6 +5475,8 @@ mod runtime {
 
             let mut history = {
                 let mut guard = self.histories.write().await;
+                guard
+                    .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(session_id) {
                     let db_logs = self.get_history(session_id.to_string()).await?;
                     let mut msgs = Vec::new();
@@ -5030,9 +5492,12 @@ mod runtime {
                             });
                         }
                     }
-                    guard.insert(session_id.to_string(), msgs);
+                    guard.insert(session_id.to_string(), (Instant::now(), msgs));
                 }
-                guard.remove(session_id).unwrap_or_default()
+                guard
+                    .remove(session_id)
+                    .map(|(_, history)| history)
+                    .unwrap_or_default()
             };
 
             let draft_prompt = format!(
@@ -5052,7 +5517,7 @@ mod runtime {
                 .await?;
 
             let mut guard = self.histories.write().await;
-            guard.insert(session_id.to_string(), history);
+            guard.insert(session_id.to_string(), (Instant::now(), history));
 
             self.spawn_session_summary_update(session_id.to_string());
             self.spawn_memory_update(
@@ -5096,6 +5561,8 @@ mod runtime {
 
             let mut history = {
                 let mut guard = self.histories.write().await;
+                guard
+                    .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(&session_id) {
                     let db_logs = self.get_history(session_id.clone()).await?;
                     let mut msgs = Vec::new();
@@ -5111,9 +5578,12 @@ mod runtime {
                             });
                         }
                     }
-                    guard.insert(session_id.clone(), msgs);
+                    guard.insert(session_id.clone(), (Instant::now(), msgs));
                 }
-                guard.remove(&session_id).unwrap_or_default()
+                guard
+                    .remove(&session_id)
+                    .map(|(_, history)| history)
+                    .unwrap_or_default()
             };
 
             let draft_prompt = format!(
@@ -5226,7 +5696,7 @@ mod runtime {
                     });
                 }
                 let mut guard = runtime.histories.write().await;
-                guard.insert(session_id_clone, history);
+                guard.insert(session_id_clone, (Instant::now(), history));
             });
 
             Ok(ReceiverStream::new(rx))
@@ -5245,6 +5715,8 @@ mod runtime {
 
             let mut history = {
                 let mut guard = self.histories.write().await;
+                guard
+                    .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(&session_id) {
                     let db_logs = self.get_history(session_id.clone()).await?;
                     let mut msgs = Vec::new();
@@ -5260,9 +5732,12 @@ mod runtime {
                             });
                         }
                     }
-                    guard.insert(session_id.clone(), msgs);
+                    guard.insert(session_id.clone(), (Instant::now(), msgs));
                 }
-                guard.remove(&session_id).unwrap_or_default()
+                guard
+                    .remove(&session_id)
+                    .map(|(_, history)| history)
+                    .unwrap_or_default()
             };
 
             let memory_context = self
@@ -5376,7 +5851,7 @@ mod runtime {
                     });
                 }
                 let mut guard = runtime.histories.write().await;
-                guard.insert(session_id_clone, history);
+                guard.insert(session_id_clone, (Instant::now(), history));
             });
 
             Ok(ReceiverStream::new(rx))
@@ -5459,14 +5934,16 @@ mod runtime {
         }
 
         pub async fn get_memory_status(&self, user_id: String) -> Result<MemoryStatus> {
-            let mind = read_patient_graph_snapshot(&self.conn, &user_id)
+            let mind = self
+                .read_patient_graph_secure(&user_id)
                 .await
                 .unwrap_or_else(|_| PatientGraph {
                     user_id: user_id.clone(),
                     nodes: Vec::new(),
                     edges: Vec::new(),
                 });
-            let social = read_social_graph(&self.conn, &user_id)
+            let social = self
+                .read_social_graph_secure(&user_id)
                 .await
                 .unwrap_or_else(|_| SocialGraph {
                     user_id: user_id.clone(),
@@ -5507,161 +5984,8 @@ mod runtime {
         }
 
         // Auth Helpers
-        pub async fn signup(&self, u: String, p: String) -> Result<User> {
-            self.create_user(u, p).await
-        }
-        pub async fn login(&self, u: String, p: String) -> Result<User> {
-            self.verify_user(u, p).await
-        }
         pub async fn get_user(&self, id: String) -> Result<User> {
             self.get_user_by_id(id).await
-        }
-
-        // --- Password Reset ---
-
-        pub async fn generate_password_reset_token(&self, email: &str) -> Result<String> {
-            let user = self
-                .get_user_by_username(email)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("No account found with that email"))?;
-
-            let token = Uuid::new_v4().to_string();
-            let user_id = user.id.clone();
-            let token_clone = token.clone();
-
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        r###"
-                        INSERT INTO password_reset_tokens (user_id, token, expires_at)
-                        VALUES (?1, ?2, datetime('now', '+1 hours'))
-                        "###,
-                        rusqlite::params![user_id, token_clone],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-
-            Ok(token)
-        }
-
-        pub async fn verify_and_reset_password(
-            &self,
-            token: &str,
-            new_password: &str,
-        ) -> Result<()> {
-            let token_owned = token.to_string();
-            let (user_id,) = self
-                .conn
-                .call(move |conn| {
-                    let result: Option<(String,)> = conn
-                        .query_row(
-                            r###"
-                            SELECT user_id FROM password_reset_tokens
-                            WHERE token = ?1 AND used = 0 AND expires_at > datetime('now')
-                            "###,
-                            [token_owned],
-                            |row| Ok((row.get::<_, String>(0)?,)),
-                        )
-                        .optional()
-                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
-                    Ok(result)
-                })
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Invalid or expired reset token"))?;
-
-            let salt = SaltString::generate(&mut OsRng);
-            let argon2 = Argon2::default();
-            let password_hash = argon2
-                .hash_password(new_password.as_bytes(), &salt)
-                .map_err(|e| anyhow::anyhow!("Hashing failed: {}", e))?
-                .to_string();
-
-            let user_id_for_update = user_id.clone();
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        "UPDATE users SET password_hash = ?1 WHERE id = ?2",
-                        rusqlite::params![password_hash, user_id_for_update],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-
-            let token_for_use = token.to_string();
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        "UPDATE password_reset_tokens SET used = 1 WHERE token = ?1",
-                        [token_for_use],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-
-            Ok(())
-        }
-
-        // --- Email Verification ---
-
-        pub async fn verify_email(&self, user_id: &str) -> Result<()> {
-            let uid = user_id.to_string();
-            self.conn
-                .call(move |conn| {
-                    conn.execute("UPDATE users SET email_verified = 1 WHERE id = ?1", [uid])
-                        .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-            Ok(())
-        }
-
-        pub async fn generate_email_verification_token(&self, user_id: &str) -> Result<String> {
-            let token = Uuid::new_v4().to_string();
-            let uid = user_id.to_string();
-            let token_clone = token.clone();
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        r###"
-                        INSERT INTO password_reset_tokens (user_id, token, expires_at)
-                        VALUES (?1, ?2, datetime('now', '+24 hours'))
-                        "###,
-                        rusqlite::params![uid, token_clone],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-            Ok(token)
-        }
-
-        pub async fn verify_email_with_token(&self, token: &str) -> Result<()> {
-            let token_owned = token.to_string();
-            let (user_id,): (String,) = self
-                .conn
-                .call(move |conn| {
-                    conn.query_row(
-                        r###"
-                        SELECT user_id FROM password_reset_tokens
-                        WHERE token = ?1 AND used = 0 AND expires_at > datetime('now')
-                        "###,
-                        [token_owned],
-                        |row| Ok((row.get::<_, String>(0)?,)),
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-            self.verify_email(&user_id).await?;
-            let token_for_use = token.to_string();
-            self.conn
-                .call(move |conn| {
-                    conn.execute(
-                        "UPDATE password_reset_tokens SET used = 1 WHERE token = ?1",
-                        [token_for_use],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await?;
-            Ok(())
         }
     }
 
@@ -5723,15 +6047,16 @@ mod runtime {
         let key = cookie_key();
         let jar = PrivateCookieJar::from_headers(&headers, key);
 
-        if let Some(cookie) = jar.get(AUTH_COOKIE_NAME) {
-            if cookie.value() != params.user_id {
-                return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
-            }
-        } else {
-            return Err((StatusCode::UNAUTHORIZED, "No auth cookie".into()));
+        let session = super::auth_session_from_jar(&jar)
+            .ok_or((StatusCode::UNAUTHORIZED, "No auth cookie".into()))?;
+        if session.user_id != params.user_id {
+            return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
         }
 
         let runtime = agent_runtime().await.map_err(internal_err)?;
+        runtime
+            .cache_dek(&session.user_id, session.dek)
+            .map_err(internal_err)?;
         let stream = runtime
             .stream(params.user_id, params.session_id, params.prompt)
             .await
@@ -5752,15 +6077,16 @@ mod runtime {
         let key = cookie_key();
         let jar = PrivateCookieJar::from_headers(&headers, key);
 
-        if let Some(cookie) = jar.get(AUTH_COOKIE_NAME) {
-            if cookie.value() != user_id {
-                return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
-            }
-        } else {
-            return Err((StatusCode::UNAUTHORIZED, "No auth cookie".into()));
+        let session = super::auth_session_from_jar(&jar)
+            .ok_or((StatusCode::UNAUTHORIZED, "No auth cookie".into()))?;
+        if session.user_id != user_id {
+            return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
         }
 
         let runtime = agent_runtime().await.map_err(internal_err)?;
+        runtime
+            .cache_dek(&session.user_id, session.dek)
+            .map_err(internal_err)?;
         let graph = runtime
             .get_mind_map_payload(user_id)
             .await
@@ -5778,15 +6104,16 @@ mod runtime {
         let key = cookie_key();
         let jar = PrivateCookieJar::from_headers(&headers, key);
 
-        if let Some(cookie) = jar.get(AUTH_COOKIE_NAME) {
-            if cookie.value() != params.user_id {
-                return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
-            }
-        } else {
-            return Err((StatusCode::UNAUTHORIZED, "No auth cookie".into()));
+        let session = super::auth_session_from_jar(&jar)
+            .ok_or((StatusCode::UNAUTHORIZED, "No auth cookie".into()))?;
+        if session.user_id != params.user_id {
+            return Err((StatusCode::UNAUTHORIZED, "User mismatch".into()));
         }
 
         let runtime = agent_runtime().await.map_err(internal_err)?;
+        runtime
+            .cache_dek(&session.user_id, session.dek)
+            .map_err(internal_err)?;
         let stream = runtime
             .draft_stream(
                 params.user_id,
@@ -6669,17 +6996,18 @@ mod runtime {
             assert!(now.utc_offset.starts_with('+') || now.utc_offset.starts_with('-'));
             assert!(now.unix_timestamp > 0);
         }
-
-        #[test]
-        fn test_password_reset_token_generation() {
-            let token = Uuid::new_v4().to_string();
-            assert_eq!(token.len(), 36);
-            assert!(token.contains('-'));
-        }
     }
 }
 
 pub use runtime::{agent_runtime, cookie_key, draft_stream_handler, graph_handler, stream_handler};
+
+pub fn auth_session_from_jar(
+    jar: &axum_extra::extract::cookie::PrivateCookieJar,
+) -> Option<AuthSession> {
+    jar.get(AUTH_COOKIE_NAME)
+        .and_then(|cookie| serde_json::from_str::<AuthSession>(cookie.value()).ok())
+        .filter(|session| session.dek.len() == crate::security::DEK_LEN)
+}
 
 pub fn has_auth_cookie(
     headers: &axum::http::HeaderMap,
@@ -6688,7 +7016,7 @@ pub fn has_auth_cookie(
     use axum_extra::extract::cookie::PrivateCookieJar;
 
     let jar = PrivateCookieJar::from_headers(headers, key.clone());
-    jar.get(AUTH_COOKIE_NAME).is_some()
+    auth_session_from_jar(&jar).is_some()
 }
 
 pub fn cookie_is_secure(headers: &axum::http::HeaderMap) -> bool {
@@ -6702,7 +7030,7 @@ pub fn extract_user_id_from_headers(
     use axum_extra::extract::cookie::PrivateCookieJar;
 
     let jar = PrivateCookieJar::from_headers(headers, key.clone());
-    jar.get(AUTH_COOKIE_NAME)
-        .map(|c| c.value().to_string())
+    auth_session_from_jar(&jar)
+        .map(|session| session.user_id)
         .ok_or_else(|| anyhow::anyhow!("Unauthorized"))
 }

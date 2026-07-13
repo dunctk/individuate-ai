@@ -605,11 +605,11 @@ async function registerAdditionalPasskey() {
         });
         if (!resp.ok) throw new Error('Start failed');
         const { challenge_id, options } = await resp.json();
-        const cred = await window.registerPasskey(options);
+        const passkey = await window.registerPasskey(options);
         const verify = await fetch('/api/passkey/register/complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge_id, credential: cred })
+            body: JSON.stringify({ challenge_id, credential: passkey.credential, prf_output: passkey.prf_output, prf_enabled: passkey.prf_enabled })
         });
         if (!verify.ok) throw new Error('Verification failed');
         showToast('Passkey registered');

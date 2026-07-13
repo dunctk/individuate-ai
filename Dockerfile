@@ -1,25 +1,27 @@
-FROM rust:latest as builder
+FROM rust:1.93-bookworm AS builder
 
 # Install Node.js and npm for Tailwind CSS
-RUN apt-get update && apt-get install -y nodejs npm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs \
+    npm \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy project files
-COPY . .
+# Install dependencies first so source-only changes reuse the dependency layer.
+COPY Cargo.toml Cargo.lock package.json package-lock.json ./
+RUN npm ci --ignore-scripts
 
-# Install npm dependencies
-RUN npm install
+COPY . .
 
 # Build CSS
 RUN npx tailwindcss -i style/input.css -o style/output.css --minify
 
-# Install cargo-leptos and add wasm target
-RUN rustup target add wasm32-unknown-unknown
-RUN cargo install --locked cargo-leptos
-
-# Build the application
-RUN cargo leptos build --release
+# This application is server-rendered by Axum; the browser assets are served
+# from public/ and the generated Tailwind bundle.
+RUN cargo build --locked --release --bin individuateai
 
 # Runner stage
 FROM debian:bookworm-slim
@@ -29,24 +31,23 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    openssl \
-    libssl-dev \
+    libssl3 \
     libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Create data directory for SQLite
 RUN mkdir -p data
 
-# Copy the binary
 COPY --from=builder /app/target/release/individuateai /app/individuateai
 
-# Copy the site files (JS, CSS, WASM, static assets)
-COPY --from=builder /app/target/site /app/site
+# Copy static assets used by the server.
+COPY --from=builder /app/public /app/public
+COPY --from=builder /app/style/output.css /app/style/output.css
+COPY --from=builder /app/mandala-avatar.jpg /app/mandala-avatar.jpg
+COPY --from=builder /app/mandala-avatar.mp4 /app/mandala-avatar.mp4
 
-# Set environment variables
-ENV LEPTOS_SITE_ADDR="0.0.0.0:3008"
-ENV LEPTOS_SITE_ROOT="site"
-# Default DB path (can be overridden in Coolify)
+# Coolify can override these values, especially the persistent DB path.
+ENV PORT="3008"
+ENV LEPTOS_SITE_ROOT="/app/public"
 ENV MEMORY_DB_PATH="/app/data/memory.sqlite"
 
 # Expose the port

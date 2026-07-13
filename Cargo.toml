@@ -22,17 +22,18 @@ urlencoding = "2"
 dotenvy = "0.15"
 reqwest = { version = "0.12", features = ["json"] }
 rig-core = { version = "0.26", features = ["derive"] }
-rig-sqlite = "0.1.29"
-sqlite-vec = "0.1"
 tokio-rusqlite = { version = "0.6", features = ["bundled"] }
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 anyhow = "1"
-argon2 = "0.5.3"
 time = { version = "0.3.44", features = ["local-offset"] }
 dashmap = "6.1.0"
 webauthn-rs = "0.5.4"
 webauthn-rs-proto = "0.5.4"
 serde_cbor_2 = "0.13"
 schemars = "1.1"
-thiserror = "1"
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+hkdf = "0.12"
+rand = "0.8"
+sha2 = "0.10"

@@ -19,3 +19,5 @@ node_modules/
 
 .gemini-clipboard/
 data/
+*.bak
+.codex

@@ -30,6 +30,8 @@
     html.chat-open,
     body.chat-open {
         height: 100%;
+        width: 100%;
+        max-width: 100%;
         min-height: 0;
         overflow: hidden;
         overscroll-behavior: none;
@@ -109,6 +111,9 @@
         inset-inline: 0;
         top: var(--chat-viewport-offset-top, 0px);
         width: 100%;
+        max-width: 100vw;
+        overflow-x: hidden;
+        overflow-x: clip;
         height: var(--chat-viewport-height, 100vh);
         max-height: var(--chat-viewport-height, 100vh);
         min-height: 0;
@@ -212,6 +217,20 @@
     #chat-input[data-dictating="true"] {
         border-color: rgba(63, 184, 164, 0.62);
         box-shadow: 0 0 0 3px rgba(42, 157, 143, 0.1), 0 0 24px -12px rgba(63, 184, 164, 0.85);
+    }
+
+    @media (max-width: 640px) {
+        #chat-input {
+            font-size: 16px;
+        }
+
+        .composer-shell,
+        .composer-shell > *,
+        #chat-form,
+        .voice-live {
+            min-width: 0;
+            max-width: 100%;
+        }
     }
 }
 
@@ -483,7 +502,10 @@
     /* ── Seed orb — the FAB "Send" button (circular pulsing gradient) ──── */
     .seed-orb {
         position: relative;
+        display: grid;
+        place-items: center;
         width: 44px; height: 44px;
+        padding: 0;
         border-radius: 9999px;
         flex-shrink: 0;
         border: none;
@@ -513,7 +535,12 @@
         transition: opacity 0.3s ease;
     }
     .seed-orb:hover::after { opacity: 1; }
-    .seed-orb svg { color: rgb(8, 19, 14); width: 18px; height: 18px; }
+    .seed-orb svg {
+        display: block;
+        width: 20px;
+        height: 20px;
+        color: rgb(8, 19, 14);
+    }
 
     /* ── Empty state — Fibonacci spiral "seed" ────────────────────────── */
     .spiral-empty {

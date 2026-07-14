@@ -59,16 +59,16 @@
         class="fixed top-0 right-0 z-40 h-full w-80 glass-strong border-l border-sage-mist/20 transform translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"></aside>
 
     <!-- Glass header — the "foggy greenhouse window" floating membrane -->
-    <header class="glass shrink-0 flex items-center justify-between px-4 py-3 border-b border-sage-mist/15 z-10">
-        <div class="flex items-center gap-2">
+    <header class="glass shrink-0 flex min-w-0 items-center justify-between overflow-hidden px-3 sm:px-4 py-3 border-b border-sage-mist/15 z-10">
+        <div class="flex min-w-0 items-center gap-2">
             <button onclick="toggleSidebar()" class="icon-btn" aria-label="Open history">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h16"/>
                 </svg>
             </button>
-            <span class="brand-mark text-lg leading-none">IndividuateAI</span>
+            <span class="brand-mark hidden sm:inline text-lg leading-none">IndividuateAI</span>
         </div>
-        <div class="flex items-center gap-1">
+        <div class="flex min-w-0 items-center gap-1">
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
             <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
             <a href="/social-graph" class="pill no-underline text-inherit" data-active="false">Social Graph</a>
@@ -146,8 +146,8 @@
                     <span id="voice-live-label" class="voice-live-label">Deepgram live</span>
                     <span id="voice-live-interim" class="voice-live-interim" aria-hidden="true"></span>
                 </div>
-                <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
-                    <div class="flex-1 relative">
+                <form id="chat-form" class="flex min-w-0 w-full items-end gap-2 sm:gap-3" onsubmit="event.preventDefault(); submitChat();">
+                    <div class="flex-1 min-w-0 relative">
                         <input id="chat-input" type="text" autocomplete="off"
                             placeholder="What happened, and what do you want to say?"
                             class="field !rounded-2xl !py-3 !px-4 pr-12"/>
@@ -159,8 +159,8 @@
                         </svg>
                     </button>
                     <button id="seed-send" type="submit" class="seed-orb" aria-label="Send">
-                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.4">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6"/>
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.35" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/>
                         </svg>
                     </button>
                 </form>

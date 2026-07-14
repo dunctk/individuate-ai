@@ -342,6 +342,8 @@ mod tests {
         assert!(html.contains("window.visualViewport"));
         assert!(html.contains("viewport?.offsetTop"));
         assert!(html.contains("--chat-viewport-offset-top"));
+        assert!(html.contains("min-w-0 w-full items-end"));
+        assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("voice-live"));
         assert!(html.contains("Deepgram live"));
         assert!(html.contains("/api/deepgram/token"));
@@ -349,6 +351,7 @@ mod tests {
         assert!(html.contains("recognition.interimResults = true"));
         assert!(html.contains("window.webkitSpeechRecognition"));
         assert!(html.contains("seed-orb"));
+        assert!(html.contains("M12 19V5"));
         assert!(html.contains("mandala-avatar.jpg"));
         assert!(html.contains("Create a new recovery key"));
         assert!(html.contains("Your current recovery key will keep working"));

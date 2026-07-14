@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div id="app-shell"
-     class="app-viewport flex flex-col relative overflow-hidden"
+     class="app-viewport flex flex-col overflow-hidden"
      data-user-id="{{ user_id }}"
      data-username="{{ username }}"
      data-session-id="{{ session_id }}">
@@ -143,7 +143,7 @@
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
                 <div id="voice-live" class="voice-live" data-state="idle" role="status" aria-live="polite">
                     <span class="voice-live-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-                    <span id="voice-live-label" class="voice-live-label">Listening</span>
+                    <span id="voice-live-label" class="voice-live-label">Deepgram live</span>
                     <span id="voice-live-interim" class="voice-live-interim" aria-hidden="true"></span>
                 </div>
                 <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
@@ -175,9 +175,21 @@
 document.documentElement.classList.add('chat-open');
 document.body.classList.add('chat-open');
 
-function syncChatViewport() {
-    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+let chatViewportSettleTimer = null;
+
+function applyChatViewport() {
+    const viewport = window.visualViewport;
+    const viewportHeight = viewport?.height || window.innerHeight;
+    const viewportOffsetTop = viewport?.offsetTop || 0;
     document.documentElement.style.setProperty('--chat-viewport-height', viewportHeight + 'px');
+    document.documentElement.style.setProperty('--chat-viewport-offset-top', viewportOffsetTop + 'px');
+}
+
+function syncChatViewport() {
+    applyChatViewport();
+    window.requestAnimationFrame(applyChatViewport);
+    clearTimeout(chatViewportSettleTimer);
+    chatViewportSettleTimer = setTimeout(applyChatViewport, 60);
 }
 
 syncChatViewport();

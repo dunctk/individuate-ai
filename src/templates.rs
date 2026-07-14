@@ -340,7 +340,10 @@ mod tests {
         assert!(html.contains("chat-stage"));
         assert!(html.contains("composer-shell"));
         assert!(html.contains("window.visualViewport"));
+        assert!(html.contains("viewport?.offsetTop"));
+        assert!(html.contains("--chat-viewport-offset-top"));
         assert!(html.contains("voice-live"));
+        assert!(html.contains("Deepgram live"));
         assert!(html.contains("/api/deepgram/token"));
         assert!(html.contains("wss://api.deepgram.com/v1/listen"));
         assert!(html.contains("recognition.interimResults = true"));

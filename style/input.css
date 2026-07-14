@@ -29,7 +29,7 @@
 
     html.chat-open,
     body.chat-open {
-        height: var(--chat-viewport-height, 100dvh);
+        height: 100%;
         min-height: 0;
         overflow: hidden;
         overscroll-behavior: none;
@@ -105,6 +105,9 @@
 
 @layer components {
     .app-viewport {
+        position: fixed;
+        inset-inline: 0;
+        top: var(--chat-viewport-offset-top, 0px);
         width: 100%;
         height: var(--chat-viewport-height, 100vh);
         max-height: var(--chat-viewport-height, 100vh);

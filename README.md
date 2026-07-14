@@ -62,9 +62,11 @@ using that image and container port `3008`. Mount persistent storage at
 
 Coolify's source auto-deploy is disabled so it does not deploy before the
 image exists. Add the Coolify deploy-hook URL as the GitHub Actions secret
-`COOLIFY_DEPLOY_HOOK_URL`; the workflow calls it only after both image pushes
-succeed. Set the GHCR package visibility to **Public** once in GitHub package
-settings; subsequent pushes use the repository's `GITHUB_TOKEN`.
+`COOLIFY_DEPLOY_HOOK_URL`, and add a Coolify API token with **Deploy** permission
+as `COOLIFY_TOKEN`. The workflow sends that token as a Bearer authorization
+header after both image pushes succeed. Set the GHCR package visibility to
+**Public** once in GitHub package settings; subsequent pushes use the
+repository's `GITHUB_TOKEN`.
 
 ## Design System
 

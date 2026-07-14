@@ -19,6 +19,7 @@ jobs:
     env:
       IMAGE_NAME: ghcr.io/${{ github.repository }}
       COOLIFY_DEPLOY_HOOK_URL: ${{ secrets.COOLIFY_DEPLOY_HOOK_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -40,7 +41,9 @@ jobs:
           docker push "$image:latest"
 
       - name: Trigger Coolify deployment
-        if: ${{ env.COOLIFY_DEPLOY_HOOK_URL != '' }}
+        if: ${{ env.COOLIFY_DEPLOY_HOOK_URL != '' && env.COOLIFY_TOKEN != '' }}
         run: |
           curl --fail --show-error --silent --retry 3 \
-            --request GET "$COOLIFY_DEPLOY_HOOK_URL"
+            --request GET \
+            --header "Authorization: Bearer $COOLIFY_TOKEN" \
+            "$COOLIFY_DEPLOY_HOOK_URL"

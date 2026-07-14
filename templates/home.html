@@ -197,6 +197,13 @@ let voiceRecognition = null;
 let voiceRecognitionActive = false;
 let voiceRecognitionHasText = false;
 let voiceInputPrefix = '';
+let voiceProvider = 'Deepgram';
+let deepgramSocket = null;
+let deepgramStream = null;
+let deepgramFinalText = '';
+let deepgramStopping = false;
+let deepgramStopTimer = null;
+let deepgramStartId = 0;
 const waitingMessages = [
     'Letting the symbol constellate...',
     'Listening for the pattern beneath the story...',
@@ -516,20 +523,23 @@ function setVoiceState(state, interim = '') {
     const label = document.getElementById('voice-live-label');
     const interimEl = document.getElementById('voice-live-interim');
     if (!button || !icon || !input || !live || !label || !interimEl) return;
-    const active = state === 'listening' || state === 'recording' || state === 'refining';
+    const active = state === 'connecting' || state === 'listening' || state === 'recording' || state === 'refining';
     const listening = state === 'listening' || state === 'recording';
     button.setAttribute('aria-label', listening ? 'Stop voice input' : 'Start voice input');
     button.setAttribute('aria-pressed', listening ? 'true' : 'false');
     button.title = listening ? 'Stop voice input' : 'Start voice input';
     button.dataset.recording = listening ? 'true' : 'false';
+    button.toggleAttribute('disabled', state === 'connecting' || state === 'refining');
     input.dataset.dictating = listening ? 'true' : 'false';
     live.dataset.state = state;
     live.classList.toggle('voice-live-active', active);
-    label.textContent = state === 'refining'
+    label.textContent = state === 'connecting'
+        ? 'Connecting to Deepgram'
+        : state === 'refining'
         ? 'Refining transcript'
         : state === 'recording'
             ? 'Recording'
-            : 'Listening';
+            : voiceProvider + ' live';
     interimEl.textContent = interim;
     icon.innerHTML = listening
         ? '<rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" fill="none"/>'
@@ -540,6 +550,205 @@ function joinVoiceText(prefix, speech) {
     const cleanPrefix = prefix.trimEnd();
     const cleanSpeech = speech.trim();
     return cleanPrefix && cleanSpeech ? cleanPrefix + ' ' + cleanSpeech : (cleanPrefix || cleanSpeech);
+}
+
+function cancelledVoiceStart() {
+    const error = new Error('Voice input start was cancelled');
+    error.name = 'AbortError';
+    return error;
+}
+
+function releaseDeepgramStream() {
+    if (deepgramStream) {
+        deepgramStream.getTracks().forEach(track => track.stop());
+        deepgramStream = null;
+    }
+}
+
+function clearDeepgramStopTimer() {
+    if (deepgramStopTimer) {
+        clearTimeout(deepgramStopTimer);
+        deepgramStopTimer = null;
+    }
+}
+
+function closeDeepgramSocket() {
+    clearDeepgramStopTimer();
+    if (deepgramSocket?.readyState === WebSocket.OPEN) {
+        deepgramSocket.send(JSON.stringify({ type: 'CloseStream' }));
+    } else if (deepgramSocket?.readyState === WebSocket.CONNECTING) {
+        deepgramSocket.close();
+    }
+}
+
+function cancelDeepgramVoiceInput() {
+    deepgramStartId += 1;
+    clearDeepgramStopTimer();
+    const socket = deepgramSocket;
+    deepgramSocket = null;
+    deepgramStopping = true;
+    if (voiceRecorder?.state === 'recording') {
+        voiceRecorder.ondataavailable = null;
+        voiceRecorder.onstop = null;
+        voiceRecorder.stop();
+        voiceRecorder = null;
+    }
+    releaseDeepgramStream();
+    if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        try { socket.close(1000, 'Message sent'); } catch (_) {}
+    }
+    setVoiceState('idle');
+}
+
+function stopDeepgramVoiceInput() {
+    if (!deepgramSocket) return;
+    deepgramStopping = true;
+    setVoiceState('refining', deepgramFinalText);
+    if (voiceRecorder?.state === 'recording') {
+        voiceRecorder.stop();
+    } else if (deepgramSocket.readyState === WebSocket.OPEN) {
+        deepgramSocket.send(JSON.stringify({ type: 'Finalize' }));
+        deepgramStopTimer = setTimeout(closeDeepgramSocket, 1400);
+    }
+}
+
+async function startDeepgramVoiceInput() {
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !window.WebSocket) {
+        throw new Error('Live audio is not supported');
+    }
+
+    const startId = ++deepgramStartId;
+    voiceProvider = 'Deepgram';
+    setVoiceState('connecting');
+    const tokenResponse = await fetch('/api/deepgram/token', { method: 'POST' });
+    const tokenPayload = await tokenResponse.json();
+    if (startId !== deepgramStartId) throw cancelledVoiceStart();
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+        throw new Error(tokenPayload.error || 'Deepgram is unavailable');
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (startId !== deepgramStartId) {
+        stream.getTracks().forEach(track => track.stop());
+        throw cancelledVoiceStart();
+    }
+    deepgramStream = stream;
+    voiceInputPrefix = document.getElementById('chat-input').value;
+    deepgramFinalText = '';
+    deepgramStopping = false;
+
+    const language = navigator.language || document.documentElement.lang || 'en-US';
+    const params = new URLSearchParams({
+        model: 'nova-3',
+        language,
+        smart_format: 'true',
+        punctuate: 'true',
+        interim_results: 'true',
+        endpointing: '350',
+        mip_opt_out: 'true'
+    });
+    const socket = new WebSocket(
+        'wss://api.deepgram.com/v1/listen?' + params.toString(),
+        ['bearer', tokenPayload.access_token]
+    );
+    deepgramSocket = socket;
+
+    return new Promise((resolve, reject) => {
+        let started = false;
+        let settled = false;
+        const failBeforeStart = error => {
+            if (started || settled) return false;
+            settled = true;
+            deepgramSocket = null;
+            releaseDeepgramStream();
+            reject(error);
+            return true;
+        };
+
+        socket.onopen = () => {
+            if (startId !== deepgramStartId) {
+                socket.close();
+                failBeforeStart(cancelledVoiceStart());
+                return;
+            }
+            const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+                .find(type => MediaRecorder.isTypeSupported(type)) || '';
+            try {
+                voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+            } catch (error) {
+                socket.close();
+                failBeforeStart(error);
+                return;
+            }
+            voiceRecorder.ondataavailable = event => {
+                if (event.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+                    socket.send(event.data);
+                }
+            };
+            voiceRecorder.onstop = () => {
+                releaseDeepgramStream();
+                voiceRecorder = null;
+                if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'Finalize' }));
+                    clearDeepgramStopTimer();
+                    deepgramStopTimer = setTimeout(closeDeepgramSocket, 1400);
+                }
+            };
+            voiceRecorder.start(250);
+            started = true;
+            settled = true;
+            setVoiceState('listening');
+            resolve();
+        };
+
+        socket.onmessage = event => {
+            let result;
+            try { result = JSON.parse(event.data); } catch (_) { return; }
+            if (result.type !== 'Results') return;
+            const transcript = result.channel?.alternatives?.[0]?.transcript?.trim() || '';
+            if (!transcript) return;
+            if (result.is_final) deepgramFinalText = joinVoiceText(deepgramFinalText, transcript);
+            const interim = result.is_final ? '' : transcript;
+            const spoken = joinVoiceText(deepgramFinalText, interim);
+            const input = document.getElementById('chat-input');
+            input.value = joinVoiceText(voiceInputPrefix, spoken);
+            input.setSelectionRange(input.value.length, input.value.length);
+            setVoiceState(deepgramStopping ? 'refining' : 'listening', interim || transcript);
+            if (deepgramStopping && result.is_final) {
+                clearDeepgramStopTimer();
+                deepgramStopTimer = setTimeout(closeDeepgramSocket, 180);
+            }
+        };
+
+        socket.onerror = () => {
+            failBeforeStart(startId === deepgramStartId
+                ? new Error('Deepgram connection failed')
+                : cancelledVoiceStart());
+        };
+
+        socket.onclose = event => {
+            if (!started) {
+                failBeforeStart(startId === deepgramStartId
+                    ? new Error('Deepgram connection failed')
+                    : cancelledVoiceStart());
+                return;
+            }
+            clearDeepgramStopTimer();
+            if (voiceRecorder?.state === 'recording') voiceRecorder.stop();
+            releaseDeepgramStream();
+            voiceRecorder = null;
+            deepgramSocket = null;
+            const interrupted = !deepgramStopping && event.code !== 1000;
+            deepgramStopping = false;
+            setVoiceState('idle');
+            document.getElementById('chat-input').focus();
+            if (interrupted) showToast('Live transcription stopped', 'error');
+        };
+    });
 }
 
 function stopLiveRecognition() {
@@ -553,6 +762,7 @@ function startLiveRecognition(SpeechRecognition) {
     const input = document.getElementById('chat-input');
     voiceInputPrefix = input.value;
     voiceRecognitionHasText = false;
+    voiceProvider = 'Apple';
     const recognition = new SpeechRecognition();
     voiceRecognition = recognition;
     voiceRecognitionActive = true;
@@ -660,6 +870,10 @@ async function startRecordedVoiceInput() {
 }
 
 async function toggleVoiceInput() {
+    if (deepgramSocket) {
+        stopDeepgramVoiceInput();
+        return;
+    }
     if (voiceRecognitionActive) {
         stopLiveRecognition();
         return;
@@ -668,6 +882,14 @@ async function toggleVoiceInput() {
         voiceRecorder.stop();
         return;
     }
+    try {
+        await startDeepgramVoiceInput();
+        return;
+    } catch (error) {
+        setVoiceState('idle');
+        if (error.name === 'AbortError') return;
+    }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
         try {
@@ -685,6 +907,12 @@ async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
+    const voiceLive = document.getElementById('voice-live');
+    if (deepgramSocket) cancelDeepgramVoiceInput();
+    else if (voiceLive?.dataset.state === 'connecting') {
+        deepgramStartId += 1;
+        setVoiceState('idle');
+    }
     if (voiceRecognition) {
         const recognition = voiceRecognition;
         voiceRecognition = null;

@@ -122,6 +122,7 @@ async fn main() {
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/memory-status", get(memory_status))
+        .route("/api/deepgram/token", post(deepgram_token_handler))
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/chat", post(chat_handler))
         // SSE streams
@@ -735,6 +736,86 @@ async fn transcribe_handler(
         .to_string();
 
     Json(serde_json::json!({"transcript": transcript})).into_response()
+}
+
+async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if get_authed_user(&headers, &state.key).await.is_none() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized"})),
+        )
+            .into_response();
+    }
+
+    let api_key = match std::env::var("DEEPGRAM_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            tracing::error!("DEEPGRAM_API_KEY is not configured");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Voice transcription is unavailable"})),
+            )
+                .into_response();
+        }
+    };
+
+    let response = match reqwest::Client::new()
+        .post("https://api.deepgram.com/v1/auth/grant")
+        .header("Authorization", format!("Token {api_key}"))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!("Deepgram token request failed: {error}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Live voice transcription is unavailable"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            "Deepgram token request returned status {}",
+            response.status()
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Live voice transcription is unavailable"})),
+        )
+            .into_response();
+    }
+
+    match response.json::<serde_json::Value>().await {
+        Ok(payload) if payload.get("access_token").and_then(|value| value.as_str()).is_some() => {
+            (
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({
+                    "access_token": payload["access_token"],
+                    "expires_in": payload.get("expires_in").cloned().unwrap_or_else(|| serde_json::json!(30)),
+                })),
+            )
+                .into_response()
+        }
+        Ok(_) => {
+            tracing::warn!("Deepgram token response was missing an access token");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Live voice transcription is unavailable"})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!("Failed to parse Deepgram token response: {error}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Live voice transcription is unavailable"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]

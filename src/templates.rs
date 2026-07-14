@@ -341,6 +341,8 @@ mod tests {
         assert!(html.contains("composer-shell"));
         assert!(html.contains("window.visualViewport"));
         assert!(html.contains("voice-live"));
+        assert!(html.contains("/api/deepgram/token"));
+        assert!(html.contains("wss://api.deepgram.com/v1/listen"));
         assert!(html.contains("recognition.interimResults = true"));
         assert!(html.contains("window.webkitSpeechRecognition"));
         assert!(html.contains("seed-orb"));

@@ -45,12 +45,13 @@ deliberately do not, and the simplest design that meets those requirements.
   all extractors) sends `provider.data_collection = "deny"`, restricting
   routing to providers that do not retain or train on prompts.
   `OPENROUTER_DATA_COLLECTION=allow` is the escape hatch.
-- **Voice transcription.** On browsers with live Web Speech support, spoken
-  words appear in the composer as the browser recognizes them. On supported
-  Apple devices this recognition runs on-device. Browsers without that path
-  fall back to recording one voice entry and sending it to the configured
-  Deepgram transcription endpoint. The UI makes the recording and processing
-  states visible before any fallback audio is sent.
+- **Voice transcription.** Signed-in users receive a 30-second Deepgram access
+  token from the server; the long-lived API key is never sent to the browser.
+  The browser streams microphone audio directly to Deepgram Nova-3 and shows
+  interim words in the composer. The request opts out of Deepgram's model
+  improvement program. If live Deepgram cannot start, the app falls back to
+  browser speech recognition and then to one recorded Deepgram request. The UI
+  identifies the live provider and makes recording and processing visible.
 - **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
   session handler verifies the authenticated private cookie matches the
   requested user; session ownership is checked before streaming. `data/` is

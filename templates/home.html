@@ -129,18 +129,40 @@
         <div class="fern-divider"></div>
         <div class="glass-strong">
             <div class="px-4 sm:px-6 pt-3 pb-2 max-w-3xl mx-auto">
-                <div class="flex items-center justify-between gap-2 mb-2">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                     <div class="flex items-center gap-1.5">
                         <button onclick="setMode('therapist')" id="mode-therapist" class="pill" data-active="true">Therapist</button>
                         <button onclick="setMode('draft')" id="mode-draft" class="pill" data-active="false">Draft</button>
                     </div>
-                    <div id="draft-controls" class="hidden items-center gap-2">
+                    <label class="auto-read-toggle" for="auto-read-responses">
+                        <input id="auto-read-responses" type="checkbox" onchange="setAutoReadResponses(this.checked)">
+                        <span class="auto-read-track" aria-hidden="true"><span></span></span>
+                        <span>Auto-read</span>
+                    </label>
+                    <div id="draft-controls" class="hidden order-last w-full sm:w-auto items-center gap-2">
                         <select id="draft-profile-select"
                             class="field !py-1.5 !px-2.5 !w-auto text-xs min-w-[140px]"></select>
                     </div>
                 </div>
             </div>
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
+                <div id="response-audio" class="response-audio hidden" role="region" aria-label="Spoken response controls">
+                    <span id="response-audio-status" class="response-audio-status" role="status" aria-live="polite">Ready to listen</span>
+                    <div class="response-audio-controls">
+                        <button type="button" class="response-audio-button" onclick="seekSpokenResponse(-15)" aria-label="Go back 15 seconds" title="Back 15 seconds">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5V3M5.4 7.1A8 8 0 1 1 4 14"/><text x="12" y="16">15</text></svg>
+                        </button>
+                        <button id="response-audio-play" type="button" class="response-audio-button response-audio-primary" onclick="toggleSpokenResponse()" aria-label="Play spoken response" title="Play">
+                            <svg id="response-audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>
+                        </button>
+                        <button type="button" class="response-audio-button" onclick="seekSpokenResponse(15)" aria-label="Go forward 15 seconds" title="Forward 15 seconds">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4V3m-.4 4.1A8 8 0 1 0 20 14"/><text x="12" y="16">15</text></svg>
+                        </button>
+                        <button type="button" class="response-audio-button" onclick="replaySpokenResponse()" aria-label="Replay spoken response" title="Replay">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7H4V3m.6 4.2A9 9 0 1 1 3 14"/></svg>
+                        </button>
+                    </div>
+                </div>
                 <div id="voice-live" class="voice-live" data-state="idle" role="status" aria-live="polite">
                     <span class="voice-live-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
                     <span id="voice-live-label" class="voice-live-label">Deepgram live</span>
@@ -216,6 +238,24 @@ let deepgramFinalText = '';
 let deepgramStopping = false;
 let deepgramStopTimer = null;
 let deepgramStartId = 0;
+const SPEECH_AUTO_READ_KEY = 'individuate:auto-read-responses';
+let speechAutoRead = false;
+try { speechAutoRead = localStorage.getItem(SPEECH_AUTO_READ_KEY) === 'true'; } catch (_) {}
+let speechContext = null;
+let speechChunks = [];
+let speechSource = null;
+let speechGeneration = 0;
+let speechFetchChain = Promise.resolve();
+let speechFullText = '';
+let speechQueuedChars = 0;
+let speechResponseFinal = false;
+let speechGenerationActive = false;
+let speechWantsPlay = false;
+let speechPosition = 0;
+let speechPositionStartedAt = 0;
+let speechCurrentChunkEnd = 0;
+let speechUiFrame = null;
+let speechError = '';
 const waitingMessages = [
     'Letting the symbol constellate...',
     'Listening for the pattern beneath the story...',
@@ -449,7 +489,287 @@ function buildChatStreamUrl(prompt) {
     return '/api/agent-stream?' + params.toString();
 }
 
+function speechLoadedDuration() {
+    return speechChunks.reduce((total, chunk) => total + chunk.duration, 0);
+}
+
+function currentSpeechPosition() {
+    if (!speechSource || !speechWantsPlay || !speechContext) return speechPosition;
+    return Math.min(
+        speechCurrentChunkEnd,
+        speechPosition + Math.max(0, speechContext.currentTime - speechPositionStartedAt)
+    );
+}
+
+function formatSpeechTime(seconds) {
+    const value = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+    return Math.floor(value / 60) + ':' + String(value % 60).padStart(2, '0');
+}
+
+function setSpeechPlayIcon(playing) {
+    const button = document.getElementById('response-audio-play');
+    const icon = document.getElementById('response-audio-play-icon');
+    if (!button || !icon) return;
+    button.setAttribute('aria-label', playing ? 'Pause spoken response' : 'Play spoken response');
+    button.title = playing ? 'Pause' : 'Play';
+    icon.innerHTML = playing
+        ? '<path d="M9 7v10M15 7v10"/>'
+        : '<path d="m9 7 8 5-8 5Z"/>';
+}
+
+function updateSpeechControls() {
+    const panel = document.getElementById('response-audio');
+    const status = document.getElementById('response-audio-status');
+    if (!panel || !status) return;
+    panel.classList.toggle('hidden', !speechFullText.trim());
+    const position = currentSpeechPosition();
+    const loaded = speechLoadedDuration();
+    const playing = speechWantsPlay && Boolean(speechSource);
+    setSpeechPlayIcon(playing);
+    if (speechError) status.textContent = speechError;
+    else if (playing) status.textContent = 'Speaking · ' + formatSpeechTime(position);
+    else if (speechGenerationActive && !speechChunks.length) status.textContent = 'Preparing voice…';
+    else if (speechWantsPlay && !speechResponseFinal) status.textContent = 'Listening for more…';
+    else if (position > 0 && position < loaded - 0.05) status.textContent = 'Paused · ' + formatSpeechTime(position);
+    else if (loaded > 0 && position >= loaded - 0.05 && speechResponseFinal) status.textContent = 'Finished · ' + formatSpeechTime(loaded);
+    else status.textContent = 'Ready to listen';
+}
+
+function scheduleSpeechUi() {
+    cancelAnimationFrame(speechUiFrame);
+    const tick = () => {
+        updateSpeechControls();
+        if (speechWantsPlay && speechSource) speechUiFrame = requestAnimationFrame(tick);
+    };
+    speechUiFrame = requestAnimationFrame(tick);
+}
+
+async function ensureSpeechContext() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error('Audio playback is not supported');
+    if (!speechContext) speechContext = new AudioContextClass();
+    if (speechContext.state === 'suspended') await speechContext.resume();
+    return speechContext;
+}
+
+function stopSpeechSource() {
+    const source = speechSource;
+    speechSource = null;
+    if (source) {
+        source.onended = null;
+        try { source.stop(); } catch (_) {}
+        try { source.disconnect(); } catch (_) {}
+    }
+}
+
+async function startSpokenResponseAt(position) {
+    const context = await ensureSpeechContext();
+    stopSpeechSource();
+    const loaded = speechLoadedDuration();
+    speechPosition = Math.max(0, Math.min(position, loaded));
+    let chunkStart = 0;
+    let chunkIndex = speechChunks.findIndex(chunk => {
+        const contains = speechPosition < chunkStart + chunk.duration - 0.01;
+        if (!contains) chunkStart += chunk.duration;
+        return contains;
+    });
+    if (chunkIndex < 0) {
+        // A speech request may still be decoding even after the text stream ends.
+        // Keep the play intent so the first decoded chunk starts automatically.
+        if (speechResponseFinal && speechChunks.length && speechPosition >= loaded - 0.05) {
+            speechWantsPlay = false;
+        }
+        updateSpeechControls();
+        return;
+    }
+    const chunk = speechChunks[chunkIndex];
+    const offset = Math.max(0, Math.min(speechPosition - chunkStart, chunk.duration - 0.01));
+    const source = context.createBufferSource();
+    source.buffer = chunk.buffer;
+    source.connect(context.destination);
+    speechSource = source;
+    speechPosition = chunkStart + offset;
+    speechPositionStartedAt = context.currentTime;
+    speechCurrentChunkEnd = chunkStart + chunk.duration;
+    source.onended = () => {
+        if (speechSource !== source) return;
+        speechSource = null;
+        speechPosition = speechCurrentChunkEnd;
+        if (speechWantsPlay) startSpokenResponseAt(speechPosition).catch(handleSpeechError);
+        else updateSpeechControls();
+    };
+    source.start(0, offset);
+    scheduleSpeechUi();
+}
+
+function handleSpeechError(error) {
+    speechWantsPlay = false;
+    stopSpeechSource();
+    speechError = error?.message || 'Could not play this response';
+    updateSpeechControls();
+}
+
+function cleanSpeechText(text) {
+    return String(text || '')
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/[*_#>`~]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function queueSpeechChunk(text) {
+    const spokenText = cleanSpeechText(text);
+    if (!spokenText) return;
+    const generation = speechGeneration;
+    speechFetchChain = speechFetchChain.then(async () => {
+        if (generation !== speechGeneration) return;
+        const response = await fetch('/api/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: spokenText })
+        });
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.error || 'Could not create spoken response');
+        }
+        const context = await ensureSpeechContext();
+        const buffer = await context.decodeAudioData(await response.arrayBuffer());
+        if (generation !== speechGeneration) return;
+        speechChunks.push({ buffer, duration: buffer.duration });
+        speechError = '';
+        if (speechWantsPlay && !speechSource) {
+            await startSpokenResponseAt(speechPosition);
+        } else {
+            updateSpeechControls();
+        }
+    }).catch(error => {
+        if (generation === speechGeneration) handleSpeechError(error);
+    });
+}
+
+function queueAvailableSpeech(final = false) {
+    if (!speechGenerationActive) return;
+    while (speechQueuedChars < speechFullText.length) {
+        const remaining = speechFullText.slice(speechQueuedChars);
+        let take = 0;
+        if (final) {
+            take = Math.min(remaining.length, 700);
+            if (take < remaining.length) {
+                const boundary = remaining.slice(0, take).lastIndexOf(' ');
+                if (boundary > 100) take = boundary + 1;
+            }
+        } else {
+            const sentence = remaining.match(/^[\s\S]{12,}?[.!?](?:["')\]]*)?(?:\s+|$)/);
+            if (sentence) {
+                take = Math.min(sentence[0].length, 700);
+                if (take < sentence[0].length) {
+                    const boundary = remaining.slice(0, take).lastIndexOf(' ');
+                    if (boundary > 100) take = boundary + 1;
+                }
+            }
+            else if (remaining.length > 520) {
+                const boundary = remaining.slice(0, 500).lastIndexOf(' ');
+                take = boundary > 100 ? boundary + 1 : 500;
+            }
+        }
+        if (!take) break;
+        const chunk = remaining.slice(0, take);
+        speechQueuedChars += take;
+        queueSpeechChunk(chunk);
+    }
+}
+
+function beginSpokenResponse() {
+    speechGeneration += 1;
+    stopSpeechSource();
+    cancelAnimationFrame(speechUiFrame);
+    speechChunks = [];
+    speechFetchChain = Promise.resolve();
+    speechFullText = '';
+    speechQueuedChars = 0;
+    speechResponseFinal = false;
+    speechGenerationActive = speechAutoRead;
+    speechWantsPlay = speechAutoRead;
+    speechPosition = 0;
+    speechError = '';
+    updateSpeechControls();
+}
+
+function updateSpokenResponse(text, final = false) {
+    speechFullText = String(text || '');
+    speechResponseFinal = speechResponseFinal || final;
+    updateSpeechControls();
+    queueAvailableSpeech(speechResponseFinal);
+}
+
+async function toggleSpokenResponse() {
+    try {
+        await ensureSpeechContext();
+        if (!speechGenerationActive) {
+            speechGenerationActive = true;
+            queueAvailableSpeech(speechResponseFinal);
+        }
+        if (speechWantsPlay) {
+            speechPosition = currentSpeechPosition();
+            speechWantsPlay = false;
+            stopSpeechSource();
+            updateSpeechControls();
+            return;
+        }
+        if (speechResponseFinal && speechPosition >= speechLoadedDuration() - 0.05) speechPosition = 0;
+        speechWantsPlay = true;
+        await startSpokenResponseAt(speechPosition);
+        updateSpeechControls();
+    } catch (error) {
+        handleSpeechError(error);
+    }
+}
+
+async function seekSpokenResponse(delta) {
+    try {
+        await ensureSpeechContext();
+        const target = Math.max(0, Math.min(currentSpeechPosition() + delta, speechLoadedDuration()));
+        speechPosition = target;
+        if (speechWantsPlay) await startSpokenResponseAt(target);
+        else updateSpeechControls();
+    } catch (error) {
+        handleSpeechError(error);
+    }
+}
+
+async function replaySpokenResponse() {
+    try {
+        await ensureSpeechContext();
+        if (!speechGenerationActive) {
+            speechGenerationActive = true;
+            queueAvailableSpeech(speechResponseFinal);
+        }
+        speechPosition = 0;
+        speechWantsPlay = true;
+        await startSpokenResponseAt(0);
+        updateSpeechControls();
+    } catch (error) {
+        handleSpeechError(error);
+    }
+}
+
+function setAutoReadResponses(enabled) {
+    speechAutoRead = Boolean(enabled);
+    try { localStorage.setItem(SPEECH_AUTO_READ_KEY, speechAutoRead ? 'true' : 'false'); } catch (_) {}
+    if (speechAutoRead && speechFullText.trim()) {
+        speechGenerationActive = true;
+        speechWantsPlay = true;
+        ensureSpeechContext()
+            .then(() => {
+                queueAvailableSpeech(speechResponseFinal);
+                return startSpokenResponseAt(speechPosition);
+            })
+            .catch(handleSpeechError);
+    }
+}
+
 function streamAssistantResponse(prompt) {
+    beginSpokenResponse();
     return new Promise((resolve, reject) => {
         const { message, bubble, avatar } = addStreamingAssistantMessage();
         const source = new EventSource(buildChatStreamUrl(prompt));
@@ -471,6 +791,7 @@ function streamAssistantResponse(prompt) {
             clearInterval(waitingTimer);
             bubble.classList.remove('bubble-streaming');
             bubble.innerHTML = formatChatContent(value || assembled);
+            updateSpokenResponse(value || assembled, true);
             if (avatar) {
                 avatar.classList.remove('avatar-thinking');
                 avatar.innerHTML = therapistAvatarMarkup(false);
@@ -507,6 +828,7 @@ function streamAssistantResponse(prompt) {
             }
             hasFirstToken = true;
             assembled += event.data;
+            updateSpokenResponse(assembled);
             bubble.innerHTML = formatStreamingChatContent(assembled) || renderWaitingMessage();
             scheduleScrollChatToBottom();
         };
@@ -516,6 +838,7 @@ function streamAssistantResponse(prompt) {
             clearInterval(waitingTimer);
             source.close();
             bubble.classList.remove('bubble-streaming');
+            if (assembled.trim()) updateSpokenResponse(assembled, true);
             if (responseSettled) return;
             reject(new Error('Stream connection failed'));
         };
@@ -919,6 +1242,7 @@ async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
+    if (speechAutoRead) ensureSpeechContext().catch(handleSpeechError);
     const voiceLive = document.getElementById('voice-live');
     if (deepgramSocket) cancelDeepgramVoiceInput();
     else if (voiceLive?.dataset.state === 'connecting') {
@@ -1173,6 +1497,8 @@ async function confirmRecoveryRotation() {
 
 // Keyboard submit on desktop (Enter to send, Shift+Enter newline)
 document.addEventListener('DOMContentLoaded', () => {
+    const autoRead = document.getElementById('auto-read-responses');
+    if (autoRead) autoRead.checked = speechAutoRead;
     const input = document.getElementById('chat-input');
     if (input) {
         input.addEventListener('keydown', (e) => {

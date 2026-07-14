@@ -52,6 +52,10 @@ deliberately do not, and the simplest design that meets those requirements.
   improvement program. If live Deepgram cannot start, the app falls back to
   browser speech recognition and then to one recorded Deepgram request. The UI
   identifies the live provider and makes recording and processing visible.
+- **Spoken responses.** When a user plays a response, or enables automatic
+  reading, complete sentence chunks are sent to the configured Deepgram Aura-2
+  text-to-speech model. The resulting audio stays in browser memory for the
+  current response and is not written to the app database.
 - **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
   session handler verifies the authenticated private cookie matches the
   requested user; session ownership is checked before streaming. `data/` is

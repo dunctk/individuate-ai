@@ -26,6 +26,7 @@ struct AppState {
     key: Key,
     templates: Arc<Environment<'static>>,
     rate_limiter: RateLimiter,
+    speech_rate_limiter: RateLimiter,
 }
 
 impl axum::extract::FromRef<AppState> for Key {
@@ -76,6 +77,7 @@ async fn main() {
         key: key.clone(),
         templates: env.clone(),
         rate_limiter: RateLimiter::new(10, 60), // 10 attempts per 60s window
+        speech_rate_limiter: RateLimiter::new(90, 60),
     };
 
     let rate_limited_routes = Router::new()
@@ -124,6 +126,7 @@ async fn main() {
         .route("/api/memory-status", get(memory_status))
         .route("/api/deepgram/token", post(deepgram_token_handler))
         .route("/api/transcribe", post(transcribe_handler))
+        .route("/api/speak", post(speak_handler))
         .route("/api/chat", post(chat_handler))
         // SSE streams
         .route("/api/agent-stream", get(stream_handler))
@@ -812,6 +815,119 @@ async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMa
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"error": "Live voice transcription is unavailable"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SpeakPayload {
+    text: String,
+}
+
+async fn speak_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<SpeakPayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    if !state.speech_rate_limiter.check(&user.id) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Too many speech requests. Please wait a moment."})),
+        )
+            .into_response();
+    }
+
+    let text = payload.text.trim();
+    if text.is_empty() || text.chars().count() > 2_000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Speech text must be between 1 and 2000 characters"})),
+        )
+            .into_response();
+    }
+
+    let api_key = match std::env::var("DEEPGRAM_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            tracing::error!("DEEPGRAM_API_KEY is not configured");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Spoken responses are unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    let model =
+        std::env::var("DEEPGRAM_TTS_MODEL").unwrap_or_else(|_| "aura-2-thalia-en".to_string());
+    let speed = std::env::var("DEEPGRAM_TTS_SPEED")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| (0.7..=1.5).contains(value))
+        .unwrap_or(1.0)
+        .to_string();
+
+    let response = match reqwest::Client::new()
+        .post("https://api.deepgram.com/v1/speak")
+        .query(&[
+            ("model", model.as_str()),
+            ("encoding", "mp3"),
+            ("bit_rate", "32000"),
+            ("speed", speed.as_str()),
+        ])
+        .header("Authorization", format!("Token {api_key}"))
+        .json(&serde_json::json!({"text": text}))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!("Deepgram speech request failed: {error}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Could not create spoken response"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            "Deepgram speech request returned status {}",
+            response.status()
+        );
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": "Could not create spoken response"})),
+        )
+            .into_response();
+    }
+
+    match response.bytes().await {
+        Ok(audio) => (
+            [
+                (header::CONTENT_TYPE, "audio/mpeg"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            audio,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("Could not read Deepgram speech response: {error}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Could not create spoken response"})),
             )
                 .into_response()
         }

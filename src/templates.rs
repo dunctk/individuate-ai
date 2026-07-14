@@ -346,6 +346,11 @@ mod tests {
         assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("voice-live"));
         assert!(html.contains("Deepgram live"));
+        assert!(html.contains("auto-read-responses"));
+        assert!(html.contains("response-audio-play"));
+        assert!(html.contains("seekSpokenResponse(-15)"));
+        assert!(html.contains("replaySpokenResponse()"));
+        assert!(html.contains("/api/speak"));
         assert!(html.contains("/api/deepgram/token"));
         assert!(html.contains("wss://api.deepgram.com/v1/listen"));
         assert!(html.contains("recognition.interimResults = true"));

@@ -88,6 +88,7 @@ async fn main() {
         .route("/api/passkey/revoke", post(passkey_revoke_handler))
         .route("/api/passkey/login/start", post(passkey_login_start))
         .route("/api/passkey/login/complete", post(passkey_login_complete))
+        .route("/api/passkey/sync/start", post(passkey_sync_start))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_auth,
@@ -899,7 +900,8 @@ async fn passkey_register_start(
             options["publicKey"]["authenticatorSelection"]["requireResidentKey"] =
                 serde_json::json!(true);
             options["publicKey"]["extensions"] = serde_json::json!({
-                "prf": { "eval": { "first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&start.prf_salt) } }
+                "prf": { "eval": { "first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&start.prf_salt) } },
+                "largeBlob": { "support": "preferred" }
             });
             Json(PasskeyStartResponse {
                 challenge_id: start.challenge_id,
@@ -922,6 +924,7 @@ struct PasskeyCompletePayload {
     credential: serde_json::Value,
     prf_output: Option<String>,
     prf_enabled: Option<bool>,
+    large_blob: Option<String>,
     #[serde(default)]
     label: String,
     #[serde(default)]
@@ -1012,7 +1015,8 @@ async fn passkey_login_start() -> Response {
                 ))
                 .collect();
             options["publicKey"]["extensions"] = serde_json::json!({
-                "prf": { "evalByCredential": eval_by_credential }
+                "prf": { "evalByCredential": eval_by_credential },
+                "largeBlob": { "read": true }
             });
             Json(PasskeyStartResponse {
                 challenge_id: req_id,
@@ -1029,12 +1033,55 @@ async fn passkey_login_start() -> Response {
     }
 }
 
+async fn passkey_sync_start(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
+    let session = match extract_auth_session(&jar) {
+        Some(session) => session,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime
+        .start_passkey_sync(session.user_id, session.dek.clone())
+        .await
+    {
+        Ok((req_id, challenge, credential_id, prf_salt)) => {
+            let mut options = serde_json::to_value(&challenge).unwrap_or_default();
+            if let Some(object) = options.as_object_mut() {
+                object.remove("mediation");
+            }
+            options["publicKey"]["allowCredentials"] = serde_json::json!([{
+                "type": "public-key",
+                "id": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id)
+            }]);
+            options["publicKey"]["extensions"] = serde_json::json!({
+                "prf": { "eval": { "first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(prf_salt) } },
+                "largeBlob": { "write": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(session.dek) }
+            });
+            Json(PasskeyStartResponse {
+                challenge_id: req_id,
+                options,
+                recovery_key: None,
+            })
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn passkey_login_complete(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<PasskeyCompletePayload>,
 ) -> Response {
     let runtime = agent_runtime().await.unwrap();
+    let recovery_session = {
+        let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
+        extract_auth_session(&jar).map(|session| (session.user_id, session.dek))
+    };
     let response: webauthn_rs_proto::PublicKeyCredential =
         match serde_json::from_value(payload.credential) {
             Ok(response) => response,
@@ -1060,8 +1107,19 @@ async fn passkey_login_complete(
                 .into_response()
         }
     };
+    let large_blob = payload.large_blob.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    });
     match runtime
-        .finish_passkey_login(payload.challenge_id, response, prf_output)
+        .finish_passkey_login(
+            payload.challenge_id,
+            response,
+            prf_output,
+            large_blob,
+            recovery_session,
+        )
         .await
     {
         Ok((user, dek)) => {
@@ -1082,6 +1140,14 @@ async fn passkey_login_complete(
             }
             resp
         }
+        Err(e) if e.to_string() == agent::SYNCED_PASSKEY_RECOVERY_REQUIRED => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Apple synced this passkey, but this device uses a different encryption key. Use your recovery key once to authorize this device.",
+                "recovery_required": true
+            })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),

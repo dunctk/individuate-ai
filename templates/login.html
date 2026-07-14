@@ -4,7 +4,7 @@
     <div class="w-full max-w-sm">
         <div class="text-center mb-8">
             <h1 class="text-3xl font-fraunces font-bold text-integral-turquoise mb-2">IndividuateAI</h1>
-            <p class="text-sage-mist text-sm">Sign in to continue your journey</p>
+            <p id="login-intro" class="text-sage-mist text-sm">Sign in to continue</p>
         </div>
         <div class="bg-void-green border border-sage-mist rounded-xl p-6 space-y-5">
             <div>
@@ -26,6 +26,11 @@
     </div>
 </div>
 <script>
+const isPairingSyncedPasskey = new URLSearchParams(window.location.search).get('pair_passkey') === '1';
+if (isPairingSyncedPasskey) {
+    document.getElementById('login-intro').textContent = 'Use your passkey once more to authorize this device.';
+    document.getElementById('passkey-login-btn').textContent = 'Authorize this device';
+}
 document.getElementById('passkey-login-btn').addEventListener('click', async () => {
     const errEl = document.getElementById('passkey-login-error');
     const button = document.getElementById('passkey-login-btn');
@@ -42,9 +47,22 @@ document.getElementById('passkey-login-btn').addEventListener('click', async () 
         const verify = await fetch('/api/passkey/login/complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ challenge_id, credential: passkey.credential, prf_output: passkey.prf_output, prf_enabled: passkey.prf_enabled })
+            body: JSON.stringify({
+                challenge_id,
+                credential: passkey.credential,
+                prf_output: passkey.prf_output,
+                prf_enabled: passkey.prf_enabled,
+                large_blob: passkey.large_blob
+            })
         });
-        if (!verify.ok) { const e = await verify.json(); throw new Error(e.error || 'Verification failed'); }
+        if (!verify.ok) {
+            const e = await verify.json();
+            if (e.recovery_required) {
+                window.location.href = '/recovery?pair_passkey=1';
+                return;
+            }
+            throw new Error(e.error || 'Verification failed');
+        }
         const result = await verify.json();
         if (result.redirect) { window.location.href = result.redirect; }
     } catch (e) {
@@ -54,7 +72,7 @@ document.getElementById('passkey-login-btn').addEventListener('click', async () 
         errEl.classList.remove('hidden');
     } finally {
         button.disabled = false;
-        button.textContent = 'Sign in with Passkey';
+        button.textContent = isPairingSyncedPasskey ? 'Authorize this device' : 'Sign in with Passkey';
     }
 });
 </script>

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_GRAPH_USER_ID: &str = "local-user";
 pub const AUTH_COOKIE_NAME: &str = "auth_token";
+pub const SYNCED_PASSKEY_RECOVERY_REQUIRED: &str =
+    "This synced passkey needs your recovery key once on this device";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
@@ -839,6 +841,21 @@ mod runtime {
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_key_wraps_user_id ON key_wraps(user_id);
+                CREATE TABLE IF NOT EXISTS passkey_wrap_variants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    credential_id BLOB NOT NULL,
+                    wrapped_dek BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(credential_id, wrapped_dek)
+                );
+                CREATE INDEX IF NOT EXISTS idx_passkey_wrap_variants_credential
+                    ON passkey_wrap_variants(credential_id);
+                CREATE TABLE IF NOT EXISTS user_key_verifiers (
+                    user_id TEXT PRIMARY KEY,
+                    verifier BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
                 "###,
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)?;
@@ -3374,6 +3391,7 @@ mod runtime {
             };
             let public_key = passkey_blob.clone();
             let recovery_key = pending.recovery_key.clone();
+            let dek_verifier = security::dek_verifier(&pending.dek).to_vec();
             let recovery_credential_id = recovery_key
                 .as_ref()
                 .map(|_| format!("recovery:{}", pending.user_id).into_bytes());
@@ -3387,6 +3405,10 @@ mod runtime {
                     conn.execute(
                         "INSERT INTO key_wraps (credential_id, user_id, public_key, prf_salt, wrapped_dek, label, kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'passkey')",
                         rusqlite::params![passkey.cred_id().as_ref(), pending_user_id.clone(), public_key, prf_salt, wrapped_dek, label],
+                    ).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_key_verifiers (user_id, verifier) VALUES (?1, ?2)",
+                        rusqlite::params![pending_user_id.clone(), dek_verifier],
                     ).map_err(tokio_rusqlite::Error::Rusqlite)?;
                     if let (Some(recovery_id), Some(recovery_wrap)) = (recovery_credential_id, recovery_wrap) {
                         conn.execute(
@@ -3432,11 +3454,53 @@ mod runtime {
             Ok((req_id, challenge, prf_salts))
         }
 
+        pub async fn start_passkey_sync(
+            &self,
+            user_id: String,
+            dek: Vec<u8>,
+        ) -> Result<(String, RequestChallengeResponse, Vec<u8>, Vec<u8>)> {
+            if dek.len() != security::DEK_LEN {
+                return Err(anyhow::anyhow!("invalid DEK"));
+            }
+            let verifier = security::dek_verifier(&dek).to_vec();
+            let user_id_for_verifier = user_id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_key_verifiers (user_id, verifier) VALUES (?1, ?2)",
+                        rusqlite::params![user_id_for_verifier, verifier],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let (credential_id, prf_salt) = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT credential_id, prf_salt FROM key_wraps WHERE user_id = ?1 AND kind = 'passkey' ORDER BY created_at DESC LIMIT 1",
+                        [user_id],
+                        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let (challenge, state) = self
+                .webauthn
+                .start_discoverable_authentication()
+                .map_err(|e| anyhow::anyhow!("WebAuthn login start failed: {}", e))?;
+            let req_id = Uuid::new_v4().to_string();
+            self.pending_logins
+                .insert(req_id.clone(), (Instant::now(), state));
+            Ok((req_id, challenge, credential_id, prf_salt))
+        }
+
         pub async fn finish_passkey_login(
             &self,
             req_id: String,
             response: PublicKeyCredential,
             prf_output: Vec<u8>,
+            large_blob: Option<Vec<u8>>,
+            recovery_session: Option<(String, Vec<u8>)>,
         ) -> Result<(User, Vec<u8>)> {
             let (_, (created_at, state)) = self
                 .pending_logins
@@ -3569,7 +3633,92 @@ mod runtime {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("No encrypted user key is associated with this passkey"))?;
             let aad = format!("passkey:{}", key_material.0);
-            let dek = security::open(&key_material.2, &prf_output, aad.as_bytes())?;
+            let large_blob_dek =
+                if let Some(blob) = large_blob.filter(|blob| blob.len() == security::DEK_LEN) {
+                    let candidate_verifier = security::dek_verifier(&blob).to_vec();
+                    let user_id_for_verifier = key_material.0.clone();
+                    let matches = self
+                        .conn
+                        .call(move |conn| {
+                            conn.query_row(
+                                "SELECT verifier FROM user_key_verifiers WHERE user_id = ?1",
+                                [user_id_for_verifier],
+                                |row| row.get::<_, Vec<u8>>(0),
+                            )
+                            .optional()
+                            .map(|stored| stored.as_deref() == Some(candidate_verifier.as_slice()))
+                            .map_err(tokio_rusqlite::Error::Rusqlite)
+                        })
+                        .await?;
+                    if matches {
+                        Some(
+                            blob.as_slice()
+                                .try_into()
+                                .map_err(|_| anyhow::anyhow!("Invalid synced passkey key"))?,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            let credential_id_for_variants = cred_id_blob.clone();
+            let variant_wraps = self
+                .conn
+                .call(move |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT wrapped_dek FROM passkey_wrap_variants WHERE credential_id = ?1 ORDER BY id",
+                    )?;
+                    let rows = stmt.query_map([credential_id_for_variants], |row| row.get::<_, Vec<u8>>(0))?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+
+            let mut dek = large_blob_dek
+                .or_else(|| security::open(&key_material.2, &prf_output, aad.as_bytes()).ok());
+            if dek.is_none() {
+                dek = variant_wraps
+                    .iter()
+                    .find_map(|wrapped| security::open(wrapped, &prf_output, aad.as_bytes()).ok());
+            }
+
+            let dek = if let Some(dek) = dek {
+                dek
+            } else if let Some((recovery_user_id, recovery_dek)) = recovery_session {
+                if recovery_user_id != key_material.0 || recovery_dek.len() != security::DEK_LEN {
+                    return Err(anyhow::anyhow!(super::SYNCED_PASSKEY_RECOVERY_REQUIRED));
+                }
+                let recovered_dek: [u8; security::DEK_LEN] = recovery_dek
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!(super::SYNCED_PASSKEY_RECOVERY_REQUIRED))?;
+                let wrapped_dek = security::seal(&recovered_dek, &prf_output, aad.as_bytes())?;
+                let credential_id_for_insert = cred_id_blob.clone();
+                self.conn
+                    .call(move |conn| {
+                        conn.execute(
+                            "INSERT OR IGNORE INTO passkey_wrap_variants (credential_id, wrapped_dek) VALUES (?1, ?2)",
+                            rusqlite::params![credential_id_for_insert, wrapped_dek],
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                    })
+                    .await?;
+                recovered_dek
+            } else {
+                return Err(anyhow::anyhow!(super::SYNCED_PASSKEY_RECOVERY_REQUIRED));
+            };
+            let verifier = security::dek_verifier(&dek).to_vec();
+            let user_id_for_verifier = key_material.0.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_key_verifiers (user_id, verifier) VALUES (?1, ?2)",
+                        rusqlite::params![user_id_for_verifier, verifier],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
             self.remember_dek(&key_material.0, dek.to_vec());
             Ok((user, dek.to_vec()))
         }
@@ -3604,6 +3753,17 @@ mod runtime {
                 .ok_or_else(|| anyhow::anyhow!("Invalid recovery credentials"))?;
             let aad = format!("recovery:{}", user_id);
             let dek = security::open(&wrapped, recovery_key.trim().as_bytes(), aad.as_bytes())?;
+            let verifier = security::dek_verifier(&dek).to_vec();
+            let user_id_for_verifier = user.id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO user_key_verifiers (user_id, verifier) VALUES (?1, ?2)",
+                        rusqlite::params![user_id_for_verifier, verifier],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
             self.remember_dek(&user.id, dek.to_vec());
             Ok((user, dek.to_vec()))
         }
@@ -3621,7 +3781,7 @@ mod runtime {
         ) -> Result<()> {
             let credential_id = response.get_credential_id().to_vec();
             let (user, _) = self
-                .finish_passkey_login(req_id, response, prf_output)
+                .finish_passkey_login(req_id, response, prf_output, None, None)
                 .await?;
             if user.id != expected_user_id {
                 return Err(anyhow::anyhow!("Passkey does not belong to this account"));
@@ -3646,6 +3806,7 @@ mod runtime {
             self.conn
                 .call(move |conn| {
                     conn.execute("DELETE FROM key_wraps WHERE credential_id = ?1 AND user_id = ?2 AND kind = 'passkey'", rusqlite::params![credential_id, user_id.clone()]).map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    conn.execute("DELETE FROM passkey_wrap_variants WHERE credential_id = ?1", [credential_id.clone()]).map_err(tokio_rusqlite::Error::Rusqlite)?;
                     conn.execute("DELETE FROM passkeys WHERE credential_id = ?1 AND user_id = ?2", rusqlite::params![credential_id, user_id]).map_err(tokio_rusqlite::Error::Rusqlite)?;
                     Ok::<_, tokio_rusqlite::Error>(())
                 })

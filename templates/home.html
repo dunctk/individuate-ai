@@ -6,6 +6,15 @@
      data-username="{{ username }}"
      data-session-id="{{ session_id }}">
 
+    <div id="passkey-sync-banner" class="hidden fixed inset-x-3 top-3 z-50 max-w-md mx-auto glass-strong rounded-2xl border border-integral-turquoise/40 p-4 shadow-xl">
+        <p class="text-sm font-bold text-parchment">Finish Apple passkey setup</p>
+        <p class="mt-1 text-xs leading-relaxed text-sage-light">Save your account key with the passkey so it opens on your other Apple devices.</p>
+        <div class="mt-3 flex gap-2">
+            <button onclick="syncApplePasskey()" class="min-h-11 rounded-xl bg-integral-turquoise px-4 text-sm font-bold text-void-green">Enable iCloud sync</button>
+            <button onclick="document.getElementById('passkey-sync-banner').classList.add('hidden')" class="min-h-11 px-3 text-sm text-sage-light">Later</button>
+        </div>
+    </div>
+
     <div id="sidebar-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="toggleSidebar()"></div>
     <div id="profile-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="closeProfileDrawer()"></div>
 
@@ -618,6 +627,35 @@ async function registerAdditionalPasskey() {
     }
 }
 
+async function syncApplePasskey() {
+    try {
+        const resp = await fetch('/api/passkey/sync/start', { method: 'POST' });
+        if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Setup failed'); }
+        const { challenge_id, options } = await resp.json();
+        const passkey = await window.loginPasskey(options);
+        if (!passkey.large_blob_written) {
+            throw new Error('This passkey provider did not save the synced account key');
+        }
+        const verify = await fetch('/api/passkey/login/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                challenge_id,
+                credential: passkey.credential,
+                prf_output: passkey.prf_output,
+                prf_enabled: passkey.prf_enabled,
+                large_blob_written: passkey.large_blob_written
+            })
+        });
+        if (!verify.ok) { const e = await verify.json(); throw new Error(e.error || 'Setup failed'); }
+        showToast('Apple passkey sync enabled');
+        document.getElementById('passkey-sync-banner')?.classList.add('hidden');
+        window.history.replaceState({}, '', '/chat');
+    } catch (e) {
+        showToast('Could not enable passkey sync: ' + e.message, 'error');
+    }
+}
+
 // Keyboard submit on desktop (Enter to send, Shift+Enter newline)
 document.addEventListener('DOMContentLoaded', () => {
     const input = document.getElementById('chat-input');
@@ -639,6 +677,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (target) mo.observe(target, { childList: true });
     if (target && target.children.length > 0) scheduleScrollChatToBottom();
     ensureMemoryStatusBaseline();
+    if (new URLSearchParams(window.location.search).get('setup_passkey_sync') === '1') {
+        document.getElementById('passkey-sync-banner')?.classList.remove('hidden');
+    }
 });
 
 // After an htmx swap loads chat history, scroll to foot

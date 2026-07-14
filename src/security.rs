@@ -9,10 +9,17 @@ use anyhow::{anyhow, Result};
 use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand::{rngs::OsRng, RngCore};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 pub const DEK_LEN: usize = 32;
 pub const NONCE_LEN: usize = 24;
+
+pub fn dek_verifier(dek: &[u8]) -> [u8; DEK_LEN] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"individuateai dek verifier\0");
+    hasher.update(dek);
+    hasher.finalize().into()
+}
 
 fn derive_key(secret: &[u8], context: &[u8]) -> [u8; DEK_LEN] {
     let hk = Hkdf::<Sha256>::new(Some(context), secret);
@@ -138,5 +145,12 @@ mod tests {
             dek
         );
         assert!(open(&sealed, b"wrong", b"user/credential").is_err());
+    }
+
+    #[test]
+    fn dek_verifier_is_stable_and_key_specific() {
+        let dek = generate_dek();
+        assert_eq!(dek_verifier(&dek), dek_verifier(&dek));
+        assert_ne!(dek_verifier(&dek), dek_verifier(&generate_dek()));
     }
 }

@@ -40,5 +40,9 @@ async fn fallback_css(uri: &Uri) -> Option<Response<Body>> {
         header::CONTENT_TYPE,
         header::HeaderValue::from_static("text/css; charset=utf-8"),
     );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
     Some(response)
 }

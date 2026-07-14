@@ -67,6 +67,10 @@ sealed copies of it. The server can never unseal any of them.**
   - each **passkey**, via the WebAuthn **PRF extension**: the authenticator
     derives a deterministic 256-bit secret from a stored per-credential salt;
     HKDF turns it into the wrap key. Full entropy — nothing to brute-force.
+  - Apple passkeys can also carry the DEK in WebAuthn **largeBlob** storage.
+    Safari encrypts this opaque value for the credential and iCloud Keychain
+    syncs it with the passkey. On sign-in, Safari returns it only after a valid
+    passkey assertion. A stored verifier rejects a wrong or tampered value.
   - the **recovery key** — a one-time code shown at signup, wrapping the same
     DEK. Mandatory: it is the only fallback when all passkeys are lost.
 
@@ -121,8 +125,15 @@ remains underneath as the outer layer.
 - **Add** (requires an unlocked session): register new passkey → verify
   `prf.enabled` → silent `get()` restricted to the new credential to obtain
   its PRF output → wrap the session's DEK → store. Two biometric taps.
-- **Login**: whichever passkey authenticates, its own salt + wrapped DEK are
-  used. Synced passkeys (iCloud/Google) are one credential, one wrap.
+- **Login**: Safari first reads the passkey's synced `largeBlob`. Other
+  providers, and Apple passkeys without sync setup, fall back to their PRF
+  wrap. Some Apple versions return device-specific PRF outputs for the same
+  iCloud credential, so relying on PRF alone can cause `DEK unwrap failed` on
+  another Apple device.
+- **Apple sync setup**: one authenticated assertion writes the DEK to the
+  passkey's `largeBlob`. After iCloud sync, the same passkey opens the account
+  on another Apple device without the recovery key. Existing accounts can run
+  this once from the passkey menu on a device that already opens the account.
 - **Remove/revoke**: delete the row — the credential can no longer
   authenticate and its sealed DEK copy ceases to exist. Refuse to remove the
   last wrap unless the user confirms holding the recovery key; require a fresh

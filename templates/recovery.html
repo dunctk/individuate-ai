@@ -10,9 +10,9 @@
         </a>
 
         <div class="mb-7">
-            <p class="role-label mb-2">Account recovery</p>
-            <h1 class="text-3xl font-fraunces font-bold text-parchment mb-2">Use your recovery key</h1>
-            <p class="text-sage-light text-sm leading-relaxed">
+            <p id="recovery-label" class="role-label mb-2">Account recovery</p>
+            <h1 id="recovery-title" class="text-3xl font-fraunces font-bold text-parchment mb-2">Use your recovery key</h1>
+            <p id="recovery-intro" class="text-sage-light text-sm leading-relaxed">
                 Enter the email for your account and the recovery key you saved when you signed up.
             </p>
         </div>
@@ -39,6 +39,13 @@
     </div>
 </div>
 <script>
+const isPairingSyncedPasskey = new URLSearchParams(window.location.search).get('pair_passkey') === '1';
+if (isPairingSyncedPasskey) {
+    document.getElementById('recovery-label').textContent = 'Authorize this device';
+    document.getElementById('recovery-title').textContent = 'Use your recovery key once';
+    document.getElementById('recovery-intro').textContent = 'Apple synced your passkey, but this device returned a different encryption key. Enter your account email and recovery key once. Your saved data will stay encrypted.';
+    document.getElementById('recovery-submit').textContent = 'Continue';
+}
 document.getElementById('recovery-login-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const error = document.getElementById('login-error');
@@ -58,13 +65,13 @@ document.getElementById('recovery-login-form').addEventListener('submit', async 
         });
         if (!response.ok) throw new Error('Invalid recovery credentials');
         const result = await response.json();
-        window.location.href = result.redirect || '/chat';
+        window.location.href = isPairingSyncedPasskey ? '/login?pair_passkey=1' : (result.redirect || '/chat');
     } catch (err) {
         error.textContent = err.message || 'Account recovery failed';
         error.classList.remove('hidden');
     } finally {
         button.disabled = false;
-        button.textContent = 'Recover account';
+        button.textContent = isPairingSyncedPasskey ? 'Continue' : 'Recover account';
     }
 });
 </script>

@@ -51,6 +51,7 @@ window.registerPasskey = async function(optionsJson) {
         const cred = await navigator.credentials.create(options);
         const extensions = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
         const prf = extensions.prf || {};
+        const largeBlob = extensions.largeBlob || {};
         
         // Convert response buffers to Base64URL for server
         const response = {
@@ -71,6 +72,7 @@ window.registerPasskey = async function(optionsJson) {
             credential: response,
             prf_enabled: prf.enabled === true,
             prf_output: prf.results?.first ? base64UrlEncode(prf.results.first) : null,
+            large_blob_supported: largeBlob.supported === true,
         };
     } catch (e) {
         console.error("Passkey Register Error:", e);
@@ -93,6 +95,9 @@ window.loginPasskey = async function(optionsJson) {
                 if (entry.second) entry.second = base64UrlDecode(entry.second);
             }
         }
+        if (options.publicKey.extensions?.largeBlob?.write) {
+            options.publicKey.extensions.largeBlob.write = base64UrlDecode(options.publicKey.extensions.largeBlob.write);
+        }
         
         if (options.publicKey.allowCredentials) {
             for (let cred of options.publicKey.allowCredentials) {
@@ -103,6 +108,7 @@ window.loginPasskey = async function(optionsJson) {
         const cred = await navigator.credentials.get(options);
         const extensions = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
         const prf = extensions.prf || {};
+        const largeBlob = extensions.largeBlob || {};
 
         const response = {
             id: cred.id,
@@ -119,6 +125,8 @@ window.loginPasskey = async function(optionsJson) {
             credential: response,
             prf_enabled: prf.enabled === true,
             prf_output: prf.results?.first ? base64UrlEncode(prf.results.first) : null,
+            large_blob: largeBlob.blob ? base64UrlEncode(largeBlob.blob) : null,
+            large_blob_written: largeBlob.written === true,
         };
     } catch (e) {
         console.error("Passkey Login Error:", e);

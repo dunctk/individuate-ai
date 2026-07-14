@@ -276,7 +276,9 @@ mod tests {
         assert!(html.contains("Illustrative mind map"));
         assert!(html.contains("Illustrative social graph"));
         assert!(html.contains("Privacy &amp; security"));
-        assert!(html.contains("Open source, in the open"));
+        assert!(html.contains("Check the code yourself"));
+        assert!(html.contains("If you lose every passkey and your recovery key"));
+        assert!(html.contains("The AI provider must read a message to answer it"));
         assert!(html.contains("github.com/dunctk/individuate-ai"));
         assert!(html.contains("href=\"/login\""));
     }

@@ -81,7 +81,11 @@ document.getElementById('create-passkey-btn').addEventListener('click', async ()
             const recovery = prompt('Save this recovery key somewhere safe now. If you lose every passkey and this recovery key, your account and encrypted memories cannot be recovered — not even by us.\n\n' + result.recovery_key);
             if (recovery === null) { return; }
         }
-        if (result.redirect) { window.location.href = result.redirect; }
+        if (result.redirect) {
+            window.location.href = passkey.large_blob_supported
+                ? '/chat?setup_passkey_sync=1'
+                : result.redirect;
+        }
     } catch (e) {
         errEl.textContent = e.message;
         errEl.classList.remove('hidden');

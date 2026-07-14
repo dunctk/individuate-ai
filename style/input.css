@@ -27,6 +27,14 @@
         background-repeat: no-repeat;
     }
 
+    html.chat-open,
+    body.chat-open {
+        height: var(--chat-viewport-height, 100dvh);
+        min-height: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
     /* Fractal noise — gives the dark surface "tooth" so it doesn't read as plastic */
     body::before {
         content: "";
@@ -92,6 +100,26 @@
         background: linear-gradient(135deg, #3FB8A4, #E9C46A);
         box-shadow: 0 0 8px rgba(42,157,143,0.4);
         cursor: pointer;
+    }
+}
+
+@layer components {
+    .app-viewport {
+        width: 100%;
+        height: var(--chat-viewport-height, 100vh);
+        max-height: var(--chat-viewport-height, 100vh);
+        min-height: 0;
+    }
+
+    @supports (height: 100dvh) {
+        .app-viewport {
+            height: var(--chat-viewport-height, 100dvh);
+            max-height: var(--chat-viewport-height, 100dvh);
+        }
+    }
+
+    .composer-shell {
+        padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 }
 

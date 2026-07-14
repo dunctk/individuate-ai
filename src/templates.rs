@@ -336,7 +336,10 @@ mod tests {
         };
         let html = render_home(&env, &user, "", &[]);
         assert!(html.contains("app-shell"));
+        assert!(html.contains("app-viewport"));
         assert!(html.contains("chat-stage"));
+        assert!(html.contains("composer-shell"));
+        assert!(html.contains("window.visualViewport"));
         assert!(html.contains("seed-orb"));
         assert!(html.contains("mandala-avatar.jpg"));
         assert!(html.contains("Create a new recovery key"));

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div id="app-shell"
-     class="h-screen flex flex-col relative overflow-hidden"
+     class="app-viewport flex flex-col relative overflow-hidden"
      data-user-id="{{ user_id }}"
      data-username="{{ username }}"
      data-session-id="{{ session_id }}">
@@ -125,7 +125,7 @@
     </main>
 
     <!-- Composer — the bottom "membrane" with mode toggle, presets, input, and seed orb -->
-    <footer class="shrink-0 z-10">
+    <footer class="composer-shell shrink-0 z-10">
         <div class="fern-divider"></div>
         <div class="glass-strong">
             <div class="px-4 sm:px-6 pt-3 pb-2 max-w-3xl mx-auto">
@@ -143,7 +143,7 @@
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
                 <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
                     <div class="flex-1 relative">
-                        <input id="chat-input" type="text" autofocus autocomplete="off"
+                        <input id="chat-input" type="text" autocomplete="off"
                             placeholder="What happened, and what do you want to say?"
                             class="field !rounded-2xl !py-3 !px-4 pr-12"/>
                         <kbd class="hidden sm:flex absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-sage-mist/60 border border-sage-mist/20 rounded px-1.5 py-0.5 pointer-events-none">↵</kbd>
@@ -167,6 +167,19 @@
 </div>
 
 <script>
+document.documentElement.classList.add('chat-open');
+document.body.classList.add('chat-open');
+
+function syncChatViewport() {
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    document.documentElement.style.setProperty('--chat-viewport-height', viewportHeight + 'px');
+}
+
+syncChatViewport();
+window.addEventListener('resize', syncChatViewport, { passive: true });
+window.visualViewport?.addEventListener('resize', syncChatViewport, { passive: true });
+window.visualViewport?.addEventListener('scroll', syncChatViewport, { passive: true });
+
 let currentMode = 'therapist';
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
@@ -802,6 +815,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 e.preventDefault();
                 submitChat();
             }
+        });
+        input.addEventListener('focus', () => {
+            syncChatViewport();
+            setTimeout(() => {
+                syncChatViewport();
+                scheduleScrollChatToBottom();
+            }, 250);
         });
     }
     // Hide the empty state the moment any message lands (covers initial hx history load too)

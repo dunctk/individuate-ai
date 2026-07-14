@@ -242,6 +242,7 @@ const SPEECH_AUTO_READ_KEY = 'individuate:auto-read-responses';
 let speechAutoRead = false;
 try { speechAutoRead = localStorage.getItem(SPEECH_AUTO_READ_KEY) === 'true'; } catch (_) {}
 let speechContext = null;
+let speechAudioUnlocked = false;
 let speechChunks = [];
 let speechSource = null;
 let speechGeneration = 0;
@@ -544,12 +545,38 @@ function scheduleSpeechUi() {
     speechUiFrame = requestAnimationFrame(tick);
 }
 
-async function ensureSpeechContext() {
+function getSpeechContext() {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) throw new Error('Audio playback is not supported');
-    if (!speechContext) speechContext = new AudioContextClass();
-    if (speechContext.state === 'suspended') await speechContext.resume();
+    if (!speechContext || speechContext.state === 'closed') speechContext = new AudioContextClass();
     return speechContext;
+}
+
+async function ensureSpeechContext() {
+    const context = getSpeechContext();
+    if (context.state === 'suspended' || context.state === 'interrupted') await context.resume();
+    return context;
+}
+
+async function unlockSpeechAudio() {
+    const context = getSpeechContext();
+    const resume = context.state === 'suspended' || context.state === 'interrupted'
+        ? context.resume()
+        : Promise.resolve();
+    // iOS requires a source to start during the tap itself. Resuming the
+    // context without starting one is not enough once the TTS fetch begins.
+    const buffer = context.createBuffer(1, 1, context.sampleRate);
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+    source.onended = () => {
+        try { source.disconnect(); } catch (_) {}
+    };
+    source.start(0);
+    await resume;
+    speechAudioUnlocked = context.state === 'running';
+    if (!speechAudioUnlocked) throw new Error('Tap Play again to enable audio');
+    return context;
 }
 
 function stopSpeechSource() {
@@ -689,7 +716,7 @@ function beginSpokenResponse() {
     speechQueuedChars = 0;
     speechResponseFinal = false;
     speechGenerationActive = speechAutoRead;
-    speechWantsPlay = speechAutoRead;
+    speechWantsPlay = speechAutoRead && speechAudioUnlocked;
     speechPosition = 0;
     speechError = '';
     updateSpeechControls();
@@ -704,7 +731,7 @@ function updateSpokenResponse(text, final = false) {
 
 async function toggleSpokenResponse() {
     try {
-        await ensureSpeechContext();
+        await unlockSpeechAudio();
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
@@ -727,7 +754,7 @@ async function toggleSpokenResponse() {
 
 async function seekSpokenResponse(delta) {
     try {
-        await ensureSpeechContext();
+        await unlockSpeechAudio();
         const target = Math.max(0, Math.min(currentSpeechPosition() + delta, speechLoadedDuration()));
         speechPosition = target;
         if (speechWantsPlay) await startSpokenResponseAt(target);
@@ -739,7 +766,7 @@ async function seekSpokenResponse(delta) {
 
 async function replaySpokenResponse() {
     try {
-        await ensureSpeechContext();
+        await unlockSpeechAudio();
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
@@ -759,7 +786,7 @@ function setAutoReadResponses(enabled) {
     if (speechAutoRead && speechFullText.trim()) {
         speechGenerationActive = true;
         speechWantsPlay = true;
-        ensureSpeechContext()
+        unlockSpeechAudio()
             .then(() => {
                 queueAvailableSpeech(speechResponseFinal);
                 return startSpokenResponseAt(speechPosition);
@@ -1242,7 +1269,7 @@ async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
-    if (speechAutoRead) ensureSpeechContext().catch(handleSpeechError);
+    if (speechAutoRead) await unlockSpeechAudio().catch(handleSpeechError);
     const voiceLive = document.getElementById('voice-live');
     if (deepgramSocket) cancelDeepgramVoiceInput();
     else if (voiceLive?.dataset.state === 'connecting') {

@@ -49,7 +49,11 @@ pub fn create_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.add_template("base.html", include_str!("../templates/base.html"))
         .unwrap();
+    env.add_template("landing", include_str!("../templates/landing.html"))
+        .unwrap();
     env.add_template("login", include_str!("../templates/login.html"))
+        .unwrap();
+    env.add_template("recovery", include_str!("../templates/recovery.html"))
         .unwrap();
     env.add_template("signup", include_str!("../templates/signup.html"))
         .unwrap();
@@ -79,6 +83,20 @@ pub fn create_env() -> Environment<'static> {
 
 pub fn render_login(env: &Environment) -> String {
     env.get_template("login")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
+pub fn render_landing(env: &Environment) -> String {
+    env.get_template("landing")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
+pub fn render_recovery(env: &Environment) -> String {
+    env.get_template("recovery")
         .unwrap()
         .render(json!({}))
         .unwrap()
@@ -216,7 +234,9 @@ mod tests {
         let env = create_env();
         for name in [
             "base.html",
+            "landing",
             "login",
+            "recovery",
             "signup",
             "home",
             "sidebar",
@@ -247,6 +267,48 @@ mod tests {
         assert!(html.contains("bubble-therapist"));
         assert!(html.contains("avatar-orb"));
         assert!(html.contains("role-label"));
+    }
+
+    #[test]
+    fn landing_page_contains_product_and_trust_sections() {
+        let env = create_env();
+        let html = render_landing(&env);
+        assert!(html.contains("Illustrative mind map"));
+        assert!(html.contains("Illustrative social graph"));
+        assert!(html.contains("Privacy &amp; security"));
+        assert!(html.contains("Open source, in the open"));
+        assert!(html.contains("github.com/dunctk/individuate-ai"));
+        assert!(html.contains("href=\"/login\""));
+    }
+
+    #[test]
+    fn login_uses_account_selecting_passkey_flow() {
+        let env = create_env();
+        let html = render_login(&env);
+        assert!(html.contains("Sign in with Passkey"));
+        assert!(!html.contains("passkey-email"));
+        assert!(!html.contains("recovery-login-form"));
+        assert!(html.contains("href=\"/recovery\""));
+        assert!(html.contains("/api/passkey/login/start"));
+    }
+
+    #[test]
+    fn recovery_page_owns_recovery_login_form() {
+        let env = create_env();
+        let html = render_recovery(&env);
+        assert!(html.contains("recovery-login-form"));
+        assert!(html.contains("/api/recovery/login"));
+        assert!(html.contains("href=\"/login\""));
+    }
+
+    #[test]
+    fn signup_explains_irrecoverable_account_loss() {
+        let env = create_env();
+        let html = render_signup(&env);
+        assert!(html.contains("Your account cannot be reset"));
+        assert!(html.contains("We cannot recover them for you"));
+        assert!(html.contains("recovery-warning-ack"));
+        assert!(html.contains("must save my recovery key"));
     }
 
     #[test]

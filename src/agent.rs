@@ -2927,7 +2927,7 @@ mod runtime {
         embedding_client: openai::Client,
         webauthn: Webauthn,
         pending_registrations: DashMap<String, PendingRegistration>,
-        pending_logins: DashMap<String, (Instant, PasskeyAuthentication)>,
+        pending_logins: DashMap<String, (Instant, DiscoverableAuthentication)>,
         active_deks: DashMap<String, (Instant, Vec<u8>)>,
     }
 
@@ -3405,61 +3405,24 @@ mod runtime {
 
         pub async fn start_passkey_login(
             &self,
-            username: String,
         ) -> Result<(String, RequestChallengeResponse, Vec<(Vec<u8>, Vec<u8>)>)> {
-            let username_clone = username.clone();
-            let user = match self
-                .conn
-                .call(move |conn| {
-                    conn.query_row(
-                        "SELECT id FROM users WHERE username = ?1",
-                        [username_clone],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
-                })
-                .await
-            {
-                Ok(id) => Ok(User { id, username }),
-                Err(_) => Err(anyhow::anyhow!("User not found")),
-            }?;
-
-            let user_id = user.id.clone();
-            let passkey_blobs: Vec<Vec<u8>> = self
-                .conn
-                .call(move |conn| {
-                    let mut stmt =
-                        conn.prepare("SELECT passkey FROM passkeys WHERE user_id = ?1")?;
-                    let rows = stmt.query_map([user_id], |row| row.get(0))?;
-                    let mut res = Vec::new();
-                    for r in rows {
-                        res.push(r?);
-                    }
-                    Ok(res)
-                })
-                .await?;
-
             let prf_salts = self
                 .conn
-                .call({
-                    let user_id = user.id.clone();
-                    move |conn| {
-                        let mut stmt = conn.prepare("SELECT credential_id, prf_salt FROM key_wraps WHERE user_id = ?1 AND kind = 'passkey'")?;
-                        let rows = stmt.query_map([user_id], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
-                        rows.collect::<Result<Vec<_>, _>>()
-                            .map_err(tokio_rusqlite::Error::Rusqlite)
-                    }
+                .call(move |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT credential_id, prf_salt FROM key_wraps WHERE kind = 'passkey'",
+                    )?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
                 .await?;
-
-            let allow_creds: Vec<Passkey> = passkey_blobs
-                .into_iter()
-                .map(|blob| serde_cbor_2::from_slice(&blob).context("Deserializing passkey"))
-                .collect::<Result<_>>()?;
 
             let (challenge, state) = self
                 .webauthn
-                .start_passkey_authentication(&allow_creds)
+                .start_discoverable_authentication()
                 .map_err(|e| anyhow::anyhow!("WebAuthn login start failed: {}", e))?;
 
             let req_id = Uuid::new_v4().to_string();
@@ -3475,14 +3438,44 @@ mod runtime {
             response: PublicKeyCredential,
             prf_output: Vec<u8>,
         ) -> Result<(User, Vec<u8>)> {
-            let (_, (_, state)) = self
+            let (_, (created_at, state)) = self
                 .pending_logins
                 .remove(&req_id)
                 .ok_or_else(|| anyhow::anyhow!("Login expired or invalid"))?;
+            if created_at.elapsed() > Duration::from_secs(300) {
+                return Err(anyhow::anyhow!("Login expired or invalid"));
+            }
 
+            let (user_uuid, credential_id) = self
+                .webauthn
+                .identify_discoverable_authentication(&response)
+                .map_err(|e| anyhow::anyhow!("Passkey did not identify an account: {}", e))?;
+            let credential_id = credential_id.to_vec();
+            let credential_id_for_lookup = credential_id.clone();
+            let (user_id, passkey_blob) = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT user_id, passkey FROM passkeys WHERE credential_id = ?1",
+                        [credential_id_for_lookup],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("Passkey is not registered"))?;
+            if user_id != user_uuid.to_string() {
+                return Err(anyhow::anyhow!(
+                    "Passkey account does not match its credential"
+                ));
+            }
+            let passkey: Passkey =
+                serde_cbor_2::from_slice(&passkey_blob).context("Deserializing passkey")?;
+            let discoverable_key = DiscoverableKey::from(&passkey);
             let auth_result = self
                 .webauthn
-                .finish_passkey_authentication(&response, &state)
+                .finish_discoverable_authentication(&response, state, &[discoverable_key])
                 .map_err(|e| anyhow::anyhow!("WebAuthn login verification failed: {}", e))?;
 
             if prf_output.len() != security::DEK_LEN {

@@ -37,6 +37,7 @@
 - No automated tests are present yet; add unit tests under `#[cfg(test)]` in the relevant module or integration tests in `tests/`.
 - Use `cargo test` for Rust coverage. For end-to-end flows, wire up Playwright and run `npx playwright test` (command is predeclared in `Cargo.toml` metadata).
 - Prefer deterministic data; avoid network calls in tests.
+- The primary test user uses an iPhone SE (3rd generation). Treat its 375 x 667 CSS-pixel portrait viewport as the baseline mobile target, then also verify landscape, the on-screen keyboard, safe-area insets, and 44 x 44 CSS-pixel minimum touch targets.
 
 ## Commit & Pull Request Guidelines
 - Follow conventional commits as in history (`feat:`, `fix:`, `chore:`). Keep messages in the imperative and scoped when helpful (e.g., `feat(ui): add sidebar sliders`).

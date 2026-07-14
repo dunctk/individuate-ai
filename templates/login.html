@@ -8,38 +8,16 @@
         </div>
         <div class="bg-void-green border border-sage-mist rounded-xl p-6 space-y-5">
             <div>
-                <label class="block text-sm text-sage-mist mb-1.5" for="passkey-email">Passkey Email</label>
-                <input id="passkey-email" type="email" placeholder="you@example.com"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-parchment text-sm placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
                 <button id="passkey-login-btn"
-                    class="w-full mt-2 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors">
+                    class="w-full min-h-11 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-base hover:bg-integral-turquoise/90 transition-colors">
                     Sign in with Passkey
                 </button>
                 <div id="passkey-login-error" class="text-red-400 text-xs mt-1 hidden"></div>
             </div>
-            <div class="relative">
-                <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-sage-mist/30"></div></div>
-                <div class="relative flex justify-center"><span class="bg-void-green px-2 text-xs text-sage-mist">or</span></div>
-            </div>
-            <form id="recovery-login-form">
-                <div class="space-y-3">
-                    <div>
-                        <label class="block text-sm text-sage-mist mb-1" for="email">Email</label>
-                        <input id="email" name="email" type="email" required
-                            class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-parchment text-sm placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
-                    </div>
-                    <div>
-                        <label class="block text-sm text-sage-mist mb-1" for="recovery-key">Recovery key</label>
-                        <input id="recovery-key" name="recovery_key" type="password" required
-                            class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-parchment text-sm placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
-                    </div>
-                    <button type="submit"
-                        class="w-full bg-sage-mist text-parchment font-semibold rounded-lg px-4 py-2 text-sm hover:bg-sage-mist/80 transition-colors">
-                        Use recovery key
-                    </button>
-                    <div id="login-error" class="text-red-400 text-xs"></div>
-                </div>
-            </form>
+            <a href="/recovery"
+               class="min-h-11 flex items-center justify-center text-sm text-sage-light hover:text-parchment transition-colors">
+                Use a recovery key
+            </a>
         </div>
         <p class="text-center text-xs text-sage-mist mt-4">
             Don't have an account?
@@ -49,15 +27,14 @@
 </div>
 <script>
 document.getElementById('passkey-login-btn').addEventListener('click', async () => {
-    const email = document.getElementById('passkey-email').value.trim();
     const errEl = document.getElementById('passkey-login-error');
+    const button = document.getElementById('passkey-login-btn');
     errEl.classList.add('hidden');
-    if (!email) { errEl.textContent = 'Enter your email'; errEl.classList.remove('hidden'); return; }
+    button.disabled = true;
+    button.textContent = 'Waiting for Passkey…';
     try {
         const resp = await fetch('/api/passkey/login/start', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email })
         });
         if (!resp.ok) { const e = await resp.json(); throw new Error(e.error || 'Start failed'); }
         const { challenge_id, options } = await resp.json();
@@ -71,24 +48,13 @@ document.getElementById('passkey-login-btn').addEventListener('click', async () 
         const result = await verify.json();
         if (result.redirect) { window.location.href = result.redirect; }
     } catch (e) {
-        errEl.textContent = e.message;
+        errEl.textContent = e.name === 'NotAllowedError'
+            ? 'Passkey sign-in was cancelled or no passkey is available.'
+            : e.message;
         errEl.classList.remove('hidden');
-    }
-});
-document.getElementById('recovery-login-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const error = document.getElementById('login-error');
-    error.textContent = '';
-    const response = await fetch('/api/recovery/login', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email: document.getElementById('email').value.trim(), recovery_key: document.getElementById('recovery-key').value})
-    });
-    if (response.ok) {
-        const result = await response.json();
-        window.location.href = result.redirect || '/';
-    } else {
-        error.textContent = 'Invalid recovery credentials';
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Sign in with Passkey';
     }
 });
 </script>

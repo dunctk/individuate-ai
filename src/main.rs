@@ -95,8 +95,10 @@ async fn main() {
 
     let app = Router::new()
         // Pages
-        .route("/", get(home_page))
+        .route("/", get(landing_page))
+        .route("/chat", get(home_page))
         .route("/login", get(login_page))
+        .route("/recovery", get(recovery_page))
         .route("/signup", get(signup_page))
         .route("/mind-map", get(mind_map_page))
         .route("/social-graph", get(social_graph_page))
@@ -147,7 +149,7 @@ async fn auth_guard(
     next: Next,
 ) -> Response {
     let path = req.uri().path().trim_end_matches('/');
-    let protected = path.is_empty()
+    let protected = path == "/chat"
         || path == "/mind-map"
         || path == "/social-graph"
         || path.starts_with("/fragments")
@@ -253,6 +255,11 @@ async fn get_authed_user(headers: &HeaderMap, key: &Key) -> Option<User> {
 
 // --- Page Handlers ---
 
+async fn landing_page(State(state): State<AppState>) -> impl IntoResponse {
+    let html = templates::render_landing(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
 async fn home_page(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -284,6 +291,11 @@ async fn home_page(
 
 async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
     let html = templates::render_login(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+async fn recovery_page(State(state): State<AppState>) -> impl IntoResponse {
+    let html = templates::render_recovery(&state.templates);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
 }
 
@@ -429,7 +441,7 @@ async fn recovery_login_handler(
             let cookie = set_auth_cookie(&state.key, &session, cookie_is_secure(&headers));
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
-            let mut response = Json(serde_json::json!({"redirect": "/"})).into_response();
+            let mut response = Json(serde_json::json!({"redirect": "/chat"})).into_response();
             if let Some(header) = jar.delta().last() {
                 response.headers_mut().insert(
                     header::SET_COOKIE,
@@ -882,6 +894,10 @@ async fn passkey_register_start(
     match can_register {
         Ok(start) => {
             let mut options = serde_json::to_value(&start.challenge).unwrap_or_default();
+            options["publicKey"]["authenticatorSelection"]["residentKey"] =
+                serde_json::json!("required");
+            options["publicKey"]["authenticatorSelection"]["requireResidentKey"] =
+                serde_json::json!(true);
             options["publicKey"]["extensions"] = serde_json::json!({
                 "prf": { "eval": { "first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&start.prf_salt) } }
             });
@@ -959,8 +975,9 @@ async fn passkey_register_complete(
             let cookie = set_auth_cookie(&state.key, &session, is_secure);
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
-            let mut resp = Json(serde_json::json!({"redirect": "/", "recovery_key": recovery_key}))
-                .into_response();
+            let mut resp =
+                Json(serde_json::json!({"redirect": "/chat", "recovery_key": recovery_key}))
+                    .into_response();
             if let Some(h) = jar.delta().last() {
                 resp.headers_mut().insert(
                     header::SET_COOKIE,
@@ -977,11 +994,16 @@ async fn passkey_register_complete(
     }
 }
 
-async fn passkey_login_start(Json(payload): Json<PasskeyEmailPayload>) -> Response {
+async fn passkey_login_start() -> Response {
     let runtime = agent_runtime().await.unwrap();
-    match runtime.start_passkey_login(payload.email).await {
+    match runtime.start_passkey_login().await {
         Ok((req_id, challenge, prf_salts)) => {
             let mut options = serde_json::to_value(&challenge).unwrap_or_default();
+            // webauthn-rs uses this flow for conditional autofill. This login is
+            // explicitly button-triggered, so request the normal account picker.
+            if let Some(object) = options.as_object_mut() {
+                object.remove("mediation");
+            }
             let eval_by_credential: serde_json::Map<String, serde_json::Value> = prf_salts
                 .into_iter()
                 .map(|(credential_id, salt)| (
@@ -1051,7 +1073,7 @@ async fn passkey_login_complete(
             let cookie = set_auth_cookie(&state.key, &session, is_secure);
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
-            let mut resp = Json(serde_json::json!({"redirect": "/"})).into_response();
+            let mut resp = Json(serde_json::json!({"redirect": "/chat"})).into_response();
             if let Some(h) = jar.delta().last() {
                 resp.headers_mut().insert(
                     header::SET_COOKIE,

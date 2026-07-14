@@ -1,21 +1,43 @@
 {% extends "base.html" %}
+{% block title %}Create account · IndividuateAI{% endblock %}
 {% block content %}
-<div class="min-h-screen flex items-center justify-center px-4">
+<div class="min-h-screen flex items-center justify-center px-4 py-8">
     <div class="w-full max-w-sm">
         <div class="text-center mb-8">
             <h1 class="text-3xl font-fraunces font-bold text-integral-turquoise mb-2">Create Account</h1>
             <p class="text-sage-mist text-sm">Set up a passkey to get started</p>
         </div>
         <div class="bg-void-green border border-sage-mist rounded-xl p-6 space-y-5">
+            <div id="account-recovery-warning" class="rounded-xl border border-systemic-yellow/40 bg-systemic-yellow/10 p-4" role="note">
+                <div class="flex gap-3">
+                    <svg class="w-5 h-5 shrink-0 text-systemic-yellow mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 4.2 2.7 17.4A1.7 1.7 0 0 0 4.2 20h15.6a1.7 1.7 0 0 0 1.5-2.6L13.7 4.2a2 2 0 0 0-3.4 0Z"/>
+                    </svg>
+                    <div>
+                        <h2 class="font-urbanist text-sm font-bold text-parchment">Your account cannot be reset</h2>
+                        <p class="text-sm text-sage-light leading-relaxed mt-1">
+                            If you lose access to every passkey <strong class="text-parchment">and</strong> your recovery key, your account and encrypted memories are permanently inaccessible. We cannot recover them for you.
+                        </p>
+                    </div>
+                </div>
+            </div>
             <div>
                 <label class="block text-sm text-sage-mist mb-1.5" for="signup-email">Email</label>
-                <input id="signup-email" type="email" placeholder="you@example.com"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-parchment text-sm placeholder:text-sage-mist/50 focus:outline-none focus:border-integral-turquoise transition-colors">
+                <input id="signup-email" type="email" autocomplete="username" placeholder="you@example.com"
+                    aria-describedby="account-recovery-warning"
+                    class="field min-h-11 !text-base">
+                <label class="min-h-11 flex items-start gap-3 mt-4 cursor-pointer text-sm text-sage-light leading-relaxed">
+                    <input id="recovery-warning-ack" type="checkbox" required
+                        class="!appearance-auto mt-0.5 w-5 h-5 shrink-0 accent-integral-turquoise"
+                        style="appearance: auto; -webkit-appearance: checkbox;">
+                    <span>I understand that I must save my recovery key after signup.</span>
+                </label>
                 <button id="create-passkey-btn"
-                    class="w-full mt-2 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors">
+                    disabled
+                    class="w-full min-h-11 mt-4 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-base hover:bg-integral-turquoise/90 disabled:opacity-45 disabled:cursor-not-allowed transition-colors">
                     Create Passkey
                 </button>
-                <div id="signup-error" class="text-red-400 text-xs mt-1 hidden"></div>
+                <div id="signup-error" class="text-red-400 text-sm mt-2 hidden" role="alert"></div>
             </div>
         </div>
         <p class="text-center text-xs text-sage-mist mt-4">
@@ -25,11 +47,20 @@
     </div>
 </div>
 <script>
+const recoveryWarningAck = document.getElementById('recovery-warning-ack');
+const createPasskeyButton = document.getElementById('create-passkey-btn');
+recoveryWarningAck.addEventListener('change', () => {
+    createPasskeyButton.disabled = !recoveryWarningAck.checked;
+});
+
 document.getElementById('create-passkey-btn').addEventListener('click', async () => {
     const email = document.getElementById('signup-email').value.trim();
     const errEl = document.getElementById('signup-error');
     errEl.classList.add('hidden');
     if (!email) { errEl.textContent = 'Enter your email'; errEl.classList.remove('hidden'); return; }
+    if (!recoveryWarningAck.checked) { errEl.textContent = 'Confirm that you understand the recovery warning'; errEl.classList.remove('hidden'); return; }
+    createPasskeyButton.disabled = true;
+    createPasskeyButton.textContent = 'Creating Passkey…';
     try {
         const resp = await fetch('/api/passkey/register/start', {
             method: 'POST',
@@ -47,13 +78,16 @@ document.getElementById('create-passkey-btn').addEventListener('click', async ()
         if (!verify.ok) { const e = await verify.json(); throw new Error(e.error || 'Verification failed'); }
         const result = await verify.json();
         if (result.recovery_key) {
-            const recovery = prompt('Save this recovery key somewhere safe. It is the only fallback if you lose every passkey:\n\n' + result.recovery_key);
+            const recovery = prompt('Save this recovery key somewhere safe now. If you lose every passkey and this recovery key, your account and encrypted memories cannot be recovered — not even by us.\n\n' + result.recovery_key);
             if (recovery === null) { return; }
         }
         if (result.redirect) { window.location.href = result.redirect; }
     } catch (e) {
         errEl.textContent = e.message;
         errEl.classList.remove('hidden');
+    } finally {
+        createPasskeyButton.disabled = !recoveryWarningAck.checked;
+        createPasskeyButton.textContent = 'Create Passkey';
     }
 });
 </script>

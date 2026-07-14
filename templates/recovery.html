@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Recover account · IndividuateAI{% endblock %}
+{% block content %}
+<div class="min-h-screen flex items-center justify-center px-4 py-8">
+    <div class="w-full max-w-sm">
+        <a href="/login"
+           class="min-h-11 inline-flex items-center gap-2 text-sm text-sage-light hover:text-parchment transition-colors mb-5">
+            <span aria-hidden="true">&larr;</span>
+            Back to passkey sign in
+        </a>
+
+        <div class="mb-7">
+            <p class="role-label mb-2">Account recovery</p>
+            <h1 class="text-3xl font-fraunces font-bold text-parchment mb-2">Use your recovery key</h1>
+            <p class="text-sage-light text-sm leading-relaxed">
+                Enter the email for your account and the recovery key you saved when you signed up.
+            </p>
+        </div>
+
+        <div class="glass-strong rounded-2xl p-6">
+            <form id="recovery-login-form" class="space-y-4">
+                <div>
+                    <label class="block text-sm text-sage-light mb-1.5" for="email">Email</label>
+                    <input id="email" name="email" type="email" autocomplete="username" required
+                        class="field min-h-11 !text-base" placeholder="you@example.com">
+                </div>
+                <div>
+                    <label class="block text-sm text-sage-light mb-1.5" for="recovery-key">Recovery key</label>
+                    <input id="recovery-key" name="recovery_key" type="password" autocomplete="off" required
+                        class="field min-h-11 !text-base" placeholder="Paste your recovery key">
+                </div>
+                <button id="recovery-submit" type="submit"
+                    class="w-full min-h-11 bg-sage-mist text-parchment font-semibold rounded-lg px-4 py-2 text-base hover:bg-sage-mist/80 disabled:opacity-60 transition-colors">
+                    Recover account
+                </button>
+                <div id="login-error" class="text-red-400 text-sm hidden" role="alert"></div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+document.getElementById('recovery-login-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = document.getElementById('login-error');
+    const button = document.getElementById('recovery-submit');
+    error.textContent = '';
+    error.classList.add('hidden');
+    button.disabled = true;
+    button.textContent = 'Checking recovery key…';
+    try {
+        const response = await fetch('/api/recovery/login', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                email: document.getElementById('email').value.trim(),
+                recovery_key: document.getElementById('recovery-key').value
+            })
+        });
+        if (!response.ok) throw new Error('Invalid recovery credentials');
+        const result = await response.json();
+        window.location.href = result.redirect || '/chat';
+    } catch (err) {
+        error.textContent = err.message || 'Account recovery failed';
+        error.classList.remove('hidden');
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Recover account';
+    }
+});
+</script>
+{% endblock %}

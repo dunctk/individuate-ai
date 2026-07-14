@@ -45,6 +45,12 @@ deliberately do not, and the simplest design that meets those requirements.
   all extractors) sends `provider.data_collection = "deny"`, restricting
   routing to providers that do not retain or train on prompts.
   `OPENROUTER_DATA_COLLECTION=allow` is the escape hatch.
+- **Voice transcription.** On browsers with live Web Speech support, spoken
+  words appear in the composer as the browser recognizes them. On supported
+  Apple devices this recognition runs on-device. Browsers without that path
+  fall back to recording one voice entry and sending it to the configured
+  Deepgram transcription endpoint. The UI makes the recording and processing
+  states visible before any fallback audio is sent.
 - **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
   session handler verifies the authenticated private cookie matches the
   requested user; session ownership is checked before streaming. `data/` is

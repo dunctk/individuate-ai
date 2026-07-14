@@ -141,6 +141,11 @@
                 </div>
             </div>
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
+                <div id="voice-live" class="voice-live" data-state="idle" role="status" aria-live="polite">
+                    <span class="voice-live-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                    <span id="voice-live-label" class="voice-live-label">Listening</span>
+                    <span id="voice-live-interim" class="voice-live-interim" aria-hidden="true"></span>
+                </div>
                 <form id="chat-form" class="flex items-end gap-3" onsubmit="event.preventDefault(); submitChat();">
                     <div class="flex-1 relative">
                         <input id="chat-input" type="text" autocomplete="off"
@@ -148,7 +153,7 @@
                             class="field !rounded-2xl !py-3 !px-4 pr-12"/>
                         <kbd class="hidden sm:flex absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-sage-mist/60 border border-sage-mist/20 rounded px-1.5 py-0.5 pointer-events-none">↵</kbd>
                     </div>
-                    <button id="voice-input" type="button" class="icon-btn shrink-0" aria-label="Record voice message" title="Record voice message" onclick="toggleVoiceInput()">
+                    <button id="voice-input" type="button" class="icon-btn voice-input-button shrink-0" aria-label="Start voice input" aria-pressed="false" title="Start voice input" onclick="toggleVoiceInput()">
                         <svg id="voice-input-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>
                         </svg>
@@ -188,6 +193,10 @@ let memoryStatusSnapshot = null;
 let memoryWatchToken = 0;
 let voiceRecorder = null;
 let voiceChunks = [];
+let voiceRecognition = null;
+let voiceRecognitionActive = false;
+let voiceRecognitionHasText = false;
+let voiceInputPrefix = '';
 const waitingMessages = [
     'Letting the symbol constellate...',
     'Listening for the pattern beneath the story...',
@@ -499,19 +508,101 @@ function setChatBusy(on) {
     if (orb) orb.toggleAttribute('disabled', on);
 }
 
-function setVoiceRecording(on) {
+function setVoiceState(state, interim = '') {
     const button = document.getElementById('voice-input');
     const icon = document.getElementById('voice-input-icon');
-    if (!button || !icon) return;
-    button.setAttribute('aria-label', on ? 'Stop recording' : 'Record voice message');
-    button.title = on ? 'Stop recording' : 'Record voice message';
-    button.dataset.recording = on ? 'true' : 'false';
-    icon.innerHTML = on
+    const input = document.getElementById('chat-input');
+    const live = document.getElementById('voice-live');
+    const label = document.getElementById('voice-live-label');
+    const interimEl = document.getElementById('voice-live-interim');
+    if (!button || !icon || !input || !live || !label || !interimEl) return;
+    const active = state === 'listening' || state === 'recording' || state === 'refining';
+    const listening = state === 'listening' || state === 'recording';
+    button.setAttribute('aria-label', listening ? 'Stop voice input' : 'Start voice input');
+    button.setAttribute('aria-pressed', listening ? 'true' : 'false');
+    button.title = listening ? 'Stop voice input' : 'Start voice input';
+    button.dataset.recording = listening ? 'true' : 'false';
+    input.dataset.dictating = listening ? 'true' : 'false';
+    live.dataset.state = state;
+    live.classList.toggle('voice-live-active', active);
+    label.textContent = state === 'refining'
+        ? 'Refining transcript'
+        : state === 'recording'
+            ? 'Recording'
+            : 'Listening';
+    interimEl.textContent = interim;
+    icon.innerHTML = listening
         ? '<rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" fill="none"/>'
         : '<path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>';
 }
 
-async function toggleVoiceInput() {
+function joinVoiceText(prefix, speech) {
+    const cleanPrefix = prefix.trimEnd();
+    const cleanSpeech = speech.trim();
+    return cleanPrefix && cleanSpeech ? cleanPrefix + ' ' + cleanSpeech : (cleanPrefix || cleanSpeech);
+}
+
+function stopLiveRecognition() {
+    voiceRecognitionActive = false;
+    if (voiceRecognition) {
+        try { voiceRecognition.stop(); } catch (_) {}
+    }
+}
+
+function startLiveRecognition(SpeechRecognition) {
+    const input = document.getElementById('chat-input');
+    voiceInputPrefix = input.value;
+    voiceRecognitionHasText = false;
+    const recognition = new SpeechRecognition();
+    voiceRecognition = recognition;
+    voiceRecognitionActive = true;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.lang = navigator.language || document.documentElement.lang || 'en-US';
+    recognition.onresult = event => {
+        let finalText = '';
+        let interimText = '';
+        for (let index = 0; index < event.results.length; index += 1) {
+            const transcript = event.results[index][0]?.transcript || '';
+            if (event.results[index].isFinal) finalText += transcript;
+            else interimText += transcript;
+        }
+        const spoken = (finalText + ' ' + interimText).trim();
+        voiceRecognitionHasText = voiceRecognitionHasText || Boolean(spoken);
+        input.value = joinVoiceText(voiceInputPrefix, spoken);
+        input.setSelectionRange(input.value.length, input.value.length);
+        setVoiceState('listening', interimText.trim() || finalText.trim());
+    };
+    recognition.onerror = event => {
+        const shouldFallback = !voiceRecognitionHasText
+            && ['service-not-allowed', 'language-not-supported'].includes(event.error);
+        voiceRecognitionActive = false;
+        voiceRecognition = null;
+        setVoiceState('idle');
+        if (shouldFallback) {
+            recognition.onend = null;
+            startRecordedVoiceInput();
+        } else if (!['aborted', 'no-speech'].includes(event.error)) {
+            showToast(event.error === 'not-allowed' ? 'Microphone access was not granted' : 'Live dictation stopped', 'error');
+        }
+    };
+    recognition.onend = () => {
+        voiceRecognition = null;
+        if (!voiceRecognitionActive) {
+            setVoiceState('idle');
+            input.focus();
+            return;
+        }
+        voiceRecognitionActive = false;
+        setVoiceState('idle');
+        input.focus();
+    };
+    recognition.start();
+    setVoiceState('listening');
+}
+
+async function startRecordedVoiceInput() {
     if (voiceRecorder && voiceRecorder.state === 'recording') {
         voiceRecorder.stop();
         return;
@@ -531,12 +622,12 @@ async function toggleVoiceInput() {
         };
         voiceRecorder.onstop = async () => {
             stream.getTracks().forEach(track => track.stop());
-            setVoiceRecording(false);
             const input = document.getElementById('chat-input');
             const audio = new Blob(voiceChunks, { type: voiceRecorder.mimeType || 'audio/webm' });
             voiceRecorder = null;
-            if (!audio.size) return;
+            if (!audio.size) { setVoiceState('idle'); return; }
             try {
+                setVoiceState('refining');
                 setChatBusy(true);
                 const response = await fetch('/api/transcribe', {
                     method: 'POST',
@@ -556,20 +647,54 @@ async function toggleVoiceInput() {
             } catch (error) {
                 showToast('Error: ' + error.message, 'error');
             } finally {
+                setVoiceState('idle');
                 setChatBusy(false);
             }
         };
         voiceRecorder.start();
-        setVoiceRecording(true);
+        setVoiceState('recording');
     } catch (error) {
+        setVoiceState('idle');
         showToast('Microphone access was not granted', 'error');
     }
+}
+
+async function toggleVoiceInput() {
+    if (voiceRecognitionActive) {
+        stopLiveRecognition();
+        return;
+    }
+    if (voiceRecorder && voiceRecorder.state === 'recording') {
+        voiceRecorder.stop();
+        return;
+    }
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+        try {
+            startLiveRecognition(SpeechRecognition);
+            return;
+        } catch (_) {
+            voiceRecognitionActive = false;
+            voiceRecognition = null;
+        }
+    }
+    await startRecordedVoiceInput();
 }
 
 async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
+    if (voiceRecognition) {
+        const recognition = voiceRecognition;
+        voiceRecognition = null;
+        voiceRecognitionActive = false;
+        recognition.onresult = null;
+        recognition.onerror = null;
+        recognition.onend = null;
+        try { recognition.abort(); } catch (_) {}
+        setVoiceState('idle');
+    }
     await ensureMemoryStatusBaseline();
     await ensureSession();
     input.value = '';

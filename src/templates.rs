@@ -340,6 +340,9 @@ mod tests {
         assert!(html.contains("chat-stage"));
         assert!(html.contains("composer-shell"));
         assert!(html.contains("window.visualViewport"));
+        assert!(html.contains("voice-live"));
+        assert!(html.contains("recognition.interimResults = true"));
+        assert!(html.contains("window.webkitSpeechRecognition"));
         assert!(html.contains("seed-orb"));
         assert!(html.contains("mandala-avatar.jpg"));
         assert!(html.contains("Create a new recovery key"));

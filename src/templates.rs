@@ -363,6 +363,9 @@ mod tests {
         assert!(html.contains("response-audio-play"));
         assert!(html.contains("seekSpokenResponse(-15)"));
         assert!(html.contains("replaySpokenResponse()"));
+        assert!(html.contains("wss://api.deepgram.com/v1/speak"));
+        assert!(html.contains("encoding: 'linear16'"));
+        assert!(html.contains("type: 'Flush'"));
         assert!(html.contains("/api/speak"));
         assert!(html.contains("/api/deepgram/token"));
         assert!(html.contains("wss://api.deepgram.com/v1/listen"));

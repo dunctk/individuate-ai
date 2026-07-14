@@ -247,6 +247,15 @@ let speechChunks = [];
 let speechSource = null;
 let speechGeneration = 0;
 let speechFetchChain = Promise.resolve();
+let speechSendChain = Promise.resolve();
+let speechSocket = null;
+let speechSocketReady = null;
+let speechSocketClosing = false;
+let speechStreamingFailed = false;
+let speechAudioFinal = false;
+let speechPcmRemainder = new Uint8Array(0);
+let speechStreamText = '';
+const SPEECH_STREAM_SAMPLE_RATE = 24000;
 let speechFullText = '';
 let speechQueuedChars = 0;
 let speechResponseFinal = false;
@@ -530,9 +539,9 @@ function updateSpeechControls() {
     if (speechError) status.textContent = speechError;
     else if (playing) status.textContent = 'Speaking · ' + formatSpeechTime(position);
     else if (speechGenerationActive && !speechChunks.length) status.textContent = 'Preparing voice…';
-    else if (speechWantsPlay && !speechResponseFinal) status.textContent = 'Listening for more…';
+    else if (speechWantsPlay && !speechAudioFinal) status.textContent = 'Deepgram live · buffering…';
     else if (position > 0 && position < loaded - 0.05) status.textContent = 'Paused · ' + formatSpeechTime(position);
-    else if (loaded > 0 && position >= loaded - 0.05 && speechResponseFinal) status.textContent = 'Finished · ' + formatSpeechTime(loaded);
+    else if (loaded > 0 && position >= loaded - 0.05 && speechAudioFinal) status.textContent = 'Finished · ' + formatSpeechTime(loaded);
     else status.textContent = 'Ready to listen';
 }
 
@@ -603,7 +612,7 @@ async function startSpokenResponseAt(position) {
     if (chunkIndex < 0) {
         // A speech request may still be decoding even after the text stream ends.
         // Keep the play intent so the first decoded chunk starts automatically.
-        if (speechResponseFinal && speechChunks.length && speechPosition >= loaded - 0.05) {
+        if (speechAudioFinal && speechChunks.length && speechPosition >= loaded - 0.05) {
             speechWantsPlay = false;
         }
         updateSpeechControls();
@@ -644,7 +653,138 @@ function cleanSpeechText(text) {
         .trim();
 }
 
-function queueSpeechChunk(text) {
+function appendStreamingSpeechAudio(arrayBuffer, generation) {
+    if (generation !== speechGeneration) return;
+    const incoming = new Uint8Array(arrayBuffer);
+    const combined = new Uint8Array(speechPcmRemainder.length + incoming.length);
+    combined.set(speechPcmRemainder);
+    combined.set(incoming, speechPcmRemainder.length);
+    const usableBytes = combined.length - (combined.length % 2);
+    speechPcmRemainder = combined.slice(usableBytes);
+    if (!usableBytes) return;
+
+    const sampleCount = usableBytes / 2;
+    const samples = new Float32Array(sampleCount);
+    const view = new DataView(combined.buffer, combined.byteOffset, usableBytes);
+    for (let index = 0; index < sampleCount; index += 1) {
+        const sample = view.getInt16(index * 2, true);
+        samples[index] = sample < 0 ? sample / 32768 : sample / 32767;
+    }
+    const context = getSpeechContext();
+    const buffer = context.createBuffer(1, sampleCount, SPEECH_STREAM_SAMPLE_RATE);
+    buffer.copyToChannel(samples, 0);
+    speechChunks.push({ buffer, duration: buffer.duration });
+    speechError = '';
+    if (speechWantsPlay && !speechSource) {
+        startSpokenResponseAt(speechPosition).catch(handleSpeechError);
+    } else {
+        updateSpeechControls();
+    }
+}
+
+function abandonSpeechStream() {
+    const socket = speechSocket;
+    speechSocket = null;
+    speechSocketReady = null;
+    speechSocketClosing = false;
+    if (!socket) return;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    if (socket.readyState === WebSocket.OPEN) {
+        try { socket.send(JSON.stringify({ type: 'Clear' })); } catch (_) {}
+        try { socket.send(JSON.stringify({ type: 'Close' })); } catch (_) {}
+    }
+    try { socket.close(1000, 'Response replaced'); } catch (_) {}
+}
+
+async function prepareSpeechStream() {
+    if (speechStreamingFailed) throw new Error('Deepgram streaming is unavailable');
+    if (speechSocket?.readyState === WebSocket.OPEN) return speechSocket;
+    if (speechSocketReady) return speechSocketReady;
+    if (!window.WebSocket) throw new Error('Streaming audio is not supported');
+
+    const generation = speechGeneration;
+    speechSocketReady = (async () => {
+        const tokenResponse = await fetch('/api/deepgram/token', { method: 'POST' });
+        const tokenPayload = await tokenResponse.json().catch(() => ({}));
+        if (!tokenResponse.ok || !tokenPayload.access_token) {
+            throw new Error(tokenPayload.error || 'Deepgram streaming is unavailable');
+        }
+        if (generation !== speechGeneration) throw new Error('Speech response was replaced');
+
+        const params = new URLSearchParams({
+            model: tokenPayload.tts_model || 'aura-2-thalia-en',
+            encoding: 'linear16',
+            sample_rate: String(SPEECH_STREAM_SAMPLE_RATE),
+            speed: String(tokenPayload.tts_speed || '1'),
+            mip_opt_out: 'true'
+        });
+        const socket = new WebSocket(
+            'wss://api.deepgram.com/v1/speak?' + params.toString(),
+            ['bearer', tokenPayload.access_token]
+        );
+        socket.binaryType = 'arraybuffer';
+        speechSocket = socket;
+
+        return await new Promise((resolve, reject) => {
+            let opened = false;
+            socket.onopen = () => {
+                if (generation !== speechGeneration) {
+                    socket.close(1000, 'Response replaced');
+                    reject(new Error('Speech response was replaced'));
+                    return;
+                }
+                opened = true;
+                resolve(socket);
+            };
+            socket.onmessage = event => {
+                if (generation !== speechGeneration) return;
+                if (event.data instanceof ArrayBuffer) {
+                    appendStreamingSpeechAudio(event.data, generation);
+                    return;
+                }
+                if (typeof event.data === 'string') {
+                    let message;
+                    try { message = JSON.parse(event.data); } catch (_) { return; }
+                    if (message.type === 'Warning') console.warn('Deepgram TTS:', message.description);
+                }
+            };
+            socket.onerror = () => {
+                if (!opened) reject(new Error('Could not connect to Deepgram streaming'));
+            };
+            socket.onclose = event => {
+                if (generation !== speechGeneration) return;
+                speechSocket = null;
+                speechSocketReady = null;
+                const completed = speechSocketClosing || event.code === 1000;
+                speechAudioFinal = completed;
+                if (!completed && !speechChunks.length) {
+                    speechStreamingFailed = true;
+                    if (speechStreamText.trim()) queueRestSpeechChunk(speechStreamText);
+                } else if (!completed) {
+                    speechError = 'Deepgram live connection ended early';
+                }
+                if (!completed && speechResponseFinal) finishSpeechGeneration();
+                if (speechWantsPlay && !speechSource) {
+                    startSpokenResponseAt(speechPosition).catch(handleSpeechError);
+                } else {
+                    updateSpeechControls();
+                }
+            };
+        });
+    })().catch(error => {
+        if (generation === speechGeneration) {
+            speechSocketReady = null;
+            speechStreamingFailed = true;
+        }
+        throw error;
+    });
+    return speechSocketReady;
+}
+
+function queueRestSpeechChunk(text) {
     const spokenText = cleanSpeechText(text);
     if (!spokenText) return;
     const generation = speechGeneration;
@@ -674,29 +814,87 @@ function queueSpeechChunk(text) {
     });
 }
 
+function queueSpeechChunk(text) {
+    const spokenText = cleanSpeechText(text);
+    if (!spokenText) return;
+    const generation = speechGeneration;
+    if (speechStreamingFailed) {
+        queueRestSpeechChunk(spokenText);
+        return;
+    }
+    speechSendChain = speechSendChain.then(async () => {
+        if (generation !== speechGeneration) return;
+        if (speechStreamingFailed) {
+            queueRestSpeechChunk(spokenText);
+            return;
+        }
+        try {
+            const socket = await prepareSpeechStream();
+            if (generation !== speechGeneration) return;
+            socket.send(JSON.stringify({ type: 'Speak', text: spokenText }));
+            socket.send(JSON.stringify({ type: 'Flush' }));
+            speechStreamText = joinVoiceText(speechStreamText, spokenText);
+        } catch (_) {
+            if (generation !== speechGeneration) return;
+            speechStreamingFailed = true;
+            queueRestSpeechChunk(spokenText);
+        }
+    });
+}
+
+function finishSpeechGeneration() {
+    const generation = speechGeneration;
+    if (speechStreamingFailed) {
+        speechFetchChain.then(() => {
+            if (generation !== speechGeneration) return;
+            speechAudioFinal = true;
+            if (speechWantsPlay && !speechSource) startSpokenResponseAt(speechPosition).catch(handleSpeechError);
+            else updateSpeechControls();
+        });
+        return;
+    }
+    speechSendChain.then(async () => {
+        if (generation !== speechGeneration || speechSocketClosing) return;
+        try {
+            const socket = await prepareSpeechStream();
+            if (generation !== speechGeneration) return;
+            speechSocketClosing = true;
+            socket.send(JSON.stringify({ type: 'Close' }));
+        } catch (_) {
+            speechStreamingFailed = true;
+            speechFetchChain.then(() => {
+                if (generation === speechGeneration) {
+                    speechAudioFinal = true;
+                    updateSpeechControls();
+                }
+            });
+        }
+    });
+}
+
 function queueAvailableSpeech(final = false) {
     if (!speechGenerationActive) return;
     while (speechQueuedChars < speechFullText.length) {
         const remaining = speechFullText.slice(speechQueuedChars);
         let take = 0;
         if (final) {
-            take = Math.min(remaining.length, 700);
+            take = Math.min(remaining.length, 400);
             if (take < remaining.length) {
                 const boundary = remaining.slice(0, take).lastIndexOf(' ');
                 if (boundary > 100) take = boundary + 1;
             }
         } else {
-            const sentence = remaining.match(/^[\s\S]{12,}?[.!?](?:["')\]]*)?(?:\s+|$)/);
-            if (sentence) {
-                take = Math.min(sentence[0].length, 700);
-                if (take < sentence[0].length) {
+            const phrase = remaining.match(/^[\s\S]{32,}?[.!?;:](?:["')\]]*)?(?:\s+|$)/);
+            if (phrase) {
+                take = Math.min(phrase[0].length, 400);
+                if (take < phrase[0].length) {
                     const boundary = remaining.slice(0, take).lastIndexOf(' ');
                     if (boundary > 100) take = boundary + 1;
                 }
             }
-            else if (remaining.length > 520) {
-                const boundary = remaining.slice(0, 500).lastIndexOf(' ');
-                take = boundary > 100 ? boundary + 1 : 500;
+            else if (remaining.length > 140) {
+                const boundary = remaining.slice(0, 120).lastIndexOf(' ');
+                take = boundary > 60 ? boundary + 1 : 120;
             }
         }
         if (!take) break;
@@ -708,10 +906,17 @@ function queueAvailableSpeech(final = false) {
 
 function beginSpokenResponse() {
     speechGeneration += 1;
+    abandonSpeechStream();
     stopSpeechSource();
     cancelAnimationFrame(speechUiFrame);
     speechChunks = [];
     speechFetchChain = Promise.resolve();
+    speechSendChain = Promise.resolve();
+    speechSocketClosing = false;
+    speechStreamingFailed = false;
+    speechAudioFinal = false;
+    speechPcmRemainder = new Uint8Array(0);
+    speechStreamText = '';
     speechFullText = '';
     speechQueuedChars = 0;
     speechResponseFinal = false;
@@ -727,6 +932,7 @@ function updateSpokenResponse(text, final = false) {
     speechResponseFinal = speechResponseFinal || final;
     updateSpeechControls();
     queueAvailableSpeech(speechResponseFinal);
+    if (speechResponseFinal && speechGenerationActive) finishSpeechGeneration();
 }
 
 async function toggleSpokenResponse() {
@@ -735,6 +941,7 @@ async function toggleSpokenResponse() {
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
+            if (speechResponseFinal) finishSpeechGeneration();
         }
         if (speechWantsPlay) {
             speechPosition = currentSpeechPosition();
@@ -770,6 +977,7 @@ async function replaySpokenResponse() {
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
+            if (speechResponseFinal) finishSpeechGeneration();
         }
         speechPosition = 0;
         speechWantsPlay = true;
@@ -789,6 +997,7 @@ function setAutoReadResponses(enabled) {
         unlockSpeechAudio()
             .then(() => {
                 queueAvailableSpeech(speechResponseFinal);
+                if (speechResponseFinal) finishSpeechGeneration();
                 return startSpokenResponseAt(speechPosition);
             })
             .catch(handleSpeechError);
@@ -796,7 +1005,6 @@ function setAutoReadResponses(enabled) {
 }
 
 function streamAssistantResponse(prompt) {
-    beginSpokenResponse();
     return new Promise((resolve, reject) => {
         const { message, bubble, avatar } = addStreamingAssistantMessage();
         const source = new EventSource(buildChatStreamUrl(prompt));
@@ -1269,7 +1477,11 @@ async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
-    if (speechAutoRead) await unlockSpeechAudio().catch(handleSpeechError);
+    beginSpokenResponse();
+    if (speechAutoRead) {
+        await unlockSpeechAudio().catch(handleSpeechError);
+        prepareSpeechStream().catch(() => {});
+    }
     const voiceLive = document.getElementById('voice-live');
     if (deepgramSocket) cancelDeepgramVoiceInput();
     else if (voiceLive?.dataset.state === 'connecting') {

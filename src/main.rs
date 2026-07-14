@@ -792,6 +792,14 @@ async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMa
             .into_response();
     }
 
+    let tts_model =
+        std::env::var("DEEPGRAM_TTS_MODEL").unwrap_or_else(|_| "aura-2-thalia-en".to_string());
+    let tts_speed = std::env::var("DEEPGRAM_TTS_SPEED")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| (0.7..=1.5).contains(value))
+        .unwrap_or(1.0);
+
     match response.json::<serde_json::Value>().await {
         Ok(payload) if payload.get("access_token").and_then(|value| value.as_str()).is_some() => {
             (
@@ -799,6 +807,8 @@ async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMa
                 Json(serde_json::json!({
                     "access_token": payload["access_token"],
                     "expires_in": payload.get("expires_in").cloned().unwrap_or_else(|| serde_json::json!(30)),
+                    "tts_model": tts_model,
+                    "tts_speed": tts_speed,
                 })),
             )
                 .into_response()

@@ -53,9 +53,10 @@ deliberately do not, and the simplest design that meets those requirements.
   browser speech recognition and then to one recorded Deepgram request. The UI
   identifies the live provider and makes recording and processing visible.
 - **Spoken responses.** When a user plays a response, or enables automatic
-  reading, complete sentence chunks are sent to the configured Deepgram Aura-2
-  text-to-speech model. The resulting audio stays in browser memory for the
-  current response and is not written to the app database.
+  reading, short stable phrase chunks are sent over an authenticated Deepgram
+  Aura-2 text-to-speech WebSocket. The resulting audio is streamed into browser
+  memory for the current response and is not written to the app database. The
+  REST speech route remains available only as a compatibility fallback.
 - **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
   session handler verifies the authenticated private cookie matches the
   requested user; session ownership is checked before streaming. `data/` is

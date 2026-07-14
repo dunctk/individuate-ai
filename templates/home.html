@@ -15,6 +15,39 @@
         </div>
     </div>
 
+    <div id="recovery-rotation-modal" class="hidden fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm px-4 py-6 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recovery-rotation-title">
+        <div class="glass-strong w-full max-w-md rounded-[1.75rem] border border-sage-mist/25 p-5 sm:p-6 shadow-2xl">
+            <div id="recovery-rotation-intro">
+                <p class="role-label mb-2">Account security</p>
+                <h2 id="recovery-rotation-title" class="font-fraunces text-2xl text-parchment">Create a new recovery key</h2>
+                <p class="mt-3 text-sm leading-relaxed text-sage-light">Your current recovery key will keep working until you save and activate the new one. We will ask for your passkey first.</p>
+                <div class="mt-6 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                    <button type="button" onclick="closeRecoveryRotation()" class="min-h-11 rounded-xl px-4 text-sm font-semibold text-sage-light hover:text-parchment">Cancel</button>
+                    <button id="recovery-rotation-start" type="button" onclick="startRecoveryRotation()" class="min-h-11 rounded-xl bg-integral-turquoise px-5 text-sm font-bold text-void-green disabled:opacity-50">Continue with passkey</button>
+                </div>
+            </div>
+
+            <div id="recovery-rotation-key-step" class="hidden">
+                <p class="role-label mb-2">New recovery key</p>
+                <h2 class="font-fraunces text-2xl text-parchment">Save this key now</h2>
+                <p class="mt-3 text-sm leading-relaxed text-sage-light">This is the only time the new key will be shown. Your old key still works until you activate this one.</p>
+                <div class="mt-5 rounded-2xl border border-integral-turquoise/35 bg-void-deep/80 p-4">
+                    <code id="new-recovery-key" class="block break-all select-all text-sm leading-relaxed text-systemic-yellow-soft"></code>
+                    <button id="copy-recovery-key" type="button" onclick="copyNewRecoveryKey()" class="mt-3 min-h-11 w-full rounded-xl border border-sage-mist/30 px-4 text-sm font-bold text-parchment hover:border-integral-turquoise/60">Copy key</button>
+                </div>
+                <label class="mt-5 flex items-start gap-3 rounded-xl border border-sage-mist/20 p-3 text-sm leading-relaxed text-sage-light">
+                    <input id="recovery-key-saved" type="checkbox" class="mt-1 h-5 w-5 shrink-0 accent-integral-turquoise" onchange="toggleRecoveryActivation()">
+                    <span>I saved this recovery key somewhere safe.</span>
+                </label>
+                <div class="mt-5 flex flex-col-reverse sm:flex-row sm:justify-end gap-2">
+                    <button type="button" onclick="closeRecoveryRotation()" class="min-h-11 rounded-xl px-4 text-sm font-semibold text-sage-light hover:text-parchment">Keep old key</button>
+                    <button id="activate-recovery-key" type="button" onclick="confirmRecoveryRotation()" disabled class="min-h-11 rounded-xl bg-systemic-yellow-soft px-5 text-sm font-bold text-void-deep disabled:cursor-not-allowed disabled:opacity-40">Activate new key</button>
+                </div>
+            </div>
+            <p id="recovery-rotation-error" class="hidden mt-4 text-sm text-red-400" role="alert"></p>
+        </div>
+    </div>
+
     <div id="sidebar-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="toggleSidebar()"></div>
     <div id="profile-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="closeProfileDrawer()"></div>
 
@@ -653,6 +686,110 @@ async function syncApplePasskey() {
         window.history.replaceState({}, '', '/chat');
     } catch (e) {
         showToast('Could not enable passkey sync: ' + e.message, 'error');
+    }
+}
+
+let pendingRecoveryRotationId = null;
+
+function openRecoveryRotation() {
+    pendingRecoveryRotationId = null;
+    document.getElementById('recovery-rotation-intro').classList.remove('hidden');
+    document.getElementById('recovery-rotation-key-step').classList.add('hidden');
+    document.getElementById('recovery-rotation-error').classList.add('hidden');
+    document.getElementById('recovery-key-saved').checked = false;
+    document.getElementById('activate-recovery-key').disabled = true;
+    const modal = document.getElementById('recovery-rotation-modal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    document.getElementById('recovery-rotation-start').focus();
+}
+
+function closeRecoveryRotation() {
+    const modal = document.getElementById('recovery-rotation-modal');
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+    document.getElementById('new-recovery-key').textContent = '';
+    pendingRecoveryRotationId = null;
+}
+
+function showRecoveryRotationError(message) {
+    const error = document.getElementById('recovery-rotation-error');
+    error.textContent = message;
+    error.classList.remove('hidden');
+}
+
+async function startRecoveryRotation() {
+    const button = document.getElementById('recovery-rotation-start');
+    button.disabled = true;
+    button.textContent = 'Waiting for passkey…';
+    document.getElementById('recovery-rotation-error').classList.add('hidden');
+    try {
+        const start = await fetch('/api/passkey/login/start', { method: 'POST' });
+        if (!start.ok) { const e = await start.json(); throw new Error(e.error || 'Could not start passkey check'); }
+        const { challenge_id, options } = await start.json();
+        const passkey = await window.loginPasskey(options);
+        const response = await fetch('/api/recovery/rotate/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                challenge_id,
+                credential: passkey.credential,
+                prf_output: passkey.prf_output,
+                prf_enabled: passkey.prf_enabled,
+                large_blob: passkey.large_blob
+            })
+        });
+        if (!response.ok) { const e = await response.json(); throw new Error(e.error || 'Could not create a recovery key'); }
+        const result = await response.json();
+        pendingRecoveryRotationId = result.rotation_id;
+        document.getElementById('new-recovery-key').textContent = result.recovery_key;
+        document.getElementById('recovery-rotation-intro').classList.add('hidden');
+        document.getElementById('recovery-rotation-key-step').classList.remove('hidden');
+        document.getElementById('copy-recovery-key').focus();
+    } catch (error) {
+        showRecoveryRotationError(error.name === 'NotAllowedError' ? 'Passkey check was cancelled.' : (error.message || 'Could not create a recovery key'));
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Continue with passkey';
+    }
+}
+
+async function copyNewRecoveryKey() {
+    const key = document.getElementById('new-recovery-key').textContent;
+    try {
+        await navigator.clipboard.writeText(key);
+        const button = document.getElementById('copy-recovery-key');
+        button.textContent = 'Copied';
+        setTimeout(() => { button.textContent = 'Copy key'; }, 1600);
+    } catch (_) {
+        showRecoveryRotationError('Could not copy automatically. Press and hold the key to copy it.');
+    }
+}
+
+function toggleRecoveryActivation() {
+    document.getElementById('activate-recovery-key').disabled = !document.getElementById('recovery-key-saved').checked;
+}
+
+async function confirmRecoveryRotation() {
+    if (!pendingRecoveryRotationId || !document.getElementById('recovery-key-saved').checked) return;
+    const button = document.getElementById('activate-recovery-key');
+    button.disabled = true;
+    button.textContent = 'Activating…';
+    document.getElementById('recovery-rotation-error').classList.add('hidden');
+    try {
+        const response = await fetch('/api/recovery/rotate/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rotation_id: pendingRecoveryRotationId })
+        });
+        if (!response.ok) { const e = await response.json(); throw new Error(e.error || 'Could not activate the new key'); }
+        closeRecoveryRotation();
+        showToast('New recovery key activated');
+    } catch (error) {
+        showRecoveryRotationError(error.message || 'Could not activate the new key');
+        button.disabled = false;
+    } finally {
+        button.textContent = 'Activate new key';
     }
 }
 

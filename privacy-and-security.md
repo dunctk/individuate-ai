@@ -134,6 +134,11 @@ remains underneath as the outer layer.
   passkey's `largeBlob`. After iCloud sync, the same passkey opens the account
   on another Apple device without the recovery key. Existing accounts can run
   this once from the passkey menu on a device that already opens the account.
+- **Rotate recovery key**: a signed-in user must complete a fresh passkey
+  assertion before a replacement key is shown. The old recovery wrap remains
+  active while the new key is being saved. Only an explicit confirmation
+  replaces it; abandoned changes expire after ten minutes without affecting
+  the old key.
 - **Remove/revoke**: delete the row — the credential can no longer
   authenticate and its sealed DEK copy ceases to exist. Refuse to remove the
   last wrap unless the user confirms holding the recovery key; require a fresh

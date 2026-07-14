@@ -80,6 +80,11 @@ async fn main() {
 
     let rate_limited_routes = Router::new()
         .route("/api/recovery/login", post(recovery_login_handler))
+        .route("/api/recovery/rotate/start", post(recovery_rotate_start))
+        .route(
+            "/api/recovery/rotate/confirm",
+            post(recovery_rotate_confirm),
+        )
         .route("/api/passkey/register/start", post(passkey_register_start))
         .route(
             "/api/passkey/register/complete",
@@ -1151,6 +1156,116 @@ async fn passkey_login_complete(
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn recovery_rotate_start(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<PasskeyCompletePayload>,
+) -> Response {
+    let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
+    let current_session = match extract_auth_session(&jar) {
+        Some(session) => session,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let response: webauthn_rs_proto::PublicKeyCredential =
+        match serde_json::from_value(payload.credential) {
+            Ok(response) => response,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Invalid passkey response"})),
+                )
+                    .into_response()
+            }
+        };
+    let prf_output = match payload.prf_output.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    }) {
+        Some(value) => value,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing PRF output"})),
+            )
+                .into_response()
+        }
+    };
+    let large_blob = payload.large_blob.and_then(|value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .ok()
+    });
+    let runtime = agent_runtime().await.unwrap();
+    let (user, dek) = match runtime
+        .finish_passkey_login(
+            payload.challenge_id,
+            response,
+            prf_output,
+            large_blob,
+            Some((current_session.user_id.clone(), current_session.dek)),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    if user.id != current_session.user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Passkey does not match this account"})),
+        )
+            .into_response();
+    }
+    match runtime.begin_recovery_rotation(user.id, &dek) {
+        Ok((rotation_id, recovery_key)) => Json(serde_json::json!({
+            "rotation_id": rotation_id,
+            "recovery_key": recovery_key
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RecoveryRotateConfirmPayload {
+    rotation_id: String,
+}
+
+async fn recovery_rotate_confirm(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RecoveryRotateConfirmPayload>,
+) -> Response {
+    let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
+    let session = match extract_auth_session(&jar) {
+        Some(session) => session,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime
+        .confirm_recovery_rotation(payload.rotation_id, &session.user_id)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
         )
             .into_response(),
     }

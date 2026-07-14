@@ -561,6 +561,14 @@ mod runtime {
     }
 
     #[derive(Clone, Debug)]
+    struct PendingRecoveryRotation {
+        created_at: Instant,
+        user_id: String,
+        wrapped_dek: Vec<u8>,
+        prf_salt: [u8; 32],
+    }
+
+    #[derive(Clone, Debug)]
     pub struct PasskeyRegistrationStart {
         pub challenge_id: String,
         pub challenge: CreationChallengeResponse,
@@ -2945,6 +2953,7 @@ mod runtime {
         webauthn: Webauthn,
         pending_registrations: DashMap<String, PendingRegistration>,
         pending_logins: DashMap<String, (Instant, DiscoverableAuthentication)>,
+        pending_recovery_rotations: DashMap<String, PendingRecoveryRotation>,
         active_deks: DashMap<String, (Instant, Vec<u8>)>,
     }
 
@@ -3031,6 +3040,7 @@ mod runtime {
                 webauthn,
                 pending_registrations: DashMap::new(),
                 pending_logins: DashMap::new(),
+                pending_recovery_rotations: DashMap::new(),
                 active_deks: DashMap::new(),
             })
         }
@@ -3766,6 +3776,84 @@ mod runtime {
                 .await?;
             self.remember_dek(&user.id, dek.to_vec());
             Ok((user, dek.to_vec()))
+        }
+
+        pub fn begin_recovery_rotation(
+            &self,
+            user_id: String,
+            dek: &[u8],
+        ) -> Result<(String, String)> {
+            let dek: [u8; security::DEK_LEN] =
+                dek.try_into().map_err(|_| anyhow::anyhow!("invalid DEK"))?;
+            let recovery_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(security::random_bytes::<32>());
+            let wrapped_dek = security::seal(
+                &dek,
+                recovery_key.as_bytes(),
+                format!("recovery:{}", user_id).as_bytes(),
+            )?;
+            let rotation_id = Uuid::new_v4().to_string();
+            self.pending_recovery_rotations.insert(
+                rotation_id.clone(),
+                PendingRecoveryRotation {
+                    created_at: Instant::now(),
+                    user_id,
+                    wrapped_dek,
+                    prf_salt: security::generate_salt(),
+                },
+            );
+            Ok((rotation_id, recovery_key))
+        }
+
+        pub async fn confirm_recovery_rotation(
+            &self,
+            rotation_id: String,
+            user_id: &str,
+        ) -> Result<()> {
+            let pending = self
+                .pending_recovery_rotations
+                .get(&rotation_id)
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| anyhow::anyhow!("Recovery-key change expired or is invalid"))?;
+            if pending.created_at.elapsed() > Duration::from_secs(600) {
+                self.pending_recovery_rotations.remove(&rotation_id);
+                return Err(anyhow::anyhow!("Recovery-key change expired or is invalid"));
+            }
+            if pending.user_id != user_id {
+                return Err(anyhow::anyhow!(
+                    "Recovery-key change does not match this account"
+                ));
+            }
+
+            let credential_id = format!("recovery:{}", user_id).into_bytes();
+            let user_id = user_id.to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO key_wraps
+                            (credential_id, user_id, prf_salt, wrapped_dek, label, kind)
+                        VALUES (?1, ?2, ?3, ?4, 'Recovery key', 'recovery')
+                        ON CONFLICT(credential_id) DO UPDATE SET
+                            user_id = excluded.user_id,
+                            prf_salt = excluded.prf_salt,
+                            wrapped_dek = excluded.wrapped_dek,
+                            label = 'Recovery key',
+                            kind = 'recovery',
+                            created_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![
+                            credential_id,
+                            user_id,
+                            pending.prf_salt.to_vec(),
+                            pending.wrapped_dek
+                        ],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            self.pending_recovery_rotations.remove(&rotation_id);
+            Ok(())
         }
 
         /// Revoke a passkey only after a fresh WebAuthn assertion.  The

@@ -339,5 +339,8 @@ mod tests {
         assert!(html.contains("chat-stage"));
         assert!(html.contains("seed-orb"));
         assert!(html.contains("mandala-avatar.jpg"));
+        assert!(html.contains("Create a new recovery key"));
+        assert!(html.contains("Your current recovery key will keep working"));
+        assert!(html.contains("I saved this recovery key somewhere safe"));
     }
 }

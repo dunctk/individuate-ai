@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <radialGradient id="ground" cx="28%" cy="18%" r="95%">
+      <stop offset="0" stop-color="#21483E"/>
+      <stop offset="0.56" stop-color="#0F1C18"/>
+      <stop offset="1" stop-color="#08130E"/>
+    </radialGradient>
+    <linearGradient id="line" x1="210" y1="170" x2="820" y2="850" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F2D88A"/>
+      <stop offset="0.52" stop-color="#3FB8A4"/>
+      <stop offset="1" stop-color="#9CDCB0"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#ground)"/>
+  <circle cx="512" cy="512" r="355" fill="none" stroke="#4A635D" stroke-opacity=".28" stroke-width="2"/>
+  <path d="M514 514c-5-36 20-68 56-71 43-4 76 36 68 78-11 60-75 92-130 69-76-31-97-127-48-190 62-79 185-72 240 11 67 102 15 241-99 282-132 48-274-44-286-181-13-157 131-282 282-252 170 34 258 223 184 379-81 171-300 222-445 106-154-123-156-362-5-489" fill="none" stroke="url(#line)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <circle cx="514" cy="514" r="19" fill="#F2D88A"/>
+</svg>

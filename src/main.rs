@@ -134,6 +134,7 @@ async fn main() {
         .route("/api/graph/:user_id", get(graph_handler))
         // Static
         .route("/pkg/*path", get(fileserv::static_file_handler))
+        .route("/icons/*path", get(fileserv::static_file_handler))
         .route("/passkey.js", get(passkey_js_handler))
         .route("/:filename", get(static_asset_handler))
         // Rate-limited auth routes

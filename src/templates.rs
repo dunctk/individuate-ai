@@ -250,6 +250,19 @@ mod tests {
     }
 
     #[test]
+    fn base_template_contains_ios_pwa_metadata() {
+        let html = create_env()
+            .get_template("landing")
+            .unwrap()
+            .render(minijinja::context! {})
+            .unwrap();
+        assert!(html.contains("/manifest.webmanifest"));
+        assert!(html.contains("apple-mobile-web-app-capable"));
+        assert!(html.contains("apple-touch-icon.png"));
+        assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
+    }
+
+    #[test]
     fn renders_chat_messages_bubbles() {
         let env = create_env();
         let messages = vec![

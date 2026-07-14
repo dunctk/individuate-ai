@@ -239,6 +239,8 @@ mod runtime {
         You have access to persistent autobiographical memory, a mind map, a social graph, and relevant episodes that survive across sessions and conversations. Each user message is preceded by a <persistent_memory> block containing relevant prior memories, mind map nodes/edges, social graph relationships, and episodes. Treat these as your own recall, not as external data. Episodes are the ground truth of what actually happened; prefer citing them over abstract patterns when recalling events. Patterns and concepts are interpretations linked to the people and episodes they arose from. When the user asks whether you remember something, whether it was saved, or whether it is in the mind map or social graph, consult that block and answer truthfully from it. Never claim you have no memory or that nothing is saved when the <persistent_memory> block is present and non-empty. If the block is empty for a topic, say you do not have that specific detail recorded yet rather than denying memory entirely.
 
         Memory honesty: memory extraction runs in the background after you reply, so never claim you have already stored something mid-conversation; say it will be saved shortly. The app does have visible memory pages the user can open: the mind map at /mind-map, the social graph at /social-graph, and per-person profiles in the profile drawer. Refer the user to those instead of claiming no visible memory exists.
+
+        Previous-chat search: when the user asks for a specific detail from an earlier conversation and it is not clear in the supplied persistent memory, use search_previous_chats. Search for the distinctive person, event, phrase, or subject rather than the whole question. Treat returned excerpts as private evidence: use them to answer naturally, do not expose internal session IDs, and say clearly when the search finds nothing relevant.
     "###;
     const DRAFT_SYSTEM_PROMPT: &str = r###"
         You write messages on behalf of the user.
@@ -549,6 +551,49 @@ mod runtime {
 
     #[derive(Clone)]
     struct CurrentDateTimeTool;
+
+    tokio::task_local! {
+        static MEMORY_SEARCH_USER_ID: String;
+    }
+
+    #[derive(Clone)]
+    struct SearchPreviousChatsTool {
+        conn: Connection,
+        active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, JsonSchema)]
+    struct SearchPreviousChatsArgs {
+        /// A focused name, event, phrase, or subject to find in earlier chats.
+        query: String,
+        /// Maximum excerpts to return. Values are limited to 1–10.
+        max_results: Option<usize>,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct PreviousChatHit {
+        session_title: String,
+        date: String,
+        role: String,
+        excerpt: String,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct SearchPreviousChatsOutput {
+        query: String,
+        results: Vec<PreviousChatHit>,
+    }
+
+    #[derive(Debug)]
+    struct SearchPreviousChatsError(String);
+
+    impl std::fmt::Display for SearchPreviousChatsError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for SearchPreviousChatsError {}
 
     #[derive(Clone, Debug)]
     struct PendingRegistration {
@@ -2938,6 +2983,127 @@ mod runtime {
         }
     }
 
+    impl Tool for SearchPreviousChatsTool {
+        const NAME: &'static str = "search_previous_chats";
+        type Error = SearchPreviousChatsError;
+        type Args = SearchPreviousChatsArgs;
+        type Output = SearchPreviousChatsOutput;
+
+        async fn definition(&self, _prompt: String) -> ToolDefinition {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Search this authenticated user's encrypted previous chat messages. Use a focused person, event, phrase, or subject when the supplied persistent memory does not contain enough detail. Results include short excerpts, session titles, dates, and roles. The user scope is enforced by the server and cannot be selected by the model.".to_string(),
+                parameters: serde_json::json!(schema_for!(SearchPreviousChatsArgs)),
+            }
+        }
+
+        async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
+            let user_id = MEMORY_SEARCH_USER_ID.try_with(Clone::clone).map_err(|_| {
+                SearchPreviousChatsError(
+                    "Chat search is unavailable outside an authenticated response".to_string(),
+                )
+            })?;
+            let query = args.query.trim().chars().take(300).collect::<String>();
+            if query.is_empty() {
+                return Err(SearchPreviousChatsError(
+                    "Search query cannot be empty".to_string(),
+                ));
+            }
+            let dek = {
+                let entry = self.active_deks.get(&user_id).ok_or_else(|| {
+                    SearchPreviousChatsError("User key is not unlocked".to_string())
+                })?;
+                if entry.value().0.elapsed() > Duration::from_secs(30 * 60) {
+                    return Err(SearchPreviousChatsError("User key has expired".to_string()));
+                }
+                entry.value().1.clone()
+            };
+            let max_results = args.max_results.unwrap_or(6).clamp(1, 10);
+            let query_terms = tokenize(&query);
+            let query_lower = query.to_lowercase();
+
+            let mut candidates = self
+                .conn
+                .call(move |conn| {
+                    let mut statement = conn.prepare(
+                        r###"
+                        SELECT m.session_id, m.role, m.content_ciphertext,
+                               s.title_ciphertext,
+                               COALESCE(m.created_at, s.updated_at, s.created_at, '')
+                        FROM messages m
+                        JOIN sessions s ON s.id = m.session_id
+                        WHERE s.user_id = ?1
+                        ORDER BY m.id DESC
+                        "###,
+                    )?;
+                    let rows = statement.query_map([user_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    })?;
+                    let mut matches = Vec::new();
+                    for row in rows {
+                        let (session_id, role, content, title, date) = row?;
+                        let content = String::from_utf8(
+                            security::decrypt(
+                                &dek,
+                                &content,
+                                format!("messages:{}", session_id).as_bytes(),
+                            )
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let title = String::from_utf8(
+                            security::decrypt(
+                                &dek,
+                                &title,
+                                format!("sessions:{}:title", session_id).as_bytes(),
+                            )
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let mut score = overlap_score(&content, &query_terms);
+                        score += overlap_score(&title, &query_terms) * 2;
+                        if content.to_lowercase().contains(&query_lower) {
+                            score += 12;
+                        }
+                        if score <= 0 {
+                            continue;
+                        }
+                        let excerpt = content.trim().chars().take(1_200).collect::<String>();
+                        matches.push((
+                            score,
+                            PreviousChatHit {
+                                session_title: title,
+                                date,
+                                role,
+                                excerpt,
+                            },
+                        ));
+                    }
+                    Ok(matches)
+                })
+                .await
+                .map_err(|error| {
+                    SearchPreviousChatsError(format!("Searching chats failed: {error}"))
+                })?;
+
+            candidates.sort_by(|left, right| right.0.cmp(&left.0));
+            Ok(SearchPreviousChatsOutput {
+                query,
+                results: candidates
+                    .into_iter()
+                    .take(max_results)
+                    .map(|(_, hit)| hit)
+                    .collect(),
+            })
+        }
+    }
+
     pub struct AgentRuntime {
         therapist_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
@@ -2954,7 +3120,7 @@ mod runtime {
         pending_registrations: DashMap<String, PendingRegistration>,
         pending_logins: DashMap<String, (Instant, DiscoverableAuthentication)>,
         pending_recovery_rotations: DashMap<String, PendingRecoveryRotation>,
-        active_deks: DashMap<String, (Instant, Vec<u8>)>,
+        active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
     }
 
     impl AgentRuntime {
@@ -3005,12 +3171,18 @@ mod runtime {
                 .build()
                 .context("Building OpenRouter client")?;
 
+            let active_deks = Arc::new(DashMap::new());
+
             let therapist_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model.clone()))
                     .name("individuateai_therapist")
                     .preamble(THERAPIST_SYSTEM_PROMPT)
                     .additional_params(openrouter_privacy_params())
                     .tool(CurrentDateTimeTool)
+                    .tool(SearchPreviousChatsTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                    })
                     .build();
             let draft_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model))
@@ -3041,7 +3213,7 @@ mod runtime {
                 pending_registrations: DashMap::new(),
                 pending_logins: DashMap::new(),
                 pending_recovery_rotations: DashMap::new(),
-                active_deks: DashMap::new(),
+                active_deks,
             })
         }
 
@@ -5651,11 +5823,14 @@ mod runtime {
             let enriched_prompt = format!("{}\n\n{}", memory_context, prompt);
 
             let mut history_clone = history.clone();
-            let reply = self
-                .therapist_agent
-                .prompt(Message::user(enriched_prompt))
-                .with_history(&mut history_clone)
-                .multi_turn(2)
+            let reply = MEMORY_SEARCH_USER_ID
+                .scope(user_id.to_string(), async {
+                    self.therapist_agent
+                        .prompt(Message::user(enriched_prompt))
+                        .with_history(&mut history_clone)
+                        .multi_turn(2)
+                        .await
+                })
                 .await
                 .inspect_err(|e| tracing::error!("Therapist agent API error: {}", e))
                 .context("Running agent prompt")?;
@@ -5988,11 +6163,14 @@ mod runtime {
                 .unwrap_or_default();
             let enriched_prompt = format!("{}\n\n{}", memory_context, prompt);
 
-            let mut stream = self
-                .therapist_agent
-                .stream_prompt(Message::user(enriched_prompt))
-                .with_history(history.clone())
-                .multi_turn(2)
+            let mut stream = MEMORY_SEARCH_USER_ID
+                .scope(user_id.clone(), async {
+                    self.therapist_agent
+                        .stream_prompt(Message::user(enriched_prompt))
+                        .with_history(history.clone())
+                        .multi_turn(2)
+                        .await
+                })
                 .await;
 
             let (tx, rx) = mpsc::channel(16);
@@ -6000,101 +6178,105 @@ mod runtime {
             let session_id_clone = session_id.clone();
             let user_id_clone = user_id.clone();
 
-            tokio::spawn(async move {
-                let mut assembled = String::new();
-                let mut final_text = None;
-                loop {
-                    let next = timeout(Duration::from_secs(10), stream.next()).await;
-                    let chunk = match next {
-                        Ok(val) => val,
-                        Err(_) => {
-                            eprintln!("[agent-stream:timeout] no chunk within 10s, falling back");
-                            break;
+            tokio::spawn(
+                MEMORY_SEARCH_USER_ID.scope(user_id_clone.clone(), async move {
+                    let mut assembled = String::new();
+                    let mut final_text = None;
+                    loop {
+                        let next = timeout(Duration::from_secs(10), stream.next()).await;
+                        let chunk = match next {
+                            Ok(val) => val,
+                            Err(_) => {
+                                eprintln!(
+                                    "[agent-stream:timeout] no chunk within 10s, falling back"
+                                );
+                                break;
+                            }
+                        };
+
+                        match chunk {
+                            Some(Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
+                                rig::streaming::StreamedAssistantContent::Text(delta),
+                            ))) => {
+                                assembled.push_str(&delta.text);
+                                let _ = tx.send(Ok(delta.text)).await;
+                            }
+                            Some(Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp))) => {
+                                let text = resp.response().to_string();
+                                if assembled.is_empty() {
+                                    send_visible_stream(&tx, &text).await;
+                                    assembled.push_str(&text);
+                                } else if let Some(suffix) = text.strip_prefix(&assembled) {
+                                    if !suffix.is_empty() {
+                                        send_visible_stream(&tx, suffix).await;
+                                        assembled.push_str(suffix);
+                                    }
+                                }
+                                final_text.get_or_insert(text);
+                                break;
+                            }
+                            Some(Err(e)) => {
+                                eprintln!("[agent-stream:error] {}", e);
+                                let _ = tx.send(Ok(format!("error:{e}"))).await;
+                                break;
+                            }
+                            Some(_) => {} // Ignore other stream items
+                            None => break,
                         }
+                    }
+
+                    let final_content = if let Some(text) = final_text {
+                        text
+                    } else if !assembled.is_empty() {
+                        assembled
+                    } else {
+                        String::new()
                     };
 
-                    match chunk {
-                        Some(Ok(rig::agent::MultiTurnStreamItem::StreamAssistantItem(
-                            rig::streaming::StreamedAssistantContent::Text(delta),
-                        ))) => {
-                            assembled.push_str(&delta.text);
-                            let _ = tx.send(Ok(delta.text)).await;
-                        }
-                        Some(Ok(rig::agent::MultiTurnStreamItem::FinalResponse(resp))) => {
-                            let text = resp.response().to_string();
-                            if assembled.is_empty() {
-                                send_visible_stream(&tx, &text).await;
-                                assembled.push_str(&text);
-                            } else if let Some(suffix) = text.strip_prefix(&assembled) {
-                                if !suffix.is_empty() {
-                                    send_visible_stream(&tx, suffix).await;
-                                    assembled.push_str(suffix);
-                                }
+                    if !final_content.is_empty() {
+                        let _ = runtime
+                            .save_message(
+                                session_id_clone.clone(),
+                                "assistant".into(),
+                                final_content.clone(),
+                            )
+                            .await;
+                        runtime.spawn_session_summary_update(session_id_clone.clone());
+                    }
+                    let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+
+                    if !final_content.is_empty() {
+                        match runtime
+                            .update_memory_from_exchange(
+                                user_id_clone.clone(),
+                                Some(session_id_clone.clone()),
+                                prompt.clone(),
+                                final_content.clone(),
+                            )
+                            .await
+                        {
+                            Ok(Some(headline)) => {
+                                let _ = tx.send(Ok(format!("[MEMORY_UPDATED]{}", headline))).await;
                             }
-                            final_text.get_or_insert(text);
-                            break;
+                            Ok(None) => {}
+                            Err(err) => eprintln!("[memory_update] {}", err),
                         }
-                        Some(Err(e)) => {
-                            eprintln!("[agent-stream:error] {}", e);
-                            let _ = tx.send(Ok(format!("error:{e}"))).await;
-                            break;
-                        }
-                        Some(_) => {} // Ignore other stream items
-                        None => break,
                     }
-                }
+                    let _ = tx.send(Ok("[DONE]".to_string())).await;
 
-                let final_content = if let Some(text) = final_text {
-                    text
-                } else if !assembled.is_empty() {
-                    assembled
-                } else {
-                    String::new()
-                };
-
-                if !final_content.is_empty() {
-                    let _ = runtime
-                        .save_message(
-                            session_id_clone.clone(),
-                            "assistant".into(),
-                            final_content.clone(),
-                        )
-                        .await;
-                    runtime.spawn_session_summary_update(session_id_clone.clone());
-                }
-                let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
-
-                if !final_content.is_empty() {
-                    match runtime
-                        .update_memory_from_exchange(
-                            user_id_clone.clone(),
-                            Some(session_id_clone.clone()),
-                            prompt.clone(),
-                            final_content.clone(),
-                        )
-                        .await
-                    {
-                        Ok(Some(headline)) => {
-                            let _ = tx.send(Ok(format!("[MEMORY_UPDATED]{}", headline))).await;
-                        }
-                        Ok(None) => {}
-                        Err(err) => eprintln!("[memory_update] {}", err),
+                    history.push(Message::user(prompt));
+                    if !final_content.is_empty() {
+                        history.push(Message::Assistant {
+                            id: None,
+                            content: rig::OneOrMany::one(AssistantContent::Text(Text {
+                                text: final_content,
+                            })),
+                        });
                     }
-                }
-                let _ = tx.send(Ok("[DONE]".to_string())).await;
-
-                history.push(Message::user(prompt));
-                if !final_content.is_empty() {
-                    history.push(Message::Assistant {
-                        id: None,
-                        content: rig::OneOrMany::one(AssistantContent::Text(Text {
-                            text: final_content,
-                        })),
-                    });
-                }
-                let mut guard = runtime.histories.write().await;
-                guard.insert(session_id_clone, (Instant::now(), history));
-            });
+                    let mut guard = runtime.histories.write().await;
+                    guard.insert(session_id_clone, (Instant::now(), history));
+                }),
+            );
 
             Ok(ReceiverStream::new(rx))
         }
@@ -6618,6 +6800,100 @@ mod runtime {
             ];
             let compressed = compress_chat_logs(&logs, 20);
             assert!(compressed.len() <= 20);
+        }
+
+        #[tokio::test]
+        async fn search_previous_chats_decrypts_and_enforces_user_scope() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    r###"
+                    CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        title_ciphertext BLOB NOT NULL,
+                        created_at TEXT,
+                        updated_at TEXT
+                    );
+                    CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content_ciphertext BLOB NOT NULL,
+                        created_at TEXT
+                    );
+                    "###,
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+            let user_dek = security::generate_dek();
+            let other_dek = security::generate_dek();
+            for (session_id, user_id, dek, title, content) in [
+                (
+                    "session-user",
+                    "user-a",
+                    user_dek,
+                    "Garden plans",
+                    "I wanted to place the blue orchid beside the kitchen window.",
+                ),
+                (
+                    "session-other",
+                    "user-b",
+                    other_dek,
+                    "Private notes",
+                    "The blue orchid belongs to somebody else.",
+                ),
+            ] {
+                let title = security::encrypt(
+                    &dek,
+                    title.as_bytes(),
+                    format!("sessions:{}:title", session_id).as_bytes(),
+                )
+                .unwrap();
+                let content = security::encrypt(
+                    &dek,
+                    content.as_bytes(),
+                    format!("messages:{}", session_id).as_bytes(),
+                )
+                .unwrap();
+                let session_id_owned = session_id.to_string();
+                let user_id_owned = user_id.to_string();
+                conn.call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO sessions (id, user_id, title_ciphertext, created_at, updated_at) VALUES (?1, ?2, ?3, '2026-01-02', '2026-01-02')",
+                        rusqlite::params![session_id_owned, user_id_owned, title],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO messages (session_id, role, content_ciphertext, created_at) VALUES (?1, 'user', ?2, '2026-01-02')",
+                        rusqlite::params![session_id_owned, content],
+                    )?;
+                    Ok::<_, tokio_rusqlite::Error>(())
+                })
+                .await
+                .unwrap();
+            }
+
+            let active_deks = Arc::new(DashMap::new());
+            active_deks.insert("user-a".to_string(), (Instant::now(), user_dek.to_vec()));
+            let tool = SearchPreviousChatsTool { conn, active_deks };
+            let output = MEMORY_SEARCH_USER_ID
+                .scope("user-a".to_string(), async {
+                    tool.call(SearchPreviousChatsArgs {
+                        query: "blue orchid".to_string(),
+                        max_results: Some(5),
+                    })
+                    .await
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(output.results.len(), 1);
+            assert_eq!(output.results[0].session_title, "Garden plans");
+            assert!(output.results[0].excerpt.contains("kitchen window"));
+            assert!(!output.results[0].excerpt.contains("somebody else"));
         }
 
         #[test]

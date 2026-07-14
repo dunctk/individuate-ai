@@ -18,6 +18,7 @@
 - Direct person-to-person social facts are stored in `social_relationships`; the rendered social graph is stored in `social_graphs`.
 - The social graph shown at `/social-graph` and returned by `/api/social-graph` is a projection built from relationship profiles, direct social relationships, and selected patient-graph concepts.
 - Chat streaming emits `[RESPONSE_DONE]` when assistant text is complete and `[MEMORY_UPDATED]<headline>` when memory actually changed. The UI also polls `/api/memory-status` as a fallback using private graph signatures, not memory contents.
+- The therapist Rig agent can call `search_previous_chats` for focused, on-demand recall beyond the automatically supplied memory block. The server supplies authenticated user scope through task-local context; never add a model-controlled `user_id` argument to this tool.
 - Memory extraction model env vars: `GRAPH_EXTRACTOR_MODEL`, `RELATIONSHIP_PROFILE_MODEL`, `SOCIAL_RELATIONSHIP_MODEL`, `SESSION_SUMMARY_MODEL`, `EMBEDDING_MODEL`, and `OPENROUTER_MODEL`.
 - Memory is scoped to authenticated user IDs. `DEFAULT_GRAPH_USER_ID` is only a fallback/default struct value, not the normal namespace for app users.
 

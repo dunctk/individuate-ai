@@ -359,6 +359,7 @@ mod tests {
         assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("voice-live"));
         assert!(html.contains("Deepgram live"));
+        assert!(html.contains("playDeepgramListeningTone()"));
         assert!(html.contains("auto-read-responses"));
         assert!(html.contains("response-audio-play"));
         assert!(html.contains("seekSpokenResponse(-15)"));

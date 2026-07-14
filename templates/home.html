@@ -588,6 +588,34 @@ async function unlockSpeechAudio() {
     return context;
 }
 
+function playDeepgramListeningTone() {
+    let context;
+    try {
+        context = getSpeechContext();
+    } catch (_) {
+        return;
+    }
+    if (context.state !== 'running') return;
+
+    const now = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(620, now);
+    oscillator.frequency.exponentialRampToValueAtTime(760, now + 0.14);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.018, now + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.onended = () => {
+        try { oscillator.disconnect(); } catch (_) {}
+        try { gain.disconnect(); } catch (_) {}
+    };
+    oscillator.start(now);
+    oscillator.stop(now + 0.17);
+}
+
 function stopSpeechSource() {
     const source = speechSource;
     speechSource = null;
@@ -1272,6 +1300,7 @@ async function startDeepgramVoiceInput() {
             started = true;
             settled = true;
             setVoiceState('listening');
+            playDeepgramListeningTone();
             resolve();
         };
 
@@ -1452,6 +1481,9 @@ async function toggleVoiceInput() {
         voiceRecorder.stop();
         return;
     }
+    // The Deepgram socket opens after this tap has finished. Prime Web Audio
+    // now so iOS allows the listening-ready cue when that happens.
+    unlockSpeechAudio().catch(() => {});
     try {
         await startDeepgramVoiceInput();
         return;

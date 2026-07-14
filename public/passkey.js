@@ -9,7 +9,7 @@ function base64UrlDecode(str) {
     for (let i = 0; i < rawData.length; ++i) {
         outputArray[i] = rawData.charCodeAt(i);
     }
-    return outputArray;
+    return outputArray.buffer;
 }
 
 function base64UrlEncode(buffer) {

@@ -289,6 +289,13 @@ mod runtime {
     use tokio_stream::StreamExt;
     use webauthn_rs::prelude::*;
 
+    const DEFAULT_THERAPIST_MODEL: &str = "z-ai/glm-5.2";
+    const DEFAULT_MEMORY_EXTRACTION_MODEL: &str = "openai/gpt-5.4-nano";
+    const DEFAULT_SESSION_SUMMARY_MODEL: &str = "openai/gpt-4o-mini";
+    const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+    const DEFAULT_SESSION_SUMMARY_INTERVAL: usize = 4;
+    const DEFAULT_MAX_HISTORY_MESSAGES: usize = 24;
+
     const THERAPIST_SYSTEM_PROMPT: &str = r###"
         You are IndividuateAI, a Jungian, gestalt-informed, somatic-aware therapist. Keep responses grounded and practical, usually under ~180 words; go longer only when the user brings heavy material that deserves room. If the user shares safety-critical content, encourage professional or emergency support.
 
@@ -1139,6 +1146,7 @@ mod runtime {
                     title_ciphertext BLOB NOT NULL,
                     content_ciphertext BLOB NOT NULL,
                     embedding_ciphertext BLOB,
+                    embedding_model TEXT NOT NULL DEFAULT '',
                     tags_ciphertext BLOB,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1146,6 +1154,16 @@ mod runtime {
                 CREATE INDEX IF NOT EXISTS idx_encrypted_memory_user_id ON encrypted_memory(user_id);",
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)?;
+
+            if !table_has_column(conn, "encrypted_memory", "embedding_model")
+                .map_err(tokio_rusqlite::Error::Rusqlite)?
+            {
+                conn.execute(
+                    "ALTER TABLE encrypted_memory ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''",
+                    [],
+                )
+                .map_err(tokio_rusqlite::Error::Rusqlite)?;
+            }
 
             if table_exists(conn, "sessions").map_err(tokio_rusqlite::Error::Rusqlite)?
                 && !table_has_column(conn, "sessions", "user_id")
@@ -1453,6 +1471,206 @@ mod runtime {
 
     fn authoritative_memory_source(user_text: &str) -> String {
         format!("User: {}", user_text)
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct MemoryExtractionPlan {
+        graph: bool,
+        relationship_profiles: bool,
+        episodes: bool,
+        social_relationships: bool,
+    }
+
+    fn env_usize(name: &str, default: usize, minimum: usize, maximum: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .map(|value| value.clamp(minimum, maximum))
+            .unwrap_or(default)
+    }
+
+    fn normalized_signal_text(text: &str) -> String {
+        text.to_lowercase()
+            .chars()
+            .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+            .collect::<String>()
+    }
+
+    fn contains_signal_word(normalized: &str, signal: &str) -> bool {
+        normalized.split_whitespace().any(|word| word == signal)
+    }
+
+    fn contains_signal(normalized: &str, signal: &str) -> bool {
+        if signal.contains(' ') {
+            normalized.contains(signal)
+        } else {
+            contains_signal_word(normalized, signal)
+        }
+    }
+
+    fn memory_extraction_plan(
+        user_text: &str,
+        known_people: &[RelationshipProfile],
+    ) -> MemoryExtractionPlan {
+        let normalized = normalized_signal_text(user_text);
+        let words = normalized.split_whitespace().collect::<Vec<_>>();
+        let compact = words.join(" ");
+        let trivial = words.len() <= 4
+            && matches!(
+                compact.as_str(),
+                "" | "ok"
+                    | "okay"
+                    | "yes"
+                    | "no"
+                    | "sure"
+                    | "thanks"
+                    | "thank you"
+                    | "got it"
+                    | "makes sense"
+                    | "hi"
+                    | "hello"
+                    | "hey"
+            );
+        if trivial {
+            return MemoryExtractionPlan::default();
+        }
+
+        let correction_signal = [
+            "remember",
+            "forget",
+            "forgot",
+            "correction",
+            "correct",
+            "actually",
+            "not",
+        ]
+        .iter()
+        .any(|signal| contains_signal(&normalized, signal));
+        let relationship_signal = [
+            "mother",
+            "mom",
+            "mum",
+            "father",
+            "dad",
+            "parent",
+            "parents",
+            "brother",
+            "sister",
+            "sibling",
+            "partner",
+            "wife",
+            "husband",
+            "spouse",
+            "girlfriend",
+            "boyfriend",
+            "friend",
+            "family",
+            "boss",
+            "coworker",
+            "colleague",
+            "therapist",
+            "doctor",
+            "she",
+            "her",
+            "hers",
+            "he",
+            "him",
+            "his",
+            "they",
+            "them",
+        ]
+        .iter()
+        .any(|signal| contains_signal(&normalized, signal));
+        let known_person_signal = known_people.iter().any(|person| {
+            [
+                person.slug.as_str(),
+                person.display_name.as_str(),
+                person.relationship_type.as_str(),
+            ]
+            .iter()
+            .filter(|value| !value.trim().is_empty())
+            .any(|value| {
+                let value = normalized_signal_text(value);
+                value
+                    .split_whitespace()
+                    .all(|part| contains_signal_word(&normalized, part))
+            })
+        });
+        let proper_name_signal = user_text
+            .split_whitespace()
+            .skip(1)
+            .filter_map(|word| {
+                word.trim_matches(|ch: char| !ch.is_alphabetic())
+                    .chars()
+                    .next()
+            })
+            .any(char::is_uppercase);
+        let mentions_person = relationship_signal || known_person_signal || proper_name_signal;
+        let episode_signal = [
+            "yesterday",
+            "today",
+            "tonight",
+            "last night",
+            "last week",
+            "last month",
+            "this morning",
+            "this afternoon",
+            "earlier",
+            "ago",
+            "when",
+            "happened",
+            "said",
+            "told",
+            "asked",
+            "called",
+            "texted",
+            "messaged",
+            "went",
+            "came",
+            "saw",
+            "met",
+            "argued",
+            "fight",
+            "conversation",
+            "meeting",
+            "appointment",
+        ]
+        .iter()
+        .any(|signal| contains_signal(&normalized, signal));
+
+        MemoryExtractionPlan {
+            graph: !words.is_empty() || correction_signal,
+            relationship_profiles: mentions_person,
+            episodes: episode_signal,
+            social_relationships: mentions_person,
+        }
+    }
+
+    fn should_refresh_session_summary(logs: &[ChatLog], interval: usize) -> bool {
+        let user_messages = logs.iter().filter(|log| log.role == "user").count();
+        user_messages == 1 || (user_messages > 1 && user_messages % interval.max(1) == 0)
+    }
+
+    fn history_before_current_user(
+        mut logs: Vec<ChatLog>,
+        current_user_content: &str,
+        max_messages: usize,
+    ) -> Vec<ChatLog> {
+        if logs.last().is_some_and(|log| {
+            log.role == "user" && log.content.trim() == current_user_content.trim()
+        }) {
+            logs.pop();
+        }
+        if logs.len() > max_messages {
+            logs.drain(..logs.len() - max_messages);
+        }
+        logs
+    }
+
+    fn trim_message_history(history: &mut Vec<Message>, max_messages: usize) {
+        if history.len() > max_messages {
+            history.drain(..history.len() - max_messages);
+        }
     }
 
     async fn send_visible_stream(
@@ -3800,7 +4018,7 @@ mod runtime {
             let openrouter_key =
                 std::env::var("OPENROUTER_API_KEY").context("Set OPENROUTER_API_KEY")?;
             let openrouter_model = std::env::var("OPENROUTER_MODEL")
-                .unwrap_or_else(|_| "moonshotai/kimi-k2-thinking".to_string());
+                .unwrap_or_else(|_| DEFAULT_THERAPIST_MODEL.to_string());
             let mut openrouter_builder = openrouter::Client::builder().api_key(openrouter_key);
             if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
                 openrouter_builder = openrouter_builder.base_url(&base_url);
@@ -5042,13 +5260,23 @@ mod runtime {
                 return Ok(());
             }
 
+            let interval = env_usize(
+                "SESSION_SUMMARY_EVERY_N_EXCHANGES",
+                DEFAULT_SESSION_SUMMARY_INTERVAL,
+                1,
+                100,
+            );
+            if !should_refresh_session_summary(&logs, interval) {
+                return Ok(());
+            }
+
             let transcript = compress_chat_logs(&logs, 12_000);
             if transcript.trim().is_empty() {
                 return Ok(());
             }
 
             let model = std::env::var("SESSION_SUMMARY_MODEL")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+                .unwrap_or_else(|_| DEFAULT_SESSION_SUMMARY_MODEL.to_string());
             let extractor = self
                 .openrouter_client
                 .extractor::<SessionSummaryData>(&model)
@@ -5463,8 +5691,10 @@ mod runtime {
             let memory_id = format!("episode:{}:{}", episode.user_id, episode_id);
             let user_id = episode.user_id.clone();
             let embedding_model_name = std::env::var("EMBEDDING_MODEL")
-                .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
-            let embedding_model = self.embedding_client.embedding_model(embedding_model_name);
+                .unwrap_or_else(|_| DEFAULT_EMBEDDING_MODEL.to_string());
+            let embedding_model = self
+                .embedding_client
+                .embedding_model(embedding_model_name.clone());
             let content = format!("{}\n\n{}", episode.title, episode.narrative);
             let embedding = embedding_model
                 .embed_text(&content)
@@ -5492,7 +5722,7 @@ mod runtime {
                 format!("encrypted_memory:{}:tags", memory_id).as_bytes(),
             )?;
             self.conn.call(move |conn| {
-                conn.execute("INSERT INTO encrypted_memory (id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, tags_ciphertext) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET title_ciphertext = excluded.title_ciphertext, content_ciphertext = excluded.content_ciphertext, embedding_ciphertext = excluded.embedding_ciphertext, tags_ciphertext = excluded.tags_ciphertext", rusqlite::params![memory_id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, tags_ciphertext]).map_err(tokio_rusqlite::Error::Rusqlite)
+                conn.execute("INSERT INTO encrypted_memory (id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, embedding_model, tags_ciphertext) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET title_ciphertext = excluded.title_ciphertext, content_ciphertext = excluded.content_ciphertext, embedding_ciphertext = excluded.embedding_ciphertext, embedding_model = excluded.embedding_model, tags_ciphertext = excluded.tags_ciphertext", rusqlite::params![memory_id, user_id, title_ciphertext, content_ciphertext, embedding_ciphertext, embedding_model_name, tags_ciphertext]).map_err(tokio_rusqlite::Error::Rusqlite)
             }).await.context("Writing encrypted episode vector row")?;
             Ok(())
         }
@@ -5504,36 +5734,50 @@ mod runtime {
         ) -> Result<Vec<MemoryCandidate>> {
             let dek = self.active_dek(user_id)?;
             let uid = user_id.to_string();
-            let indexed: i64 = self
+            let model_name = std::env::var("EMBEDDING_MODEL")
+                .unwrap_or_else(|_| DEFAULT_EMBEDDING_MODEL.to_string());
+            let needs_reindex: bool = self
                 .conn
                 .call({
                     let uid = uid.clone();
+                    let model_name = model_name.clone();
                     move |conn| {
                         conn.query_row(
-                            "SELECT COUNT(*) FROM encrypted_memory WHERE user_id = ?1",
-                            [uid],
-                            |row| row.get(0),
+                            "SELECT EXISTS(SELECT 1 FROM encrypted_memory WHERE user_id = ?1 AND embedding_model <> ?2) OR NOT EXISTS(SELECT 1 FROM encrypted_memory WHERE user_id = ?1)",
+                            rusqlite::params![uid, model_name],
+                            |row| row.get::<_, bool>(0),
                         )
                         .map_err(tokio_rusqlite::Error::Rusqlite)
                     }
                 })
                 .await?;
-            if indexed == 0 {
-                for episode in self.list_episodes(uid.clone()).await.unwrap_or_default() {
-                    let _ = self.index_episode_memory(&episode).await;
+            if needs_reindex {
+                for episode in self.list_episodes(uid.clone()).await? {
+                    self.index_episode_memory(&episode).await?;
                 }
+                self.conn
+                    .call({
+                        let uid = uid.clone();
+                        let model_name = model_name.clone();
+                        move |conn| {
+                            conn.execute(
+                                "DELETE FROM encrypted_memory WHERE user_id = ?1 AND embedding_model <> ?2",
+                                rusqlite::params![uid, model_name],
+                            )
+                            .map_err(tokio_rusqlite::Error::Rusqlite)
+                        }
+                    })
+                    .await?;
             }
-            let model_name = std::env::var("EMBEDDING_MODEL")
-                .unwrap_or_else(|_| openai::TEXT_EMBEDDING_ADA_002.to_string());
-            let model = self.embedding_client.embedding_model(model_name);
+            let model = self.embedding_client.embedding_model(model_name.clone());
             let query_vec = model
                 .embed_text(query)
                 .await
                 .map_err(|error| anyhow::anyhow!("Embedding memory query: {}", error))?
                 .vec;
             self.conn.call(move |conn| {
-                let mut stmt = conn.prepare("SELECT id, title_ciphertext, content_ciphertext, embedding_ciphertext FROM encrypted_memory WHERE user_id = ?1")?;
-                let rows = stmt.query_map([uid.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?)))?;
+                let mut stmt = conn.prepare("SELECT id, title_ciphertext, content_ciphertext, embedding_ciphertext FROM encrypted_memory WHERE user_id = ?1 AND embedding_model = ?2")?;
+                let rows = stmt.query_map(rusqlite::params![uid.clone(), model_name], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Vec<u8>>(3)?)))?;
                 let mut hits = Vec::new();
                 for row in rows {
                     let (id, title, content, embedding) = row?;
@@ -5656,7 +5900,7 @@ mod runtime {
             };
 
             let model = std::env::var("RELATIONSHIP_PROFILE_MODEL")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
             let extractor = self
                 .openrouter_client
                 .extractor::<RelationshipProfileDelta>(&model)
@@ -5750,7 +5994,7 @@ mod runtime {
             };
 
             let model = std::env::var("SOCIAL_RELATIONSHIP_MODEL")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
             let extractor = self
                 .openrouter_client
                 .extractor::<SocialRelationshipDelta>(&model)
@@ -5832,7 +6076,7 @@ mod runtime {
                 graph_node_context(patient_graph)
             );
             let model = std::env::var("EPISODE_EXTRACTOR_MODEL")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
             let extractor = self
                 .openrouter_client
                 .extractor::<EpisodeDelta>(&model)
@@ -6304,7 +6548,7 @@ mod runtime {
             );
 
             let model = std::env::var("GRAPH_EXTRACTOR_MODEL")
-                .unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
             let extractor = self
                 .openrouter_client
                 .extractor::<ConversationGraphDelta>(&model)
@@ -6392,50 +6636,67 @@ mod runtime {
             _reply: String,
         ) -> Result<Option<String>> {
             let source_text = authoritative_memory_source(&prompt);
+            let known_people = self
+                .list_relationship_profiles(user_id.clone())
+                .await
+                .unwrap_or_default();
+            let plan = memory_extraction_plan(&prompt, &known_people);
             let mut headline = None;
 
             // These extractors are independent. A transient provider or
             // schema failure in one must not prevent the remaining memory
             // projections from being persisted.
-            match timeout(
-                Duration::from_secs(30),
-                self.update_graph_from_exchange(user_id.clone(), prompt.clone()),
-            )
-            .await
-            {
-                Ok(Ok(value)) => headline = headline.or(value),
-                Ok(Err(error)) => eprintln!("[graph_update] {}", error),
-                Err(_) => eprintln!("[graph_update] timed out after 30 seconds"),
+            if plan.graph {
+                match timeout(
+                    Duration::from_secs(30),
+                    self.update_graph_from_exchange(user_id.clone(), prompt.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => headline = headline.or(value),
+                    Ok(Err(error)) => eprintln!("[graph_update] {}", error),
+                    Err(_) => eprintln!("[graph_update] timed out after 30 seconds"),
+                }
             }
-            match timeout(
-                Duration::from_secs(30),
-                self.sync_relationship_profiles_from_text(user_id.clone(), source_text.clone()),
-            )
-            .await
-            {
-                Ok(Ok(value)) => headline = headline.or(value),
-                Ok(Err(error)) => eprintln!("[relationship_profile_update] {}", error),
-                Err(_) => eprintln!("[relationship_profile_update] timed out after 30 seconds"),
+            if plan.relationship_profiles {
+                match timeout(
+                    Duration::from_secs(30),
+                    self.sync_relationship_profiles_from_text(user_id.clone(), source_text.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => headline = headline.or(value),
+                    Ok(Err(error)) => eprintln!("[relationship_profile_update] {}", error),
+                    Err(_) => {
+                        eprintln!("[relationship_profile_update] timed out after 30 seconds")
+                    }
+                }
             }
-            match timeout(
-                Duration::from_secs(30),
-                self.sync_episodes_from_text(user_id.clone(), session_id, prompt),
-            )
-            .await
-            {
-                Ok(Ok(value)) => headline = headline.or(value),
-                Ok(Err(error)) => eprintln!("[episode_update] {}", error),
-                Err(_) => eprintln!("[episode_update] timed out after 30 seconds"),
+            if plan.episodes {
+                match timeout(
+                    Duration::from_secs(30),
+                    self.sync_episodes_from_text(user_id.clone(), session_id, prompt),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => headline = headline.or(value),
+                    Ok(Err(error)) => eprintln!("[episode_update] {}", error),
+                    Err(_) => eprintln!("[episode_update] timed out after 30 seconds"),
+                }
             }
-            match timeout(
-                Duration::from_secs(30),
-                self.sync_social_relationships_from_text(user_id, source_text),
-            )
-            .await
-            {
-                Ok(Ok(value)) => headline = headline.or(value),
-                Ok(Err(error)) => eprintln!("[social_relationship_update] {}", error),
-                Err(_) => eprintln!("[social_relationship_update] timed out after 30 seconds"),
+            if plan.social_relationships {
+                match timeout(
+                    Duration::from_secs(30),
+                    self.sync_social_relationships_from_text(user_id, source_text),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => headline = headline.or(value),
+                    Ok(Err(error)) => eprintln!("[social_relationship_update] {}", error),
+                    Err(_) => {
+                        eprintln!("[social_relationship_update] timed out after 30 seconds")
+                    }
+                }
             }
             Ok(headline)
         }
@@ -6457,7 +6718,16 @@ mod runtime {
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(session_id) {
-                    let db_logs = self.get_history(session_id.to_string()).await?;
+                    let db_logs = history_before_current_user(
+                        self.get_history(session_id.to_string()).await?,
+                        &prompt,
+                        env_usize(
+                            "MAX_AGENT_HISTORY_MESSAGES",
+                            DEFAULT_MAX_HISTORY_MESSAGES,
+                            4,
+                            200,
+                        ),
+                    );
                     let mut msgs = Vec::new();
                     for log in db_logs {
                         if log.role == "user" {
@@ -6514,6 +6784,15 @@ mod runtime {
             self.save_message(session_id.to_string(), "assistant".into(), reply.clone())
                 .await?;
 
+            trim_message_history(
+                &mut history,
+                env_usize(
+                    "MAX_AGENT_HISTORY_MESSAGES",
+                    DEFAULT_MAX_HISTORY_MESSAGES,
+                    4,
+                    200,
+                ),
+            );
             let mut guard = self.histories.write().await;
             guard.insert(session_id.to_string(), (Instant::now(), history));
 
@@ -6561,7 +6840,16 @@ mod runtime {
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(session_id) {
-                    let db_logs = self.get_history(session_id.to_string()).await?;
+                    let db_logs = history_before_current_user(
+                        self.get_history(session_id.to_string()).await?,
+                        &request_label,
+                        env_usize(
+                            "MAX_AGENT_HISTORY_MESSAGES",
+                            DEFAULT_MAX_HISTORY_MESSAGES,
+                            4,
+                            200,
+                        ),
+                    );
                     let mut msgs = Vec::new();
                     for log in db_logs {
                         if log.role == "user" {
@@ -6599,6 +6887,15 @@ mod runtime {
             self.save_message(session_id.to_string(), "assistant".into(), reply.clone())
                 .await?;
 
+            trim_message_history(
+                &mut history,
+                env_usize(
+                    "MAX_AGENT_HISTORY_MESSAGES",
+                    DEFAULT_MAX_HISTORY_MESSAGES,
+                    4,
+                    200,
+                ),
+            );
             let mut guard = self.histories.write().await;
             guard.insert(session_id.to_string(), (Instant::now(), history));
 
@@ -6647,7 +6944,16 @@ mod runtime {
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(&session_id) {
-                    let db_logs = self.get_history(session_id.clone()).await?;
+                    let db_logs = history_before_current_user(
+                        self.get_history(session_id.clone()).await?,
+                        &request_label,
+                        env_usize(
+                            "MAX_AGENT_HISTORY_MESSAGES",
+                            DEFAULT_MAX_HISTORY_MESSAGES,
+                            4,
+                            200,
+                        ),
+                    );
                     let mut msgs = Vec::new();
                     for log in db_logs {
                         if log.role == "user" {
@@ -6778,6 +7084,15 @@ mod runtime {
                         })),
                     });
                 }
+                trim_message_history(
+                    &mut history,
+                    env_usize(
+                        "MAX_AGENT_HISTORY_MESSAGES",
+                        DEFAULT_MAX_HISTORY_MESSAGES,
+                        4,
+                        200,
+                    ),
+                );
                 let mut guard = runtime.histories.write().await;
                 guard.insert(session_id_clone, (Instant::now(), history));
             });
@@ -6801,7 +7116,16 @@ mod runtime {
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
                 if !guard.contains_key(&session_id) {
-                    let db_logs = self.get_history(session_id.clone()).await?;
+                    let db_logs = history_before_current_user(
+                        self.get_history(session_id.clone()).await?,
+                        &prompt,
+                        env_usize(
+                            "MAX_AGENT_HISTORY_MESSAGES",
+                            DEFAULT_MAX_HISTORY_MESSAGES,
+                            4,
+                            200,
+                        ),
+                    );
                     let mut msgs = Vec::new();
                     for log in db_logs {
                         if log.role == "user" {
@@ -6942,6 +7266,15 @@ mod runtime {
                             })),
                         });
                     }
+                    trim_message_history(
+                        &mut history,
+                        env_usize(
+                            "MAX_AGENT_HISTORY_MESSAGES",
+                            DEFAULT_MAX_HISTORY_MESSAGES,
+                            4,
+                            200,
+                        ),
+                    );
                     let mut guard = runtime.histories.write().await;
                     guard.insert(session_id_clone, (Instant::now(), history));
                 }),
@@ -7647,6 +7980,88 @@ mod runtime {
         }
 
         #[test]
+        fn test_memory_extraction_plan_skips_trivial_acknowledgements() {
+            assert_eq!(
+                memory_extraction_plan("Thank you", &[]),
+                MemoryExtractionPlan::default()
+            );
+        }
+
+        #[test]
+        fn test_memory_extraction_plan_keeps_short_emotional_material() {
+            let plan = memory_extraction_plan("I feel devastated", &[]);
+
+            assert!(plan.graph);
+        }
+
+        #[test]
+        fn test_memory_extraction_plan_routes_relational_episode() {
+            let plan =
+                memory_extraction_plan("Yesterday my wife told me she wants to move out.", &[]);
+
+            assert!(plan.graph);
+            assert!(plan.relationship_profiles);
+            assert!(plan.episodes);
+            assert!(plan.social_relationships);
+        }
+
+        #[test]
+        fn test_memory_extraction_plan_recognizes_known_person() {
+            let known_people = vec![RelationshipProfile {
+                slug: "test_partner".into(),
+                display_name: "Test Partner".into(),
+                relationship_type: "wife".into(),
+                ..RelationshipProfile::default()
+            }];
+            let plan = memory_extraction_plan("Test Partner seems distant lately", &known_people);
+
+            assert!(plan.relationship_profiles);
+            assert!(plan.social_relationships);
+        }
+
+        #[test]
+        fn test_session_summary_refresh_schedule() {
+            let logs = (0..4)
+                .flat_map(|index| {
+                    [
+                        ChatLog {
+                            role: "user".into(),
+                            content: format!("user {index}"),
+                        },
+                        ChatLog {
+                            role: "assistant".into(),
+                            content: format!("assistant {index}"),
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>();
+
+            assert!(should_refresh_session_summary(&logs[..2], 4));
+            assert!(!should_refresh_session_summary(&logs[..4], 4));
+            assert!(should_refresh_session_summary(&logs, 4));
+        }
+
+        #[test]
+        fn test_history_before_current_user_deduplicates_and_caps() {
+            let logs = (0..8)
+                .map(|index| ChatLog {
+                    role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+                    content: format!("message {index}"),
+                })
+                .chain(std::iter::once(ChatLog {
+                    role: "user".into(),
+                    content: "current prompt".into(),
+                }))
+                .collect::<Vec<_>>();
+
+            let history = history_before_current_user(logs, "current prompt", 4);
+
+            assert_eq!(history.len(), 4);
+            assert_eq!(history[0].content, "message 4");
+            assert_eq!(history[3].content, "message 7");
+        }
+
+        #[test]
         fn test_relationship_delta_removes_superseded_memory_before_merge() {
             let existing = RelationshipProfile {
                 user_id: "u1".into(),
@@ -7866,6 +8281,37 @@ mod runtime {
             assert_eq!(output.results[0].session_title, "Garden plans");
             assert!(output.results[0].excerpt.contains("kitchen window"));
             assert!(!output.results[0].excerpt.contains("somebody else"));
+        }
+
+        #[tokio::test]
+        async fn ensure_schema_adds_embedding_model_to_existing_vector_store() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE encrypted_memory (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        title_ciphertext BLOB NOT NULL,
+                        content_ciphertext BLOB NOT NULL,
+                        embedding_ciphertext BLOB,
+                        tags_ciphertext BLOB
+                    );",
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+            ensure_schema(&conn).await.unwrap();
+
+            let has_model = conn
+                .call(|conn| {
+                    table_has_column(conn, "encrypted_memory", "embedding_model")
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .unwrap();
+            assert!(has_model);
         }
 
         #[tokio::test]

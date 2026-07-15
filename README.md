@@ -68,6 +68,22 @@ header after both image pushes succeed. Set the GHCR package visibility to
 **Public** once in GitHub package settings; subsequent pushes use the
 repository's `GITHUB_TOKEN`.
 
+### Model and usage configuration
+
+The production defaults use `z-ai/glm-5.2` for therapist and drafting replies,
+`openai/gpt-5.4-nano` for structured memory extraction,
+`openai/gpt-4o-mini` for lightweight session titles, and
+`text-embedding-3-small` for vector recall. Override them with
+`OPENROUTER_MODEL`, `GRAPH_EXTRACTOR_MODEL`, `RELATIONSHIP_PROFILE_MODEL`,
+`SOCIAL_RELATIONSHIP_MODEL`, `EPISODE_EXTRACTOR_MODEL`,
+`SESSION_SUMMARY_MODEL`, and `EMBEDDING_MODEL`.
+
+Session titles are refreshed after the first exchange and every four exchanges
+thereafter. `SESSION_SUMMARY_EVERY_N_EXCHANGES` changes that interval. Model
+prompts retain the most recent 24 messages by default; use
+`MAX_AGENT_HISTORY_MESSAGES` to tune the bounded history window. Complete chat
+history remains encrypted in SQLite and available to focused recall.
+
 ## Design System
 
 *   **Colors**: Deep Void Green, Parchment, Integral Turquoise, Systemic Yellow.

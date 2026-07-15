@@ -22,11 +22,16 @@
     </header>
 
     <div id="mind-map-container" class="flex-1 relative overflow-hidden">
-        {% if graph_data.nodes|length == 0 %}
+        {% if graph_data.nodes|length == 0 and graph_data.people|length == 0 and graph_data.episodes|length == 0 %}
         <div class="absolute inset-0 flex items-center justify-center">
             <div class="text-center">
+                {% if graph_data.load_error %}
+                <p class="text-systemic-yellow-soft text-sm mb-2">{{ graph_data.load_error }}</p>
+                <p class="text-sage-mist/60 text-xs">Your saved memories have not been changed.</p>
+                {% else %}
                 <p class="text-sage-mist text-sm mb-2">No concepts mapped yet</p>
                 <p class="text-sage-mist/60 text-xs">Start a conversation to build your mind map</p>
+                {% endif %}
             </div>
         </div>
         {% endif %}
@@ -98,7 +103,7 @@ function allGraphEdges() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-    if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+    if (graphData && allGraphNodes().length > 0) {
         window.renderMindMap('mind-map-canvas', graphData, openInspector);
     }
     renderLegend();

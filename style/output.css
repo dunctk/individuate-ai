@@ -1795,11 +1795,11 @@ input[type="range"]::-webkit-slider-thumb {
   height: 44px;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 0;
   border: 1px solid transparent;
   border-radius: 9999px;
   color: #6B8A82;
-  background: rgba(15, 28, 24, 0.28);
+  background: transparent;
   transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease, transform 100ms ease-out;
 }
 
@@ -1830,8 +1830,8 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .thread-copy-button svg {
-  width: 19px;
-  height: 19px;
+  width: 17px;
+  height: 17px;
   flex: none;
   stroke-width: 1.8;
   stroke-linecap: round;
@@ -1848,24 +1848,6 @@ input[type="range"]::-webkit-slider-thumb {
 
 .thread-copy-button[data-copied="true"] .thread-copy-check {
   display: block;
-}
-
-.thread-copy-label {
-  display: none;
-}
-
-@media (min-width: 768px) {
-  .thread-copy-button {
-    width: auto;
-    padding: 0 13px;
-  }
-
-  .thread-copy-label {
-    display: inline;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-  }
 }
 
 /* ── Primary action button — systemic-integral gradient ───────────── */
@@ -1896,6 +1878,18 @@ input[type="range"]::-webkit-slider-thumb {
 /* ── Chip — preset suggestion ─────────────────────────────────────── */
 
 /* ── Mind-map review loop — compact lab notes over the living graph ── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
 
 .pointer-events-none {
   pointer-events: none;

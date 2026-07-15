@@ -67,16 +67,6 @@
                 </svg>
             </button>
             <span class="brand-mark hidden sm:inline text-lg leading-none">IndividuateAI</span>
-            <button id="copy-thread-button" type="button" class="thread-copy-button" onclick="copyThreadMarkdown()" aria-label="Copy entire thread as Markdown" title="Copy entire thread as Markdown" disabled>
-                <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                    <rect x="8" y="8" width="11" height="11" rx="2"></rect>
-                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
-                </svg>
-                <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="m5 12 4 4L19 6"></path>
-                </svg>
-                <span class="thread-copy-label">Copy thread</span>
-            </button>
         </div>
         <div class="flex min-w-0 items-center gap-1">
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
@@ -143,6 +133,16 @@
                     <div class="flex items-center gap-1.5">
                         <button onclick="setMode('therapist')" id="mode-therapist" class="pill" data-active="true">Therapist</button>
                         <button onclick="setMode('draft')" id="mode-draft" class="pill" data-active="false">Draft</button>
+                        <button id="copy-thread-button" type="button" class="thread-copy-button" onclick="copyThreadMarkdown()" aria-label="Copy entire thread as Markdown" title="Copy thread as Markdown" disabled>
+                            <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                            </svg>
+                            <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="m5 12 4 4L19 6"></path>
+                            </svg>
+                            <span class="thread-copy-label sr-only">Copy thread</span>
+                        </button>
                     </div>
                     <label class="auto-read-toggle" for="auto-read-responses">
                         <input id="auto-read-responses" type="checkbox" onchange="setAutoReadResponses(this.checked)">

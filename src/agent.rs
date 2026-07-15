@@ -2905,8 +2905,8 @@ mod runtime {
             .map(|episode| (normalize_slug(&episode.id), episode))
             .collect::<HashMap<_, _>>();
         let labels = person_label_lookup(profiles);
-        let mut people = HashMap::<String, String>::new();
-        let mut episode_ids = HashSet::<String>::new();
+        let mut people = labels.clone();
+        let mut episode_ids = episode_by_id.keys().cloned().collect::<HashSet<_>>();
         let mut cross_edges = Vec::<serde_json::Value>::new();
         let mut seen_edges = HashSet::<(String, String, String, String)>::new();
 
@@ -8141,6 +8141,29 @@ mod runtime {
                         && edge["from"] == "episode:test_call"
                         && edge["to"] == "fear_of_rejection"
                 }));
+        }
+
+        #[test]
+        fn test_mind_map_payload_keeps_unlinked_people_and_episodes_visible() {
+            let profiles = vec![test_profile("partner", "Test Partner", "wife")];
+            let episodes = vec![Episode {
+                user_id: "test-user".to_string(),
+                id: "birthday_conversation".to_string(),
+                title: "Birthday conversation".to_string(),
+                narrative: "Test Partner talked about tracking 3 reminders.".to_string(),
+                occurred_at: None,
+                session_id: None,
+                user_quotes: Vec::new(),
+                created_at: None,
+                updated_at: None,
+            }];
+
+            let payload =
+                build_mind_map_payload(&PatientGraph::default(), &profiles, &episodes, &[]);
+
+            assert_eq!(payload["nodes"].as_array().unwrap().len(), 0);
+            assert_eq!(payload["people"][0]["label"], "Test Partner");
+            assert_eq!(payload["episodes"][0]["id"], "birthday_conversation");
         }
 
         #[test]

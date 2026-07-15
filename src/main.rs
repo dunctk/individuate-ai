@@ -351,10 +351,20 @@ async fn mind_map_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         None => return Redirect::temporary("/login").into_response(),
     };
     let runtime = agent_runtime().await.unwrap();
-    let graph = runtime
-        .get_mind_map_payload(user.id.clone())
-        .await
-        .unwrap_or_else(|_| serde_json::json!({"nodes":[],"edges":[]}));
+    let graph = match runtime.get_mind_map_payload(user.id.clone()).await {
+        Ok(graph) => graph,
+        Err(error) => {
+            tracing::error!("Could not load mind map: {error}");
+            serde_json::json!({
+                "nodes": [],
+                "edges": [],
+                "people": [],
+                "episodes": [],
+                "cross_edges": [],
+                "load_error": "The mind map could not load. Refresh to try again."
+            })
+        }
+    };
     let html = templates::render_mind_map(&state.templates, &graph, &user.id);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }

@@ -16,33 +16,6 @@
             class="w-full bg-[#1A2B26] border border-sage-mist/30 rounded-lg px-3 py-1.5 text-xs text-parchment placeholder:text-sage-mist/40 focus:outline-none focus:border-sage-mist transition-colors">
     </div>
 
-    <div class="space-y-3">
-        <div>
-            <label class="block text-xs text-sage-mist mb-1">Accountability</label>
-            <div class="relative">
-                <input type="range" min="0" max="100" value="50" oninput="setSlider('accountability', this.value)"
-                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
-                <span id="accountability-value" class="text-xs text-integral-turquoise ml-1">50%</span>
-            </div>
-        </div>
-        <div>
-            <label class="block text-xs text-sage-mist mb-1">Spirituality</label>
-            <div class="relative">
-                <input type="range" min="0" max="100" value="50" oninput="setSlider('spirituality', this.value)"
-                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
-                <span id="spirituality-value" class="text-xs text-integral-turquoise ml-1">50%</span>
-            </div>
-        </div>
-        <div>
-            <label class="block text-xs text-sage-mist mb-1">Directness</label>
-            <div class="relative">
-                <input type="range" min="0" max="100" value="50" oninput="setSlider('directness', this.value)"
-                    class="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-sage-mist/30 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-integral-turquoise [&::-webkit-slider-thumb]:cursor-pointer">
-                <span id="directness-value" class="text-xs text-integral-turquoise ml-1">50%</span>
-            </div>
-        </div>
-    </div>
-
     <div class="space-y-1">
         {% for session in sessions %}
         <button onclick="selectSession('{{ session.id }}')"

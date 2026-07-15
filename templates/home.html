@@ -315,11 +315,6 @@ function setMode(mode) {
         : 'What happened, and what do you want to say?';
 }
 
-function setSlider(id, value) {
-    const el = document.getElementById(id + '-value');
-    if (el) el.textContent = value + '%';
-}
-
 function selectSession(sessionId) {
     window.location.href = '/chat?session=' + sessionId;
 }

@@ -12,7 +12,8 @@ use base64::Engine;
 use dashmap::DashMap;
 use individuateai::agent::{
     self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
-    stream_handler, AuthSession, RelationshipProfile, User,
+    is_supported_tts_voice, stream_handler, AuthSession, MemoryEdit, RelationshipProfile, User,
+    DEFAULT_TTS_VOICE,
 };
 use individuateai::fileserv;
 use individuateai::templates;
@@ -64,6 +65,27 @@ impl RateLimiter {
         entry.push(now);
         true
     }
+}
+
+fn configured_tts_voice() -> String {
+    std::env::var("DEEPGRAM_TTS_MODEL")
+        .ok()
+        .filter(|voice| is_supported_tts_voice(voice))
+        .unwrap_or_else(|| DEFAULT_TTS_VOICE.to_string())
+}
+
+async fn resolve_user_tts_voice(user_id: &str) -> String {
+    let stored = match agent_runtime().await {
+        Ok(runtime) => runtime
+            .get_tts_voice(user_id.to_string())
+            .await
+            .ok()
+            .flatten(),
+        Err(_) => None,
+    };
+    stored
+        .filter(|voice| is_supported_tts_voice(voice))
+        .unwrap_or_else(configured_tts_voice)
 }
 
 #[tokio::main]
@@ -121,9 +143,17 @@ async fn main() {
         .route("/api/sessions/:id/history", get(chat_history))
         .route("/api/profiles", get(list_profiles))
         .route("/api/profiles/:slug", post(save_profile))
+        .route(
+            "/api/settings/voice",
+            get(get_voice_setting).post(save_voice_setting),
+        )
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/memory-status", get(memory_status))
+        .route(
+            "/api/memories/:kind/:id",
+            get(get_editable_memory).post(update_editable_memory),
+        )
         .route("/api/deepgram/token", post(deepgram_token_handler))
         .route("/api/transcribe", post(transcribe_handler))
         .route("/api/speak", post(speak_handler))
@@ -396,7 +426,19 @@ async fn profile_drawer_fragment(
         .map(|s| s.as_str())
         .or_else(|| profiles.first().map(|profile| profile.slug.as_str()))
         .unwrap_or("");
-    let html = templates::render_profile_drawer(&state.templates, &profiles, selected_slug);
+    let selected_voice = runtime
+        .get_tts_voice(user.id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|voice| is_supported_tts_voice(voice))
+        .unwrap_or_else(configured_tts_voice);
+    let html = templates::render_profile_drawer(
+        &state.templates,
+        &profiles,
+        selected_slug,
+        &selected_voice,
+    );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -620,6 +662,109 @@ async fn get_episodes(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 }
 
+async fn get_editable_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open memory store: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not load memory"})),
+            )
+                .into_response();
+        }
+    };
+    match runtime.get_editable_memory(user.id, kind, id).await {
+        Ok(Some(memory)) => Json(memory).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Memory not found"})),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("Could not load editable memory: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not load memory"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn update_editable_memory(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+    Json(payload): Json<MemoryEdit>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open memory store: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not save memory"})),
+            )
+                .into_response();
+        }
+    };
+    match runtime
+        .update_editable_memory(user.id, kind, id, payload)
+        .await
+    {
+        Ok(Some(memory)) => Json(memory).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Memory not found"})),
+        )
+            .into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let validation_error = message.starts_with("Memory ")
+                || message.starts_with("Unsupported memory category");
+            if !validation_error {
+                tracing::error!("Could not save editable memory: {error}");
+            }
+            (
+                if validation_error {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                Json(serde_json::json!({
+                    "error": if validation_error { message } else { "Could not save memory".to_string() }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn memory_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
@@ -743,13 +888,16 @@ async fn transcribe_handler(
 }
 
 async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if get_authed_user(&headers, &state.key).await.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        )
-            .into_response();
-    }
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
 
     let api_key = match std::env::var("DEEPGRAM_API_KEY") {
         Ok(value) if !value.trim().is_empty() => value,
@@ -792,8 +940,7 @@ async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMa
             .into_response();
     }
 
-    let tts_model =
-        std::env::var("DEEPGRAM_TTS_MODEL").unwrap_or_else(|_| "aura-2-thalia-en".to_string());
+    let tts_model = resolve_user_tts_voice(&user.id).await;
     let tts_speed = std::env::var("DEEPGRAM_TTS_SPEED")
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
@@ -880,8 +1027,7 @@ async fn speak_handler(
                 .into_response();
         }
     };
-    let model =
-        std::env::var("DEEPGRAM_TTS_MODEL").unwrap_or_else(|_| "aura-2-thalia-en".to_string());
+    let model = resolve_user_tts_voice(&user.id).await;
     let speed = std::env::var("DEEPGRAM_TTS_SPEED")
         .ok()
         .and_then(|value| value.parse::<f32>().ok())
@@ -956,6 +1102,72 @@ struct SaveProfilePayload {
     effective_tone: Vec<String>,
     recent_events: Vec<String>,
     boundaries: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct VoiceSettingPayload {
+    voice: String,
+}
+
+async fn get_voice_setting(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    Json(serde_json::json!({"voice": resolve_user_tts_voice(&user.id).await})).into_response()
+}
+
+async fn save_voice_setting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<VoiceSettingPayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    if !is_supported_tts_voice(&payload.voice) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Unsupported text-to-speech voice"})),
+        )
+            .into_response();
+    }
+
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open settings store: {error}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not save voice setting"})),
+            )
+                .into_response();
+        }
+    };
+    match runtime.set_tts_voice(user.id, payload.voice.clone()).await {
+        Ok(()) => Json(serde_json::json!({"voice": payload.voice})).into_response(),
+        Err(error) => {
+            tracing::error!("Could not save voice setting: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not save voice setting"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn save_profile(

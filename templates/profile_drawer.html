@@ -1,9 +1,53 @@
 <div class="p-4 space-y-4">
     <div class="flex items-center justify-between">
-        <h2 class="text-sm font-fraunces font-semibold text-parchment">Relationship Profiles</h2>
-        <button onclick="closeProfileDrawer()" class="text-sage-mist hover:text-parchment transition-colors">
+        <div>
+            <p class="role-label mb-1">Personalise your space</p>
+            <h2 class="text-lg font-fraunces font-semibold text-parchment">Profiles &amp; settings</h2>
+        </div>
+        <button onclick="closeProfileDrawer()" class="icon-btn" aria-label="Close profiles and settings">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
         </button>
+    </div>
+
+    <section aria-labelledby="response-voice-title" class="rounded-2xl border border-sage-mist/20 bg-void-deep/45 p-3.5">
+        <div class="mb-3">
+            <h3 id="response-voice-title" class="text-base text-parchment">Response voice</h3>
+            <p class="mt-1 text-xs leading-relaxed text-sage-light">Choose the voice used for spoken and auto-read responses. Preview as many as you like.</p>
+        </div>
+        <div class="space-y-2" role="radiogroup" aria-label="Response voice">
+            {% for voice in voices %}
+            <div class="voice-choice" data-selected="{% if voice.id == selected_voice %}true{% else %}false{% endif %}" data-voice="{{ voice.id }}">
+                <button type="button"
+                    class="voice-choice-select"
+                    data-voice="{{ voice.id }}"
+                    data-name="{{ voice.name }}"
+                    role="radio"
+                    aria-checked="{% if voice.id == selected_voice %}true{% else %}false{% endif %}"
+                    onclick="selectTtsVoice(this)">
+                    <span class="voice-choice-mark" aria-hidden="true"><span></span></span>
+                    <span class="min-w-0 text-left">
+                        <span class="block text-sm font-semibold text-parchment">{{ voice.name }}</span>
+                        <span class="mt-0.5 block text-[11px] leading-snug text-sage-light">{{ voice.description }}</span>
+                    </span>
+                </button>
+                <button type="button"
+                    class="voice-preview-button"
+                    data-name="{{ voice.name }}"
+                    data-sample-url="{{ voice.sample_url }}"
+                    onclick="previewTtsVoice(this)"
+                    aria-label="Preview {{ voice.name }}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>
+                </button>
+            </div>
+            {% endfor %}
+        </div>
+        <p id="voice-setting-status" class="mt-2 min-h-[1rem] text-[11px] text-sage-light" role="status" aria-live="polite"></p>
+    </section>
+
+    <div class="flex items-center gap-3 pt-1">
+        <span class="h-px flex-1 bg-sage-mist/20"></span>
+        <h3 class="role-label">Relationship profiles</h3>
+        <span class="h-px flex-1 bg-sage-mist/20"></span>
     </div>
 
     <div>
@@ -81,6 +125,80 @@
     </form>
 </div>
 <script>
+function setVoicePreviewButton(button, state) {
+    if (!button) return;
+    button.dataset.state = state;
+    const name = button.dataset.name || 'voice';
+    button.setAttribute('aria-label', (state === 'playing' ? 'Stop previewing ' : 'Preview ') + name);
+    if (state === 'loading') {
+        button.innerHTML = '<span class="h-4 w-4 animate-spin rounded-full border-2 border-sage-mist/40 border-t-integral-turquoise"></span>';
+    } else if (state === 'playing') {
+        button.innerHTML = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="8" y="8" width="8" height="8" rx="1"/></svg>';
+    } else {
+        button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>';
+    }
+}
+
+function stopVoicePreview() {
+    if (window.individuateVoicePreviewAudio) {
+        window.individuateVoicePreviewAudio.pause();
+        window.individuateVoicePreviewAudio = null;
+    }
+    document.querySelectorAll('.voice-preview-button').forEach(button => setVoicePreviewButton(button, 'idle'));
+}
+
+async function previewTtsVoice(button) {
+    if (window.individuateVoicePreviewAudio && button.dataset.state === 'playing') {
+        stopVoicePreview();
+        return;
+    }
+    stopVoicePreview();
+    setVoicePreviewButton(button, 'loading');
+    const audio = new Audio(button.dataset.sampleUrl);
+    window.individuateVoicePreviewAudio = audio;
+    audio.addEventListener('playing', () => setVoicePreviewButton(button, 'playing'), { once: true });
+    audio.addEventListener('ended', stopVoicePreview, { once: true });
+    audio.addEventListener('error', () => {
+        stopVoicePreview();
+        showToast('Could not play that voice preview', 'error');
+    }, { once: true });
+    try {
+        await audio.play();
+    } catch (_) {
+        stopVoicePreview();
+        showToast('Tap preview again to play this voice', 'error');
+    }
+}
+
+async function selectTtsVoice(button) {
+    const voice = button.dataset.voice;
+    const name = button.dataset.name;
+    const status = document.getElementById('voice-setting-status');
+    button.disabled = true;
+    if (status) status.textContent = 'Saving ' + name + '…';
+    try {
+        const response = await fetch('/api/settings/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || 'Could not save voice');
+        document.querySelectorAll('.voice-choice').forEach(choice => {
+            const selected = choice.dataset.voice === voice;
+            choice.dataset.selected = selected ? 'true' : 'false';
+            choice.querySelector('.voice-choice-select')?.setAttribute('aria-checked', selected ? 'true' : 'false');
+        });
+        window.individuateTtsVoice = voice;
+        if (status) status.textContent = name + ' will read future responses.';
+    } catch (error) {
+        if (status) status.textContent = error.message || 'Could not save voice.';
+        showToast('Could not save voice', 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
 function loadProfile(slug) {
     if (!slug) return;
     const form = document.getElementById('profile-form');

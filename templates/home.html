@@ -67,6 +67,16 @@
                 </svg>
             </button>
             <span class="brand-mark hidden sm:inline text-lg leading-none">IndividuateAI</span>
+            <button id="copy-thread-button" type="button" class="thread-copy-button" onclick="copyThreadMarkdown()" aria-label="Copy entire thread as Markdown" title="Copy entire thread as Markdown" disabled>
+                <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="8" y="8" width="11" height="11" rx="2"></rect>
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                </svg>
+                <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m5 12 4 4L19 6"></path>
+                </svg>
+                <span class="thread-copy-label">Copy thread</span>
+            </button>
         </div>
         <div class="flex min-w-0 items-center gap-1">
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
@@ -94,22 +104,22 @@
              {% if session_id and messages|length == 0 %}hx-get="/fragments/chat/{{ session_id }}" hx-trigger="load" hx-swap="innerHTML"{% endif %}>
             {% for message in messages %}
             {% if message.role == 'user' %}
-            <div class="flex flex-row-reverse gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}">
+            <div class="flex flex-row-reverse gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}" data-chat-role="user">
                 <div class="avatar-orb avatar-user">{{ username[:1]|upper }}</div>
                 <div class="flex flex-col items-end min-w-0 max-w-[78%]">
                     <span class="role-label mb-1 text-right">You</span>
-                    <div class="bubble bubble-user">{{ message.content_html|safe }}</div>
+                    <div class="bubble bubble-user" data-chat-markdown="{{ message.content|e }}">{{ message.content_html|safe }}</div>
                 </div>
             </div>
             {% else %}
-            <div class="flex flex-row gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}">
+            <div class="flex flex-row gap-2.5 items-start animate-grow-in delay-grow-{{ (loop.index0 % 5) + 1 }}" data-chat-role="assistant">
                 <div class="avatar-orb avatar-therapist avatar-video-wrap" aria-label="Therapist">
                     <img class="avatar-still" src="/mandala-avatar.jpg" alt="">
                     <span class="avatar-video-fallback">T</span>
                 </div>
                 <div class="flex flex-col items-start min-w-0 max-w-[78%]">
                     <span class="role-label mb-1">Therapist</span>
-                    <div class="bubble bubble-therapist">{{ message.content_html|safe }}</div>
+                    <div class="bubble bubble-therapist" data-chat-markdown="{{ message.content|e }}">{{ message.content_html|safe }}</div>
                 </div>
             </div>
             {% endif %}
@@ -296,6 +306,7 @@ function openProfileDrawer() {
 }
 
 function closeProfileDrawer() {
+    if (typeof stopVoicePreview === 'function') stopVoicePreview();
     const drawer = document.getElementById('profile-drawer');
     const overlay = document.getElementById('profile-overlay');
     drawer.classList.add('translate-x-full');
@@ -356,7 +367,11 @@ function addMessage(role, content) {
     const wrapper = document.createElement('div');
     wrapper.innerHTML = renderBubble(role, content);
     const message = wrapper.firstElementChild;
+    message.dataset.chatRole = role === 'user' ? 'user' : 'assistant';
+    const bubble = message.querySelector('.bubble');
+    if (bubble) bubble.dataset.chatMarkdown = content || '';
     container.appendChild(message);
+    syncCopyThreadButton();
     scrollChatToBottom();
     return message;
 }
@@ -1049,6 +1064,7 @@ function streamAssistantResponse(prompt) {
             clearInterval(waitingTimer);
             bubble.classList.remove('bubble-streaming');
             bubble.innerHTML = formatChatContent(value || assembled);
+            bubble.dataset.chatMarkdown = value || assembled;
             updateSpokenResponse(value || assembled, true);
             if (avatar) {
                 avatar.classList.remove('avatar-thinking');
@@ -1086,6 +1102,7 @@ function streamAssistantResponse(prompt) {
             }
             hasFirstToken = true;
             assembled += event.data;
+            bubble.dataset.chatMarkdown = assembled;
             updateSpokenResponse(assembled);
             bubble.innerHTML = formatStreamingChatContent(assembled) || renderWaitingMessage();
             scheduleScrollChatToBottom();
@@ -1565,6 +1582,64 @@ function showToast(message, type) {
     }, 3000);
 }
 
+let copyThreadFeedbackTimer = null;
+
+function threadMarkdown() {
+    const rows = Array.from(document.querySelectorAll('#chat-messages [data-chat-role]'));
+    const sections = rows.map((row) => {
+        const bubble = row.querySelector('.bubble');
+        const content = String(bubble?.dataset.chatMarkdown || '')
+            .replace(/\r\n?/g, '\n')
+            .trim();
+        if (!content) return '';
+        const speaker = row.dataset.chatRole === 'user' ? 'You' : 'Therapist';
+        return `## ${speaker}\n\n${content}`;
+    }).filter(Boolean);
+    return sections.length ? `# Conversation\n\n${sections.join('\n\n')}\n` : '';
+}
+
+function syncCopyThreadButton() {
+    const button = document.getElementById('copy-thread-button');
+    if (!button) return;
+    button.disabled = !threadMarkdown();
+}
+
+async function writeClipboardText(text) {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const fallback = document.createElement('textarea');
+    fallback.value = text;
+    fallback.setAttribute('readonly', '');
+    fallback.style.position = 'fixed';
+    fallback.style.opacity = '0';
+    document.body.appendChild(fallback);
+    fallback.select();
+    const copied = document.execCommand('copy');
+    fallback.remove();
+    if (!copied) throw new Error('Clipboard unavailable');
+}
+
+async function copyThreadMarkdown() {
+    const button = document.getElementById('copy-thread-button');
+    const markdown = threadMarkdown();
+    if (!button || !markdown) return;
+    try {
+        await writeClipboardText(markdown);
+        clearTimeout(copyThreadFeedbackTimer);
+        button.dataset.copied = 'true';
+        button.querySelector('.thread-copy-label').textContent = 'Copied';
+        showToast('Thread copied as Markdown');
+        copyThreadFeedbackTimer = setTimeout(() => {
+            button.dataset.copied = 'false';
+            button.querySelector('.thread-copy-label').textContent = 'Copy thread';
+        }, 2200);
+    } catch (_) {
+        showToast('Could not copy the thread', 'error');
+    }
+}
+
 function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
@@ -1786,9 +1861,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const msgs = document.getElementById('chat-messages');
         const empty = document.getElementById('chat-empty');
         if (msgs && empty) empty.classList.toggle('hidden', msgs.children.length > 0);
+        syncCopyThreadButton();
     });
     const target = document.getElementById('chat-messages');
     if (target) mo.observe(target, { childList: true });
+    syncCopyThreadButton();
     if (target && target.children.length > 0) scheduleScrollChatToBottom();
     ensureMemoryStatusBaseline();
     if (new URLSearchParams(window.location.search).get('setup_passkey_sync') === '1') {
@@ -1798,7 +1875,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // After an htmx swap loads chat history, scroll to foot
 document.body.addEventListener('htmx:afterSwap', (e) => {
-    if (e.detail.target.id === 'chat-messages') scheduleScrollChatToBottom();
+    if (e.detail.target.id === 'chat-messages') {
+        scheduleScrollChatToBottom();
+        syncCopyThreadButton();
+    }
 });
 </script>
 {% endblock %}

@@ -5,6 +5,52 @@ pub const DEFAULT_GRAPH_USER_ID: &str = "local-user";
 pub const AUTH_COOKIE_NAME: &str = "auth_token";
 pub const SYNCED_PASSKEY_RECOVERY_REQUIRED: &str =
     "This synced passkey needs your recovery key once on this device";
+pub const DEFAULT_TTS_VOICE: &str = "aura-2-thalia-en";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TtsVoice {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub sample_url: &'static str,
+}
+
+pub const TTS_VOICES: &[TtsVoice] = &[
+    TtsVoice {
+        id: "aura-2-thalia-en",
+        name: "Thalia",
+        description: "Clear, confident, energetic · American",
+        sample_url: "https://static.deepgram.com/examples/Aura-2-thalia.wav",
+    },
+    TtsVoice {
+        id: "aura-2-andromeda-en",
+        name: "Andromeda",
+        description: "Comfortable, expressive, casual · American",
+        sample_url: "https://static.deepgram.com/examples/Aura-2-andromeda.wav",
+    },
+    TtsVoice {
+        id: "aura-2-helena-en",
+        name: "Helena",
+        description: "Caring, natural, friendly · American",
+        sample_url: "https://static.deepgram.com/examples/Aura-2-helena.wav",
+    },
+    TtsVoice {
+        id: "aura-2-apollo-en",
+        name: "Apollo",
+        description: "Confident, comfortable, casual · American",
+        sample_url: "https://static.deepgram.com/examples/Aura-2-apollo.wav",
+    },
+    TtsVoice {
+        id: "aura-2-aries-en",
+        name: "Aries",
+        description: "Warm, energetic, caring · American",
+        sample_url: "https://static.deepgram.com/examples/Aura-2-aries.wav",
+    },
+];
+
+pub fn is_supported_tts_voice(voice: &str) -> bool {
+    TTS_VOICES.iter().any(|candidate| candidate.id == voice)
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct User {
@@ -105,6 +151,14 @@ pub struct SocialGraphNode {
     pub kind: String,
     pub detail: String,
     pub weight: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_field: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -169,15 +223,33 @@ pub struct EpisodeWithLinks {
     pub links: Vec<MemoryLink>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EditableMemory {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    pub category: Option<String>,
+    pub body: Option<String>,
+    pub occurred_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MemoryEdit {
+    pub title: String,
+    pub category: Option<String>,
+    pub body: Option<String>,
+    pub occurred_at: Option<String>,
+}
+
 fn default_memory_link_weight() -> usize {
     1
 }
 
 mod runtime {
     use super::{
-        ChatLog, Episode, EpisodeWithLinks, GraphEdge, GraphNode, MemoryLink, MemoryStatus,
-        PatientGraph, RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode,
-        User,
+        ChatLog, EditableMemory, Episode, EpisodeWithLinks, GraphEdge, GraphNode, MemoryEdit,
+        MemoryLink, MemoryStatus, PatientGraph, RelationshipProfile, Session, SocialGraph,
+        SocialGraphEdge, SocialGraphNode, User,
     };
     use crate::security;
     use std::{
@@ -779,6 +851,12 @@ mod runtime {
                     id TEXT PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    user_id TEXT PRIMARY KEY,
+                    tts_voice TEXT NOT NULL DEFAULT 'aura-2-thalia-en',
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
@@ -1918,6 +1996,10 @@ mod runtime {
                     kind: "person".to_string(),
                     detail: candidate.detail,
                     weight: candidate.weight.max(1),
+                    memory_kind: None,
+                    memory_id: None,
+                    memory_source_id: None,
+                    memory_field: None,
                 },
             );
             resolution.insert(normalize_slug(&candidate.source_slug), node_id.clone());
@@ -2257,12 +2339,19 @@ mod runtime {
         kind: &str,
         label: &str,
         relation: &str,
+        source: (&str, &str),
     ) {
+        let (source_id, source_field) = source;
         let label = label.trim();
         if label.is_empty() {
             return;
         }
-        let id = social_graph_concept_id(kind, label);
+        let id = format!(
+            "profile:{}:{}:{}",
+            normalize_slug(source_id),
+            normalize_slug(source_field),
+            normalize_slug(label)
+        );
         nodes
             .entry(id.clone())
             .and_modify(|node| node.weight += 1)
@@ -2272,9 +2361,54 @@ mod runtime {
                 kind: kind.to_string(),
                 detail: String::new(),
                 weight: 1,
+                memory_kind: Some("profile_item".to_string()),
+                memory_id: Some(id.clone()),
+                memory_source_id: Some(normalize_slug(source_id)),
+                memory_field: Some(source_field.to_string()),
             });
         let key = (from.to_string(), id, relation.to_string());
         *edges.entry(key).or_insert(0) += 1;
+    }
+
+    fn profile_memory_items<'a>(
+        profile: &'a RelationshipProfile,
+        field: &str,
+    ) -> Option<&'a Vec<String>> {
+        match field {
+            "recent_events" => Some(&profile.recent_events),
+            "triggers" => Some(&profile.triggers),
+            "goals" => Some(&profile.goals),
+            "boundaries" => Some(&profile.boundaries),
+            _ => None,
+        }
+    }
+
+    fn profile_memory_items_mut<'a>(
+        profile: &'a mut RelationshipProfile,
+        field: &str,
+    ) -> Option<&'a mut Vec<String>> {
+        match field {
+            "recent_events" => Some(&mut profile.recent_events),
+            "triggers" => Some(&mut profile.triggers),
+            "goals" => Some(&mut profile.goals),
+            "boundaries" => Some(&mut profile.boundaries),
+            _ => None,
+        }
+    }
+
+    fn editable_graph_category(category: &str) -> bool {
+        matches!(
+            category,
+            "Trigger"
+                | "Belief"
+                | "Emotion"
+                | "Somatic"
+                | "Pattern"
+                | "Need"
+                | "Goal"
+                | "Resource"
+                | "Other"
+        )
     }
 
     fn build_social_graph(
@@ -2296,6 +2430,10 @@ mod runtime {
                 kind: "self".to_string(),
                 detail: "The current account holder".to_string(),
                 weight: profiles.len().max(1),
+                memory_kind: None,
+                memory_id: None,
+                memory_source_id: None,
+                memory_field: None,
             },
         );
 
@@ -2329,6 +2467,7 @@ mod runtime {
                     "event",
                     item,
                     "experienced",
+                    (&profile.slug, "recent_events"),
                 );
             }
             for item in &profile.triggers {
@@ -2339,14 +2478,29 @@ mod runtime {
                     "trigger",
                     item,
                     "triggered by",
+                    (&profile.slug, "triggers"),
                 );
             }
             for item in &profile.goals {
-                social_graph_add_concept(&mut nodes, &mut edges, &person_id, "goal", item, "needs");
+                social_graph_add_concept(
+                    &mut nodes,
+                    &mut edges,
+                    &person_id,
+                    "goal",
+                    item,
+                    "needs",
+                    (&profile.slug, "goals"),
+                );
             }
             for item in &profile.boundaries {
                 social_graph_add_concept(
-                    &mut nodes, &mut edges, &person_id, "boundary", item, "boundary",
+                    &mut nodes,
+                    &mut edges,
+                    &person_id,
+                    "boundary",
+                    item,
+                    "boundary",
+                    (&profile.slug, "boundaries"),
                 );
             }
         }
@@ -2436,6 +2590,10 @@ mod runtime {
                     kind: node.category.to_lowercase(),
                     detail: "Mind map signal".to_string(),
                     weight: 1,
+                    memory_kind: Some("concept".to_string()),
+                    memory_id: Some(node.id.clone()),
+                    memory_source_id: None,
+                    memory_field: None,
                 });
             if !linked_concepts.contains(&node.id) {
                 edges.insert(("self".to_string(), concept_id, "pattern".to_string()), 1);
@@ -2516,6 +2674,10 @@ mod runtime {
                         .clone()
                         .unwrap_or_else(|| "episode".to_string()),
                     weight: 1 + involves_count,
+                    memory_kind: Some("episode".to_string()),
+                    memory_id: Some(episode.id.clone()),
+                    memory_source_id: None,
+                    memory_field: None,
                 },
             );
 
@@ -2713,6 +2875,7 @@ mod runtime {
                 serde_json::json!({
                     "id": episode.id,
                     "title": episode.title,
+                    "narrative": episode.narrative,
                     "occurred_at": episode.occurred_at,
                 })
             }).collect::<Vec<_>>(),
@@ -6357,6 +6520,205 @@ mod runtime {
                 .collect())
         }
 
+        pub async fn get_editable_memory(
+            &self,
+            user_id: String,
+            kind: String,
+            id: String,
+        ) -> Result<Option<EditableMemory>> {
+            let normalized_id = normalize_slug(&id);
+            match kind.as_str() {
+                "concept" => {
+                    let graph = self.read_patient_graph_secure(&user_id).await?;
+                    Ok(graph
+                        .nodes
+                        .into_iter()
+                        .find(|node| normalize_slug(&node.id) == normalized_id)
+                        .map(|node| EditableMemory {
+                            kind,
+                            id: node.id,
+                            title: node.label,
+                            category: Some(node.category),
+                            body: None,
+                            occurred_at: None,
+                        }))
+                }
+                "episode" => Ok(self
+                    .list_episodes(user_id)
+                    .await?
+                    .into_iter()
+                    .find(|episode| normalize_slug(&episode.id) == normalized_id)
+                    .map(|episode| EditableMemory {
+                        kind,
+                        id: episode.id,
+                        title: episode.title,
+                        category: Some("Episode".to_string()),
+                        body: Some(episode.narrative),
+                        occurred_at: episode.occurred_at,
+                    })),
+                "profile_item" => {
+                    let social = self.refresh_social_graph(user_id.clone()).await?;
+                    let Some(node) = social.nodes.into_iter().find(|node| {
+                        node.memory_kind.as_deref() == Some("profile_item")
+                            && node.memory_id.as_deref() == Some(id.as_str())
+                    }) else {
+                        return Ok(None);
+                    };
+                    let Some(source_id) = node.memory_source_id.as_deref() else {
+                        return Ok(None);
+                    };
+                    let Some(field) = node.memory_field.as_deref() else {
+                        return Ok(None);
+                    };
+                    let Some(profile) = self
+                        .get_relationship_profile(user_id, source_id.to_string())
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    if !profile_memory_items(&profile, field)
+                        .is_some_and(|items| items.iter().any(|item| item == &node.label))
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some(EditableMemory {
+                        kind,
+                        id,
+                        title: node.label,
+                        category: Some(node.kind),
+                        body: None,
+                        occurred_at: None,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        }
+
+        pub async fn update_editable_memory(
+            &self,
+            user_id: String,
+            kind: String,
+            id: String,
+            edit: MemoryEdit,
+        ) -> Result<Option<EditableMemory>> {
+            let title = edit.title.trim().chars().take(240).collect::<String>();
+            if title.is_empty() {
+                anyhow::bail!("Memory title cannot be empty");
+            }
+            let normalized_id = normalize_slug(&id);
+            match kind.as_str() {
+                "concept" => {
+                    let mut graph = self.read_patient_graph_secure(&user_id).await?;
+                    let Some(node) = graph
+                        .nodes
+                        .iter_mut()
+                        .find(|node| normalize_slug(&node.id) == normalized_id)
+                    else {
+                        return Ok(None);
+                    };
+                    let category = edit.category.unwrap_or_else(|| node.category.clone());
+                    if !editable_graph_category(&category) {
+                        anyhow::bail!("Unsupported memory category");
+                    }
+                    node.label = title.clone();
+                    node.category = category.clone();
+                    let memory_id = node.id.clone();
+                    self.write_patient_graph_secure(&graph).await?;
+                    self.refresh_social_graph(user_id).await?;
+                    Ok(Some(EditableMemory {
+                        kind,
+                        id: memory_id,
+                        title,
+                        category: Some(category),
+                        body: None,
+                        occurred_at: None,
+                    }))
+                }
+                "episode" => {
+                    let Some(mut episode) = self
+                        .list_episodes(user_id.clone())
+                        .await?
+                        .into_iter()
+                        .find(|episode| normalize_slug(&episode.id) == normalized_id)
+                    else {
+                        return Ok(None);
+                    };
+                    let body = edit
+                        .body
+                        .unwrap_or_else(|| episode.narrative.clone())
+                        .trim()
+                        .chars()
+                        .take(2400)
+                        .collect::<String>();
+                    if body.is_empty() {
+                        anyhow::bail!("Memory details cannot be empty");
+                    }
+                    episode.title = title.clone();
+                    episode.narrative = body.clone();
+                    if let Some(occurred_at) = edit.occurred_at {
+                        episode.occurred_at = Some(occurred_at.trim().chars().take(120).collect());
+                    }
+                    let memory_id = episode.id.clone();
+                    let occurred_at = episode.occurred_at.clone();
+                    self.upsert_episode(episode).await?;
+                    self.refresh_social_graph(user_id).await?;
+                    Ok(Some(EditableMemory {
+                        kind,
+                        id: memory_id,
+                        title,
+                        category: Some("Episode".to_string()),
+                        body: Some(body),
+                        occurred_at,
+                    }))
+                }
+                "profile_item" => {
+                    let social = self.refresh_social_graph(user_id.clone()).await?;
+                    let Some(node) = social.nodes.into_iter().find(|node| {
+                        node.memory_kind.as_deref() == Some("profile_item")
+                            && node.memory_id.as_deref() == Some(id.as_str())
+                    }) else {
+                        return Ok(None);
+                    };
+                    let Some(source_id) = node.memory_source_id.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(field) = node.memory_field.clone() else {
+                        return Ok(None);
+                    };
+                    let Some(mut profile) = self
+                        .get_relationship_profile(user_id, source_id.clone())
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(items) = profile_memory_items_mut(&mut profile, &field) else {
+                        return Ok(None);
+                    };
+                    let Some(item) = items.iter_mut().find(|item| **item == node.label) else {
+                        return Ok(None);
+                    };
+                    *item = title.clone();
+                    let new_id = format!(
+                        "profile:{}:{}:{}",
+                        normalize_slug(&source_id),
+                        normalize_slug(&field),
+                        normalize_slug(&title)
+                    );
+                    let category = node.kind;
+                    self.upsert_relationship_profile(profile).await?;
+                    Ok(Some(EditableMemory {
+                        kind,
+                        id: new_id,
+                        title,
+                        category: Some(category),
+                        body: None,
+                        occurred_at: None,
+                    }))
+                }
+                _ => Ok(None),
+            }
+        }
+
         pub async fn get_memory_status(&self, user_id: String) -> Result<MemoryStatus> {
             let mind = self
                 .read_patient_graph_secure(&user_id)
@@ -6405,6 +6767,41 @@ mod runtime {
 
         pub async fn save_relationship_profile(&self, profile: RelationshipProfile) -> Result<()> {
             self.upsert_relationship_profile(profile).await
+        }
+
+        pub async fn get_tts_voice(&self, user_id: String) -> Result<Option<String>> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT tts_voice FROM user_preferences WHERE user_id = ?1",
+                        [user_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Reading text-to-speech preference")
+        }
+
+        pub async fn set_tts_voice(&self, user_id: String, voice: String) -> Result<()> {
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO user_preferences (user_id, tts_voice, updated_at)
+                        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            tts_voice = excluded.tts_voice,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![user_id, voice],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving text-to-speech preference")
         }
 
         // Auth Helpers
@@ -7121,6 +7518,38 @@ mod runtime {
         }
 
         #[test]
+        fn test_social_graph_keeps_people_distinct_from_editable_profile_memories() {
+            let mut wife = test_profile("wife", "Test Partner", "wife");
+            wife.recent_events = vec!["Upset about tracking 3 reminders with test data".to_string()];
+            let graph = build_social_graph(
+                "test-user".to_string(),
+                &[wife],
+                &PatientGraph::default(),
+                &[],
+                &[],
+                &[],
+            );
+
+            let person = graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == "person")
+                .unwrap();
+            assert_eq!(person.label, "Test Partner");
+            assert_eq!(person.memory_kind, None);
+
+            let event = graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == "event")
+                .unwrap();
+            assert_eq!(event.memory_kind.as_deref(), Some("profile_item"));
+            assert_eq!(event.memory_source_id.as_deref(), Some("wife"));
+            assert_eq!(event.memory_field.as_deref(), Some("recent_events"));
+            assert!(event.id.starts_with("profile:wife:recent_events:"));
+        }
+
+        #[test]
         fn test_social_graph_merges_father_and_dad_synonyms() {
             let profiles = vec![
                 test_profile("father", "Dad", "father"),
@@ -7485,6 +7914,10 @@ mod runtime {
             let payload = build_mind_map_payload(&graph, &profiles, &episodes, &links);
             assert_eq!(payload["people"][0]["slug"], "mother");
             assert_eq!(payload["episodes"][0]["id"], "test_call");
+            assert_eq!(
+                payload["episodes"][0]["narrative"],
+                "A test participant reported a disagreement the user during a Test phone call."
+            );
             assert!(payload["cross_edges"]
                 .as_array()
                 .unwrap()

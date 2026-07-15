@@ -1,4 +1,4 @@
-use crate::agent::{ChatLog, RelationshipProfile, Session, SocialGraph, User};
+use crate::agent::{ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES};
 use minijinja::Environment;
 use serde_json::json;
 
@@ -174,6 +174,7 @@ pub fn render_profile_drawer(
     env: &Environment,
     profiles: &[RelationshipProfile],
     slug: &str,
+    selected_voice: &str,
 ) -> String {
     let selected = profiles.iter().find(|p| p.slug == slug);
     let profile_list: Vec<serde_json::Value> = profiles
@@ -185,10 +186,23 @@ pub fn render_profile_drawer(
             })
         })
         .collect();
+    let voice_list: Vec<serde_json::Value> = TTS_VOICES
+        .iter()
+        .map(|voice| {
+            json!({
+                "id": voice.id,
+                "name": voice.name,
+                "description": voice.description,
+                "sample_url": voice.sample_url,
+            })
+        })
+        .collect();
     env.get_template("profile_drawer")
         .unwrap()
         .render(json!({
             "profiles": profile_list,
+            "voices": voice_list,
+            "selected_voice": selected_voice,
             "selected_slug": slug,
             "display_name": selected.map_or("", |p| &p.display_name),
             "relationship_type": selected.map_or("", |p| &p.relationship_type),
@@ -357,6 +371,9 @@ mod tests {
         assert!(html.contains("--chat-viewport-offset-top"));
         assert!(html.contains("min-w-0 w-full items-end"));
         assert!(html.contains("brand-mark hidden sm:inline"));
+        assert!(html.contains("copy-thread-button"));
+        assert!(html.contains("copyThreadMarkdown()"));
+        assert!(html.contains("# Conversation"));
         assert!(html.contains("voice-live"));
         assert!(html.contains("Deepgram live"));
         assert!(html.contains("playDeepgramListeningTone()"));
@@ -378,5 +395,17 @@ mod tests {
         assert!(html.contains("Create a new recovery key"));
         assert!(html.contains("Your current recovery key will keep working"));
         assert!(html.contains("I saved this recovery key somewhere safe"));
+    }
+
+    #[test]
+    fn profile_drawer_renders_voice_settings_and_selected_voice() {
+        let env = create_env();
+        let html = render_profile_drawer(&env, &[], "", "aura-2-helena-en");
+        assert!(html.contains("Profiles &amp; settings"));
+        assert!(html.contains("Response voice"));
+        assert!(html.contains("data-voice=\"aura-2-helena-en\""));
+        assert!(html.contains("data-selected=\"true\""));
+        assert!(html.contains("Preview Helena"));
+        assert!(html.contains("/api/settings/voice"));
     }
 }

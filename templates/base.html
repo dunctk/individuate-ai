@@ -49,12 +49,13 @@ window.renderMindMap = function(containerId, data, onNodeClick) {
     if (!container) { console.error("Container not found:", containerId); return; }
     let width = container.clientWidth || 800;
     let height = container.clientHeight || 600;
+    window.__mindMapView?.resizeObserver?.disconnect();
     container.innerHTML = '';
     if (!data || !data.nodes || !data.edges) { return; }
     const nodes = [
-        ...data.nodes.map(d => ({ ...d, kind: "concept" })),
+        ...data.nodes.map(d => ({ ...d, kind: "concept", memory_kind: "concept", memory_id: d.id })),
         ...(data.people || []).map(d => ({ id: d.slug, label: d.label, category: "Person", kind: "person" })),
-        ...(data.episodes || []).map(d => ({ id: `episode:${d.id}`, label: d.title, category: "Episode", kind: "episode", occurred_at: d.occurred_at }))
+        ...(data.episodes || []).map(d => ({ id: `episode:${d.id}`, label: d.title, category: "Episode", kind: "episode", occurred_at: d.occurred_at, narrative: d.narrative, memory_kind: "episode", memory_id: d.id }))
     ];
     const links = [
         ...data.edges.map(d => ({ ...d, source: d.from, target: d.to, kind: "concept" })),
@@ -67,12 +68,11 @@ window.renderMindMap = function(containerId, data, onNodeClick) {
     const g = svg.append("g");
     const zoom = d3.zoom().scaleExtent([0.1, 4]).on("zoom", (event) => { g.attr("transform", event.transform); });
     svg.call(zoom);
-    window.__mindMapView = { svg, zoom };
     const simulation = d3.forceSimulation(nodes)
         .force("link", d3.forceLink(links).id(d => d.id).distance(150))
         .force("charge", d3.forceManyBody().strength(-500))
         .force("center", d3.forceCenter(width / 2, height / 2))
-        .force("collide", d3.forceCollide().radius(50));
+        .force("collide", d3.forceCollide().radius(d => d.kind === "person" ? 70 : d.kind === "episode" ? 52 : 46));
     svg.append("defs").selectAll("marker").data(["end"]).enter().append("marker")
         .attr("id", "arrow").attr("viewBox", "0 -5 10 10").attr("refX", 25).attr("refY", 0)
         .attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
@@ -83,28 +83,153 @@ window.renderMindMap = function(containerId, data, onNodeClick) {
         .attr("marker-end", "url(#arrow)");
     const linkLabel = g.append("g").selectAll("text").data(links).join("text")
         .text(d => d.relation).attr("font-size", "10px").attr("fill", COLORS.text).attr("text-anchor", "middle");
+    const memorySymbol = d3.symbol();
+    const nodePath = d => {
+        if (d.kind === "person") return "M-34,-18H34A18,18 0 0 1 34,18H-34A18,18 0 0 1-34,-18Z";
+        if (d.kind === "episode") return memorySymbol.type(d3.symbolSquare).size(250)();
+        return memorySymbol.type(d3.symbolCircle).size(145)();
+    };
     const node = g.append("g").selectAll("path").data(nodes).join("path")
         .attr("class", "mind-node")
-        .attr("d", d3.symbol().type(d => d.kind === "person" ? d3.symbolDiamond : d.kind === "episode" ? d3.symbolSquare : d3.symbolCircle).size(d => d.kind === "episode" ? 210 : d.kind === "person" ? 190 : 145))
-        .attr("fill", d => COLORS.categories[d.category] || COLORS.categories["Other"])
-        .attr("stroke", d => d.kind === "concept" ? "transparent" : "#F2F0E9")
-        .attr("stroke-width", d => d.kind === "concept" ? 0 : 1.5)
+        .attr("data-kind", d => d.kind)
+        .attr("d", nodePath)
+        .attr("fill", d => d.kind === "person" ? "#163B34" : COLORS.categories[d.category] || COLORS.categories["Other"])
+        .attr("stroke", d => d.kind === "person" ? "#3FB8A4" : d.kind === "episode" ? "#F2D88A" : "transparent")
+        .attr("stroke-width", d => d.kind === "person" ? 3 : d.kind === "episode" ? 1.8 : 0)
         .style("cursor", "pointer")
         .on("click", (event, d) => { if (onNodeClick) { event.stopPropagation(); onNodeClick(d); } })
         .call(d3.drag().on("start", (event) => { if (!event.active) simulation.alphaTarget(0.3).restart(); event.subject.fx = event.subject.x; event.subject.fy = event.subject.y; })
             .on("drag", (event) => { event.subject.fx = event.x; event.subject.fy = event.y; })
             .on("end", (event) => { if (!event.active) simulation.alphaTarget(0); event.subject.fx = null; event.subject.fy = null; }));
     const label = g.append("g").selectAll("text").data(nodes).join("text")
-        .text(d => d.label).attr("x", 16).attr("y", 5).attr("font-family", "Urbanist, sans-serif")
-        .attr("font-size", "14px").attr("font-weight", "bold").attr("fill", COLORS.text)
+        .text(d => d.label).attr("font-family", "Urbanist, sans-serif")
+        .attr("text-anchor", d => d.kind === "person" ? "middle" : "start")
+        .attr("font-size", d => d.kind === "person" ? "14px" : "13px")
+        .attr("font-weight", d => d.kind === "person" ? "800" : "650").attr("fill", COLORS.text)
         .style("text-shadow", "0 2px 4px #000");
+    const kindBadge = g.append("g").selectAll("text").data(nodes.filter(d => d.kind === "person" || d.kind === "episode")).join("text")
+        .text(d => d.kind === "person" ? "PERSON" : "MEMORY")
+        .attr("font-family", "Urbanist, sans-serif").attr("font-size", "8px").attr("font-weight", "800")
+        .attr("letter-spacing", "0.13em").attr("text-anchor", "middle")
+        .attr("fill", d => d.kind === "person" ? "#8DE0D1" : "#F2D88A");
     node.append("title").text(d => `${d.label}\n[${d.category}]`);
     simulation.on("tick", () => {
         link.attr("x1", d => d.source.x).attr("y1", d => d.source.y).attr("x2", d => d.target.x).attr("y2", d => d.target.y);
         linkLabel.attr("x", d => (d.source.x + d.target.x) / 2).attr("y", d => (d.source.y + d.target.y) / 2);
         node.attr("transform", d => `translate(${d.x},${d.y})`);
-        label.attr("x", d => d.x + 16).attr("y", d => d.y + 5);
+        label
+            .attr("text-anchor", d => d.kind === "person" ? "middle" : d.x > width * 0.62 ? "end" : "start")
+            .attr("x", d => d.kind === "person" ? d.x : d.x > width * 0.62 ? d.x - 16 : d.x + 16)
+            .attr("y", d => d.y + 5);
+        kindBadge.attr("x", d => d.x).attr("y", d => d.y - (d.kind === "person" ? 24 : 18));
     });
+    const resizeObserver = new ResizeObserver(entries => {
+        const bounds = entries[0]?.contentRect;
+        if (!bounds || bounds.width < 1 || bounds.height < 1) return;
+        if (Math.abs(bounds.width - width) < 1 && Math.abs(bounds.height - height) < 1) return;
+        width = bounds.width;
+        height = bounds.height;
+        svg.attr("viewBox", [0, 0, width, height]);
+        simulation.force("center", d3.forceCenter(width / 2, height / 2));
+        simulation.alpha(0.28).restart();
+    });
+    resizeObserver.observe(container);
+    window.__mindMapView = { svg, zoom, resizeObserver };
+};
+
+window.renderMemoryEditor = async function(container, memoryRef, callbacks = {}) {
+    if (!container || !memoryRef?.kind || !memoryRef?.id) return;
+    container.innerHTML = '<div class="memory-editor-loading" role="status">Loading memory…</div>';
+    const endpoint = '/api/memories/' + encodeURIComponent(memoryRef.kind) + '/' + encodeURIComponent(memoryRef.id);
+    try {
+        const response = await fetch(endpoint, { cache: 'no-store' });
+        const memory = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(memory.error || 'Could not load memory');
+
+        const form = document.createElement('form');
+        form.className = 'memory-editor';
+        form.innerHTML = `
+            <div>
+                <label class="memory-editor-label" for="memory-edit-title">${memory.kind === 'episode' ? 'Title' : 'Memory'}</label>
+                <input id="memory-edit-title" class="field" maxlength="240" required>
+            </div>
+            <div class="memory-editor-category hidden">
+                <label class="memory-editor-label" for="memory-edit-category">Category</label>
+                <select id="memory-edit-category" class="field">
+                    <option>Trigger</option><option>Belief</option><option>Emotion</option><option>Somatic</option>
+                    <option>Pattern</option><option>Need</option><option>Goal</option><option>Resource</option><option>Other</option>
+                </select>
+            </div>
+            <div class="memory-editor-date hidden">
+                <label class="memory-editor-label" for="memory-edit-date">When</label>
+                <input id="memory-edit-date" class="field" maxlength="120" placeholder="e.g. Summer 2025">
+            </div>
+            <div class="memory-editor-body hidden">
+                <label class="memory-editor-label" for="memory-edit-body">What happened</label>
+                <textarea id="memory-edit-body" class="field min-h-[132px] resize-y" maxlength="2400"></textarea>
+            </div>
+            <p class="memory-editor-status" role="status" aria-live="polite"></p>
+            <div class="memory-editor-actions">
+                <button type="button" class="memory-editor-cancel">Cancel</button>
+                <button type="submit" class="btn-primary min-h-11">Save memory</button>
+            </div>`;
+        const title = form.querySelector('#memory-edit-title');
+        const category = form.querySelector('#memory-edit-category');
+        const date = form.querySelector('#memory-edit-date');
+        const body = form.querySelector('#memory-edit-body');
+        title.value = memory.title || '';
+        if (memory.kind === 'concept') {
+            form.querySelector('.memory-editor-category').classList.remove('hidden');
+            category.value = memory.category || 'Other';
+        }
+        if (memory.kind === 'episode') {
+            form.querySelector('.memory-editor-date').classList.remove('hidden');
+            form.querySelector('.memory-editor-body').classList.remove('hidden');
+            date.value = memory.occurred_at || '';
+            body.value = memory.body || '';
+            body.required = true;
+        }
+        form.querySelector('.memory-editor-cancel').addEventListener('click', () => callbacks.onCancel?.());
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            const status = form.querySelector('.memory-editor-status');
+            const save = form.querySelector('[type="submit"]');
+            status.textContent = 'Saving securely…';
+            save.disabled = true;
+            try {
+                const saveResponse = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        title: title.value,
+                        category: memory.kind === 'concept' ? category.value : null,
+                        body: memory.kind === 'episode' ? body.value : null,
+                        occurred_at: memory.kind === 'episode' ? date.value : null
+                    })
+                });
+                const saved = await saveResponse.json().catch(() => ({}));
+                if (!saveResponse.ok) throw new Error(saved.error || 'Could not save memory');
+                status.textContent = 'Saved.';
+                await callbacks.onSaved?.(saved);
+            } catch (error) {
+                status.textContent = error.message || 'Could not save memory. Your original is unchanged.';
+                save.disabled = false;
+            }
+        });
+        container.replaceChildren(form);
+        requestAnimationFrame(() => title.focus({ preventScroll: true }));
+    } catch (error) {
+        container.innerHTML = '';
+        const message = document.createElement('p');
+        message.className = 'memory-editor-error';
+        message.textContent = error.message || 'Could not load memory.';
+        const back = document.createElement('button');
+        back.type = 'button';
+        back.className = 'memory-editor-cancel mt-3';
+        back.textContent = 'Back';
+        back.addEventListener('click', () => callbacks.onCancel?.());
+        container.append(message, back);
+    }
 };
 
 if ('serviceWorker' in navigator) {

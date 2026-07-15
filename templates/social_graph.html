@@ -63,10 +63,10 @@
         </aside>
 
         <div id="social-legend" class="fixed bottom-4 right-4 glass-strong rounded-pebble-xs px-3 py-2 space-y-1 z-10">
-            <div class="text-xs text-sage-mist font-medium mb-1">Nodes</div>
+            <div class="text-xs text-sage-mist font-medium mb-1">People &amp; memories</div>
             {% for kind, color in [("self", "#F2D88A"), ("person", "#2A9D8F"), ("episode", "#D98C6A"), ("event", "#E9C46A"), ("trigger", "#C46A57"), ("goal", "#9BCF8A"), ("boundary", "#E6A1B0"), ("pattern", "#F2F0E9"), ("need", "#83B7D8")] %}
             <button class="flex items-center gap-2 text-xs text-parchment/80 transition-colors hover:text-parchment" onclick="setSocialKind('{{ kind }}')">
-                <span class="w-2.5 h-2.5 rounded-full" style="background-color: {{ color }}"></span>
+                <span class="{% if kind == 'person' or kind == 'self' %}graph-legend-person{% elif kind == 'episode' %}graph-legend-episode{% else %}graph-legend-memory{% endif %}" style="--legend-color: {{ color }}"></span>
                 {{ kind }}
             </button>
             {% endfor %}
@@ -77,6 +77,7 @@
 <script>
 let socialGraphData = {{ graph_data|safe }};
 let socialSimulation = null;
+let socialResizeObserver = null;
 const SOCIAL_COLORS = {
     self: '#F2D88A',
     person: '#2A9D8F',
@@ -96,17 +97,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function reloadSocialGraph() {
     const resp = await fetch('/api/social-graph');
-    if (!resp.ok) return;
+    if (!resp.ok) return false;
     socialGraphData = await resp.json();
     renderSocialGraph();
+    return true;
 }
 
 function renderSocialGraph() {
     const container = document.getElementById('social-graph-canvas');
     if (!container || typeof d3 === 'undefined') return;
+    socialResizeObserver?.disconnect();
     container.innerHTML = '';
-    const width = container.clientWidth || 900;
-    const height = container.clientHeight || 640;
+    let width = container.clientWidth || 900;
+    let height = container.clientHeight || 640;
     const nodes = (socialGraphData.nodes || []).map((node) => ({ ...node }));
     const links = (socialGraphData.edges || []).map((edge) => ({ ...edge, source: edge.from, target: edge.to }));
     if (nodes.length === 0) return;
@@ -137,15 +140,23 @@ function renderSocialGraph() {
         .attr('text-anchor', 'middle')
         .attr('opacity', 0.84);
 
+    const socialSymbol = d3.symbol();
+    const nodePath = d => {
+        if (d.kind === 'person' || d.kind === 'self') return 'M-36,-19H36A19,19 0 0 1 36,19H-36A19,19 0 0 1-36,-19Z';
+        if (d.kind === 'episode') return socialSymbol.type(d3.symbolSquare).size(270)();
+        return socialSymbol.type(d3.symbolCircle).size(Math.min(230, 110 + ((d.weight || 1) * 20)))();
+    };
     const node = g.append('g')
-        .selectAll('circle')
+        .selectAll('path')
         .data(nodes)
-        .join('circle')
-        .attr('r', (d) => d.kind === 'self' ? 18 : d.kind === 'person' ? 15 : d.kind === 'episode' ? 13 : Math.min(14, 8 + (d.weight || 1)))
-        .attr('fill', (d) => SOCIAL_COLORS[d.kind] || SOCIAL_COLORS.other)
-        .attr('stroke', '#F2F0E9')
-        .attr('stroke-opacity', (d) => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode' ? 0.55 : 0.18)
-        .attr('stroke-width', 1.5)
+        .join('path')
+        .attr('class', 'social-node')
+        .attr('data-kind', d => d.kind)
+        .attr('d', nodePath)
+        .attr('fill', d => d.kind === 'person' || d.kind === 'self' ? '#163B34' : SOCIAL_COLORS[d.kind] || SOCIAL_COLORS.other)
+        .attr('stroke', d => d.kind === 'self' ? '#F2D88A' : d.kind === 'person' ? '#3FB8A4' : d.kind === 'episode' ? '#D98C6A' : '#F2F0E9')
+        .attr('stroke-opacity', d => d.kind === 'person' || d.kind === 'self' ? 1 : d.kind === 'episode' ? 0.9 : 0.2)
+        .attr('stroke-width', d => d.kind === 'person' || d.kind === 'self' ? 3 : 1.5)
         .style('cursor', 'pointer')
         .on('click', (_, d) => selectSocialNode(d))
         .call(d3.drag()
@@ -173,22 +184,48 @@ function renderSocialGraph() {
         .attr('font-size', (d) => d.kind === 'person' || d.kind === 'self' ? '14px' : '12px')
         .attr('font-weight', (d) => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode' ? '700' : '500')
         .attr('fill', '#F2F0E9')
-        .attr('x', 18)
-        .attr('y', 5)
+        .attr('text-anchor', d => d.kind === 'person' || d.kind === 'self' ? 'middle' : 'start')
         .style('text-shadow', '0 2px 6px #0F1C18');
+
+    const kindBadge = g.append('g')
+        .selectAll('text')
+        .data(nodes.filter(d => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode'))
+        .join('text')
+        .text(d => d.kind === 'self' ? 'YOU' : d.kind === 'person' ? 'PERSON' : 'MEMORY')
+        .attr('font-family', 'Urbanist, sans-serif')
+        .attr('font-size', '8px')
+        .attr('font-weight', '800')
+        .attr('letter-spacing', '0.13em')
+        .attr('text-anchor', 'middle')
+        .attr('fill', d => d.kind === 'self' ? '#F2D88A' : d.kind === 'person' ? '#8DE0D1' : '#F3B091');
 
     socialSimulation = d3.forceSimulation(nodes)
         .force('link', d3.forceLink(links).id((d) => d.id).distance((d) => d.relation === 'pattern' ? 190 : 132).strength(0.72))
         .force('charge', d3.forceManyBody().strength(-520))
         .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide().radius((d) => d.kind === 'person' ? 58 : 38));
+        .force('collide', d3.forceCollide().radius((d) => d.kind === 'person' || d.kind === 'self' ? 74 : d.kind === 'episode' ? 52 : 42));
 
     socialSimulation.on('tick', () => {
         link.attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y).attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
         linkLabel.attr('x', (d) => (d.source.x + d.target.x) / 2).attr('y', (d) => (d.source.y + d.target.y) / 2);
-        node.attr('cx', (d) => d.x).attr('cy', (d) => d.y);
-        label.attr('x', (d) => d.x + 18).attr('y', (d) => d.y + 5);
+        node.attr('transform', d => `translate(${d.x},${d.y})`);
+        label
+            .attr('text-anchor', d => d.kind === 'person' || d.kind === 'self' ? 'middle' : d.x > width * 0.62 ? 'end' : 'start')
+            .attr('x', d => d.kind === 'person' || d.kind === 'self' ? d.x : d.x > width * 0.62 ? d.x - 17 : d.x + 17)
+            .attr('y', d => d.y + 5);
+        kindBadge.attr('x', d => d.x).attr('y', d => d.y - (d.kind === 'person' || d.kind === 'self' ? 25 : 19));
     });
+    socialResizeObserver = new ResizeObserver(entries => {
+        const bounds = entries[0]?.contentRect;
+        if (!bounds || bounds.width < 1 || bounds.height < 1) return;
+        if (Math.abs(bounds.width - width) < 1 && Math.abs(bounds.height - height) < 1) return;
+        width = bounds.width;
+        height = bounds.height;
+        svg.attr('viewBox', [0, 0, width, height]);
+        socialSimulation.force('center', d3.forceCenter(width / 2, height / 2));
+        socialSimulation.alpha(0.28).restart();
+    });
+    socialResizeObserver.observe(container);
 }
 
 function socialNodeById(id) {
@@ -216,8 +253,14 @@ function socialInspectorRow(connection) {
     return `<button class="w-full text-left flex items-center gap-2 py-1 group" onclick="selectSocialNodeById('${connection.other.id.replace(/'/g, "\\'")}')">
         <span class="w-2 h-2 rounded-full shrink-0" style="background-color: ${color}"></span>
         <span class="text-sage-mist text-xs shrink-0">${arrow} ${relation}</span>
-        <span class="text-parchment/90 truncate group-hover:text-parchment">${connection.other.label}</span>
+        <span class="text-parchment/90 truncate group-hover:text-parchment">${escapeSocialHtml(connection.other.label)}</span>
     </button>`;
+}
+
+function escapeSocialHtml(value) {
+    return String(value || '').replace(/[&<>'"]/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+    })[character]);
 }
 
 window.selectSocialNodeById = function(id) {
@@ -239,6 +282,12 @@ function selectSocialNode(node) {
     const rest = connections.filter((c) => !people.includes(c) && !episodes.includes(c));
 
     const sections = [];
+    if (node.memory_kind && node.memory_id) {
+        sections.push(`<button type="button" class="memory-edit-trigger" onclick="editCurrentSocialMemory()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m4 20 4.2-1 10.5-10.5a2.1 2.1 0 0 0-3-3L5.2 16 4 20Z"/><path d="m14.5 6.5 3 3"/></svg>
+            Edit this memory
+        </button>`);
+    }
     if (people.length) {
         sections.push(`<div><p class="role-label mb-1">People</p>${people.map(socialInspectorRow).join('')}</div>`);
     }
@@ -252,8 +301,30 @@ function selectSocialNode(node) {
         sections.push('<p class="text-sage-mist text-xs">No recorded connections yet. They form as you talk.</p>');
     }
     document.getElementById('social-inspector-body').innerHTML = sections.join('');
+    window.currentSocialGraphNode = node;
     inspector.classList.remove('hidden');
 }
+
+window.editCurrentSocialMemory = function() {
+    const node = window.currentSocialGraphNode;
+    if (!node?.memory_kind || !node?.memory_id) return;
+    document.getElementById('social-inspector-kind').textContent = 'Editing memory';
+    renderMemoryEditor(document.getElementById('social-inspector-body'), {
+        kind: node.memory_kind,
+        id: node.memory_id
+    }, {
+        onCancel: () => selectSocialNode(node),
+        onSaved: async memory => {
+            const refreshed = await reloadSocialGraph();
+            if (!refreshed) throw new Error('Memory saved, but the graph could not refresh.');
+            const updated = (socialGraphData.nodes || []).find(candidate =>
+                candidate.memory_kind === memory.kind && candidate.memory_id === memory.id
+            );
+            if (updated) selectSocialNode(updated);
+            else closeSocialInspector();
+        }
+    });
+};
 
 window.closeSocialInspector = function() {
     document.getElementById('social-inspector')?.classList.add('hidden');
@@ -277,7 +348,7 @@ function applySocialFilters() {
     });
     const svg = d3.select('#social-graph-canvas svg');
     if (svg.empty()) return;
-    svg.selectAll('circle').attr('opacity', (d) => matching.has(d.id) ? 1 : 0.16);
+    svg.selectAll('.social-node').attr('opacity', (d) => matching.has(d.id) ? 1 : 0.16);
     svg.selectAll('text').attr('opacity', (d) => {
         if (d.id) return matching.has(d.id) ? 1 : 0.22;
         return matching.has(d.source.id || d.source) && matching.has(d.target.id || d.target) ? 0.85 : 0.1;

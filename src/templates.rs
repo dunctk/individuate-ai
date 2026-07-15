@@ -314,6 +314,10 @@ mod tests {
     fn landing_page_contains_product_and_trust_sections() {
         let env = create_env();
         let html = render_landing(&env);
+        assert!(html.contains("Open-Source AI Therapist App | IndividuateAI"));
+        assert!(html.contains("An open-source AI therapist app that helps you see your patterns"));
+        assert!(html.contains("name=\"description\""));
+        assert!(html.contains("not a substitute for a licensed mental health professional"));
         assert!(html.contains("Illustrative mind map"));
         assert_eq!(html.matches("dy=\".35em\"").count(), 16);
         assert!(html.contains("Illustrative social graph"));

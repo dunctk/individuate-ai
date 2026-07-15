@@ -314,6 +314,7 @@ mod tests {
         let env = create_env();
         let html = render_landing(&env);
         assert!(html.contains("Illustrative mind map"));
+        assert_eq!(html.matches("dy=\".35em\"").count(), 16);
         assert!(html.contains("Illustrative social graph"));
         assert!(html.contains("Privacy &amp; security"));
         assert!(html.contains("Check the code yourself"));

@@ -326,8 +326,10 @@ mod runtime {
         Notes: <2-4 brief bullets on tone/tradeoffs>
     "###;
     const GRAPH_DELTA_PROMPT: &str = r###"
-        Identify new psychological concepts or connections in the conversation.
+        Identify new psychological concepts or connections in the user's message.
+        The user's message is the sole factual authority. Never preserve or infer a fact merely because an assistant previously stated it.
         Only return NEW additions or explicit removals.
+        When the user explicitly corrects a saved fact, return the old concept id in obsolete_concept_ids and the corrected replacement in new_concepts. Never keep both versions.
         Use stable snake_case ids, lowercase with underscores (example: sleep_deprivation).
         Keep labels 2-4 words and categories one of: Trigger, Belief, Emotion, Somatic, Pattern, Need, Goal, Resource, Other.
         You may receive a Known people roster in the context. Also propose concept-to-person links when the conversation supports them.
@@ -349,7 +351,8 @@ mod runtime {
         Return an empty episodes array if the exchange contains no concrete episode.
     "###;
     const RELATIONSHIP_PROFILE_PROMPT: &str = r###"
-        Extract close-relationship memory from the text.
+        Extract close-relationship memory from the user's text.
+        The user's text is the sole factual authority. Assistant statements and interpretations are not evidence and must never become saved facts.
         Focus on people like mother, mom, dad, father, brother, partner, spouse, girlfriend, boyfriend, and close friends.
         You may receive a Known people roster in the context. MUST reuse an existing slug when the person is already in that roster, matching by name or role.
         Only create a new slug for a genuinely new person.
@@ -360,6 +363,7 @@ mod runtime {
         Keep fields concise and grounded in what the user actually said.
         Put only the most relevant facts in background.
         Include only actionable goals, triggers, boundaries, tone preferences, and recent events that are clearly supported by the text.
+        Existing profile details are supplied with their exact stored wording. When the user corrects or retracts one, copy the superseded exact string into the matching obsolete_* field and put the corrected fact in the normal field. Never return both the old and corrected versions as active memories.
         If nothing useful is present, return an empty profiles array.
     "###;
     const SOCIAL_RELATIONSHIP_PROMPT: &str = r###"
@@ -492,7 +496,7 @@ mod runtime {
         total_edges: usize,
     }
 
-    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+    #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
     struct ExtractedRelationshipProfile {
         pub slug: String,
         pub display_name: String,
@@ -510,6 +514,18 @@ mod runtime {
         pub recent_events: Vec<String>,
         #[serde(default)]
         pub boundaries: Vec<String>,
+        #[serde(default)]
+        pub obsolete_goals: Vec<String>,
+        #[serde(default)]
+        pub obsolete_triggers: Vec<String>,
+        #[serde(default)]
+        pub obsolete_do_not_say: Vec<String>,
+        #[serde(default)]
+        pub obsolete_effective_tone: Vec<String>,
+        #[serde(default)]
+        pub obsolete_recent_events: Vec<String>,
+        #[serde(default)]
+        pub obsolete_boundaries: Vec<String>,
     }
 
     #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -1364,6 +1380,10 @@ mod runtime {
         chunks
     }
 
+    fn authoritative_memory_source(user_text: &str) -> String {
+        format!("User: {}", user_text)
+    }
+
     async fn send_visible_stream(
         tx: &mpsc::Sender<Result<String, std::convert::Infallible>>,
         text: &str,
@@ -1607,6 +1627,87 @@ mod runtime {
         merged
     }
 
+    fn explicit_numeric_corrections(text: &str) -> Vec<(String, String)> {
+        let tokens: Vec<&str> = text
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut corrections = Vec::new();
+        for window in tokens.windows(3) {
+            let corrected = window[0];
+            let separator = window[1];
+            let obsolete = window[2];
+            if separator.eq_ignore_ascii_case("not")
+                && corrected
+                    .chars()
+                    .all(|character| character.is_ascii_digit())
+                && obsolete.chars().all(|character| character.is_ascii_digit())
+                && corrected != obsolete
+                && seen.insert((obsolete.to_string(), corrected.to_string()))
+            {
+                corrections.push((obsolete.to_string(), corrected.to_string()));
+            }
+        }
+        corrections
+    }
+
+    fn replace_standalone_token(text: &str, obsolete: &str, corrected: &str) -> String {
+        if obsolete.is_empty() || obsolete == corrected {
+            return text.to_string();
+        }
+        let mut result = String::with_capacity(text.len());
+        let mut cursor = 0;
+        for (start, matched) in text.match_indices(obsolete) {
+            let end = start + matched.len();
+            let left_is_word = text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_alphanumeric());
+            let right_is_word = text[end..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric());
+            if left_is_word || right_is_word {
+                continue;
+            }
+            result.push_str(&text[cursor..start]);
+            result.push_str(corrected);
+            cursor = end;
+        }
+        if cursor == 0 {
+            return text.to_string();
+        }
+        result.push_str(&text[cursor..]);
+        result
+    }
+
+    fn apply_explicit_corrections(text: &str, corrections: &[(String, String)]) -> String {
+        corrections.iter().fold(text.to_string(), |current, pair| {
+            replace_standalone_token(&current, &pair.0, &pair.1)
+        })
+    }
+
+    fn merge_profile_strings(
+        existing: &[String],
+        incoming: &[String],
+        obsolete: &[String],
+        corrections: &[(String, String)],
+        limit: usize,
+    ) -> Vec<String> {
+        let obsolete: HashSet<String> = obsolete
+            .iter()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect();
+        let corrected_existing: Vec<String> = existing
+            .iter()
+            .filter(|value| !obsolete.contains(&value.trim().to_lowercase()))
+            .map(|value| apply_explicit_corrections(value, corrections))
+            .collect();
+        merge_unique_strings(&corrected_existing, incoming, limit)
+    }
+
     fn merge_background(existing: &str, incoming: &str) -> String {
         let existing = existing.trim();
         let incoming = incoming.trim();
@@ -1629,6 +1730,7 @@ mod runtime {
         user_id: String,
         existing: Option<RelationshipProfile>,
         incoming: ExtractedRelationshipProfile,
+        corrections: &[(String, String)],
     ) -> RelationshipProfile {
         let slug = canonical_relationship_slug(
             &incoming.slug,
@@ -1660,21 +1762,52 @@ mod runtime {
             slug,
             display_name,
             relationship_type,
-            background: merge_background(&existing.background, &incoming.background),
-            goals: merge_unique_strings(&existing.goals, &incoming.goals, 8),
-            triggers: merge_unique_strings(&existing.triggers, &incoming.triggers, 8),
-            do_not_say: merge_unique_strings(&existing.do_not_say, &incoming.do_not_say, 8),
-            effective_tone: merge_unique_strings(
-                &existing.effective_tone,
-                &incoming.effective_tone,
+            background: merge_background(
+                &apply_explicit_corrections(&existing.background, corrections),
+                &incoming.background,
+            ),
+            goals: merge_profile_strings(
+                &existing.goals,
+                &incoming.goals,
+                &incoming.obsolete_goals,
+                corrections,
                 8,
             ),
-            recent_events: merge_unique_strings(
+            triggers: merge_profile_strings(
+                &existing.triggers,
+                &incoming.triggers,
+                &incoming.obsolete_triggers,
+                corrections,
+                8,
+            ),
+            do_not_say: merge_profile_strings(
+                &existing.do_not_say,
+                &incoming.do_not_say,
+                &incoming.obsolete_do_not_say,
+                corrections,
+                8,
+            ),
+            effective_tone: merge_profile_strings(
+                &existing.effective_tone,
+                &incoming.effective_tone,
+                &incoming.obsolete_effective_tone,
+                corrections,
+                8,
+            ),
+            recent_events: merge_profile_strings(
                 &existing.recent_events,
                 &incoming.recent_events,
+                &incoming.obsolete_recent_events,
+                corrections,
                 10,
             ),
-            boundaries: merge_unique_strings(&existing.boundaries, &incoming.boundaries, 8),
+            boundaries: merge_profile_strings(
+                &existing.boundaries,
+                &incoming.boundaries,
+                &incoming.obsolete_boundaries,
+                corrections,
+                8,
+            ),
         }
     }
 
@@ -5159,13 +5292,13 @@ mod runtime {
                 let existing_details = existing_profiles
                     .iter()
                     .map(|profile| {
+                        let stored = serde_json::to_string(&RelationshipProfileRecord::from(
+                            profile.clone(),
+                        ))
+                        .unwrap_or_else(|_| "{}".to_string());
                         format!(
-                            "{} [{}] goals: {} | triggers: {} | boundaries: {}",
-                            profile.display_name,
-                            profile.slug,
-                            join_items(&profile.goals),
-                            join_items(&profile.triggers),
-                            join_items(&profile.boundaries)
+                            "{} [{}] exact stored profile: {}",
+                            profile.display_name, profile.slug, stored
                         )
                     })
                     .collect::<Vec<_>>()
@@ -5202,6 +5335,7 @@ mod runtime {
             }
 
             let existing_profiles = self.list_relationship_profiles(user_id.clone()).await?;
+            let corrections = explicit_numeric_corrections(&source_text);
             let delta = self
                 .extract_relationship_profiles_from_text(source_text, &existing_profiles)
                 .await?;
@@ -5231,10 +5365,13 @@ mod runtime {
                     &extracted.display_name,
                 );
                 let existing = existing_by_slug.remove(&slug);
-                let merged = merge_relationship_profile(user_id.clone(), existing, extracted);
+                let merged =
+                    merge_relationship_profile(user_id.clone(), existing, extracted, &corrections);
                 existing_by_slug.insert(merged.slug.clone(), merged.clone());
                 self.upsert_relationship_profile(merged).await?;
             }
+
+            self.refresh_social_graph(user_id).await?;
 
             Ok(headline)
         }
@@ -5790,7 +5927,6 @@ mod runtime {
             &self,
             user_id: String,
             prompt: String,
-            reply: String,
         ) -> Result<Option<String>> {
             let current_graph = self.read_patient_graph(user_id.clone()).await?;
             let profiles = self
@@ -5813,7 +5949,7 @@ mod runtime {
                 .additional_params(openrouter_privacy_params())
                 .build();
 
-            let transcript = format!("User: {}\nAssistant: {}", prompt, reply);
+            let transcript = authoritative_memory_source(&prompt);
             let delta = extractor
                 .extract(transcript)
                 .await
@@ -5889,9 +6025,9 @@ mod runtime {
             user_id: String,
             session_id: Option<String>,
             prompt: String,
-            reply: String,
+            _reply: String,
         ) -> Result<Option<String>> {
-            let source_text = format!("User: {}\nAssistant: {}", prompt, reply);
+            let source_text = authoritative_memory_source(&prompt);
             let mut headline = None;
 
             // These extractors are independent. A transient provider or
@@ -5899,7 +6035,7 @@ mod runtime {
             // projections from being persisted.
             match timeout(
                 Duration::from_secs(30),
-                self.update_graph_from_exchange(user_id.clone(), prompt.clone(), reply),
+                self.update_graph_from_exchange(user_id.clone(), prompt.clone()),
             )
             .await
             {
@@ -7093,6 +7229,75 @@ mod runtime {
             let merged = merge_unique_strings(&existing, &incoming, 10);
             assert_eq!(merged.len(), 3);
             assert!(merged.contains(&"hello".to_string()));
+        }
+
+        #[test]
+        fn test_explicit_numeric_correction_updates_existing_profile_memory() {
+            let existing = RelationshipProfile {
+                user_id: "u1".into(),
+                slug: "partner".into(),
+                display_name: "Test Partner".into(),
+                relationship_type: "wife".into(),
+                background: "Test Partner is tracking 2 reminders".into(),
+                recent_events: vec!["Upset about tracking 2 reminders with test data".into()],
+                ..RelationshipProfile::default()
+            };
+            let incoming = ExtractedRelationshipProfile {
+                slug: "wife".into(),
+                display_name: "Test Partner".into(),
+                relationship_type: "wife".into(),
+                background: "Test Partner is tracking 3 reminders".into(),
+                recent_events: vec!["Upset about tracking 3 reminders with test data".into()],
+                ..ExtractedRelationshipProfile::default()
+            };
+            let corrections = explicit_numeric_corrections("she's tracking 3 reminders not 2");
+
+            let merged =
+                merge_relationship_profile("u1".into(), Some(existing), incoming, &corrections);
+
+            assert_eq!(corrections, vec![("30".into(), "39".into())]);
+            assert_eq!(merged.background, "Test Partner is tracking 3 reminders");
+            assert_eq!(
+                merged.recent_events,
+                vec!["Upset about tracking 3 reminders with test data"]
+            );
+            assert!(!merged.background.contains("30"));
+            assert!(merged
+                .recent_events
+                .iter()
+                .all(|memory| !memory.contains("30")));
+        }
+
+        #[test]
+        fn test_authoritative_memory_source_excludes_assistant_claims() {
+            let source = authoritative_memory_source("she is tracking 3 reminders, not 2");
+
+            assert_eq!(source, "User: she is tracking 3 reminders, not 2");
+            assert!(!source.contains("Assistant:"));
+        }
+
+        #[test]
+        fn test_relationship_delta_removes_superseded_memory_before_merge() {
+            let existing = RelationshipProfile {
+                user_id: "u1".into(),
+                slug: "partner".into(),
+                display_name: "Test Partner".into(),
+                relationship_type: "wife".into(),
+                recent_events: vec!["Incorrect saved fact".into()],
+                ..RelationshipProfile::default()
+            };
+            let incoming = ExtractedRelationshipProfile {
+                slug: "wife".into(),
+                display_name: "Test Partner".into(),
+                relationship_type: "wife".into(),
+                recent_events: vec!["Corrected saved fact".into()],
+                obsolete_recent_events: vec!["Incorrect saved fact".into()],
+                ..ExtractedRelationshipProfile::default()
+            };
+
+            let merged = merge_relationship_profile("u1".into(), Some(existing), incoming, &[]);
+
+            assert_eq!(merged.recent_events, vec!["Corrected saved fact"]);
         }
 
         #[test]

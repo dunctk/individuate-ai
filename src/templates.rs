@@ -332,6 +332,8 @@ mod tests {
         assert!(html.contains("Where encryption cannot help"));
         assert!(html.contains("There is deliberately no password-reset back door"));
         assert!(html.contains("Zero-retention AI routing"));
+        assert!(html.contains("processed by Deepgram within the European Union"));
+        assert!(html.contains("retained only for the time required to process the request"));
         assert!(html.contains("href=\"/\""));
     }
 
@@ -406,14 +408,16 @@ mod tests {
         assert!(html.contains("response-audio-play"));
         assert!(html.contains("seekSpokenResponse(-15)"));
         assert!(html.contains("replaySpokenResponse()"));
-        assert!(html.contains("wss://api.deepgram.com/v1/speak"));
+        assert!(html.contains("wss://api.eu.deepgram.com/v1/speak"));
         assert!(html.contains("encoding: 'linear16'"));
         assert!(html.contains("type: 'Flush'"));
         assert!(html.contains("/api/speak"));
         assert!(html.contains("/api/deepgram/token"));
-        assert!(html.contains("wss://api.deepgram.com/v1/listen"));
-        assert!(html.contains("recognition.interimResults = true"));
-        assert!(html.contains("window.webkitSpeechRecognition"));
+        assert!(html.contains("wss://api.eu.deepgram.com/v1/listen"));
+        assert!(html.contains("mip_opt_out: 'true'"));
+        assert!(!html.contains("wss://api.deepgram.com/v1/listen"));
+        assert!(!html.contains("wss://api.deepgram.com/v1/speak"));
+        assert!(!html.contains("window.webkitSpeechRecognition"));
         assert!(html.contains("seed-orb"));
         assert!(html.contains("M12 19V5"));
         assert!(html.contains("mandala-avatar.jpg"));

@@ -100,8 +100,8 @@
                         <h2>What leaves the application</h2>
                         <div class="privacy-provider-list">
                             <div><h3>Language models</h3><p>Conversation context is routed through OpenRouter with data collection denied, restricting requests to providers that do not retain prompts or use them for training.</p></div>
-                            <div><h3>Voice transcription</h3><p>Microphone audio is sent directly to Deepgram using a short-lived signed-in token. The long-lived provider key never reaches the browser, and model-improvement use is disabled.</p></div>
-                            <div><h3>Spoken responses</h3><p>Text-to-speech audio is streamed into browser memory for the current response. The app does not write generated speech audio to your database.</p></div>
+                            <div><h3>Voice transcription</h3><p>Voice recordings are processed by Deepgram within the European Union only to provide transcription. Every request opts out of Deepgram's model improvement program; Deepgram states that opted-out content is retained only for the time required to process the request.</p></div>
+                            <div><h3>Spoken responses</h3><p>Text sent for speech generation is processed by Deepgram within the European Union only to provide speech synthesis, with the same model-improvement opt-out and processing-duration retention. Generated audio is streamed into browser memory and is not written to your database.</p></div>
                         </div>
                     </section>
 

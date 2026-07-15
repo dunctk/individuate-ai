@@ -22,6 +22,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const DEEPGRAM_EU_API_BASE: &str = "https://api.eu.deepgram.com";
+const DEEPGRAM_MIP_OPT_OUT: &str = "true";
+
+fn deepgram_eu_endpoint(path: &str) -> String {
+    format!("{DEEPGRAM_EU_API_BASE}{path}")
+}
+
 #[derive(Clone)]
 struct AppState {
     key: Key,
@@ -851,11 +858,12 @@ async fn transcribe_handler(
         .unwrap_or("audio/webm");
 
     let response = match reqwest::Client::new()
-        .post("https://api.deepgram.com/v1/listen")
+        .post(deepgram_eu_endpoint("/v1/listen"))
         .query(&[
             ("model", "nova-3"),
             ("smart_format", "true"),
             ("punctuate", "true"),
+            ("mip_opt_out", DEEPGRAM_MIP_OPT_OUT),
         ])
         .header("Authorization", format!("Token {api_key}"))
         .header(reqwest::header::CONTENT_TYPE, content_type)
@@ -1052,12 +1060,13 @@ async fn speak_handler(
         .to_string();
 
     let response = match reqwest::Client::new()
-        .post("https://api.deepgram.com/v1/speak")
+        .post(deepgram_eu_endpoint("/v1/speak"))
         .query(&[
             ("model", model.as_str()),
             ("encoding", "mp3"),
             ("bit_rate", "32000"),
             ("speed", speed.as_str()),
+            ("mip_opt_out", DEEPGRAM_MIP_OPT_OUT),
         ])
         .header("Authorization", format!("Token {api_key}"))
         .json(&serde_json::json!({"text": text}))

@@ -47,16 +47,18 @@ deliberately do not, and the simplest design that meets those requirements.
   `OPENROUTER_DATA_COLLECTION=allow` is the escape hatch.
 - **Voice transcription.** Signed-in users receive a 30-second Deepgram access
   token from the server; the long-lived API key is never sent to the browser.
-  The browser streams microphone audio directly to Deepgram Nova-3 and shows
-  interim words in the composer. The request opts out of Deepgram's model
-  improvement program. If live Deepgram cannot start, the app falls back to
-  browser speech recognition and then to one recorded Deepgram request. The UI
-  identifies the live provider and makes recording and processing visible.
+  Live and recorded-fallback audio is sent to Deepgram's EU endpoint. Every
+  request sets `mip_opt_out=true`, so Deepgram excludes the content from model
+  improvement and states that it retains opted-out content only for the time
+  required to process the request. The UI identifies the live provider and
+  makes recording and processing visible.
 - **Spoken responses.** When a user plays a response, or enables automatic
   reading, short stable phrase chunks are sent over an authenticated Deepgram
-  Aura-2 text-to-speech WebSocket. The resulting audio is streamed into browser
-  memory for the current response and is not written to the app database. The
-  REST speech route remains available only as a compatibility fallback.
+  Aura-2 text-to-speech WebSocket at Deepgram's EU endpoint. Both the WebSocket
+  and REST fallback set `mip_opt_out=true`. Deepgram excludes the text and audio
+  from model improvement and states that it retains opted-out content only for
+  the time required to process the request. The resulting audio is streamed into
+  browser memory for the current response and is not written to the app database.
 - **Scoping and auth.** Authentication is passkey-only. Every graph/stream/
   session handler verifies the authenticated private cookie matches the
   requested user; session ownership is checked before streaming. `data/` is

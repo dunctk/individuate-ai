@@ -237,9 +237,6 @@ let memoryStatusSnapshot = null;
 let memoryWatchToken = 0;
 let voiceRecorder = null;
 let voiceChunks = [];
-let voiceRecognition = null;
-let voiceRecognitionActive = false;
-let voiceRecognitionHasText = false;
 let voiceInputPrefix = '';
 let voiceProvider = 'Deepgram';
 let deepgramSocket = null;
@@ -760,7 +757,7 @@ async function prepareSpeechStream() {
             mip_opt_out: 'true'
         });
         const socket = new WebSocket(
-            'wss://api.deepgram.com/v1/speak?' + params.toString(),
+            'wss://api.eu.deepgram.com/v1/speak?' + params.toString(),
             ['bearer', tokenPayload.access_token]
         );
         socket.binaryType = 'arraybuffer';
@@ -1262,7 +1259,7 @@ async function startDeepgramVoiceInput() {
         mip_opt_out: 'true'
     });
     const socket = new WebSocket(
-        'wss://api.deepgram.com/v1/listen?' + params.toString(),
+        'wss://api.eu.deepgram.com/v1/listen?' + params.toString(),
         ['bearer', tokenPayload.access_token]
     );
     deepgramSocket = socket;
@@ -1362,67 +1359,6 @@ async function startDeepgramVoiceInput() {
     });
 }
 
-function stopLiveRecognition() {
-    voiceRecognitionActive = false;
-    if (voiceRecognition) {
-        try { voiceRecognition.stop(); } catch (_) {}
-    }
-}
-
-function startLiveRecognition(SpeechRecognition) {
-    const input = document.getElementById('chat-input');
-    voiceInputPrefix = input.value;
-    voiceRecognitionHasText = false;
-    voiceProvider = 'Apple';
-    const recognition = new SpeechRecognition();
-    voiceRecognition = recognition;
-    voiceRecognitionActive = true;
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-    recognition.lang = navigator.language || document.documentElement.lang || 'en-US';
-    recognition.onresult = event => {
-        let finalText = '';
-        let interimText = '';
-        for (let index = 0; index < event.results.length; index += 1) {
-            const transcript = event.results[index][0]?.transcript || '';
-            if (event.results[index].isFinal) finalText += transcript;
-            else interimText += transcript;
-        }
-        const spoken = (finalText + ' ' + interimText).trim();
-        voiceRecognitionHasText = voiceRecognitionHasText || Boolean(spoken);
-        input.value = joinVoiceText(voiceInputPrefix, spoken);
-        input.setSelectionRange(input.value.length, input.value.length);
-        setVoiceState('listening', interimText.trim() || finalText.trim());
-    };
-    recognition.onerror = event => {
-        const shouldFallback = !voiceRecognitionHasText
-            && ['service-not-allowed', 'language-not-supported'].includes(event.error);
-        voiceRecognitionActive = false;
-        voiceRecognition = null;
-        setVoiceState('idle');
-        if (shouldFallback) {
-            recognition.onend = null;
-            startRecordedVoiceInput();
-        } else if (!['aborted', 'no-speech'].includes(event.error)) {
-            showToast(event.error === 'not-allowed' ? 'Microphone access was not granted' : 'Live dictation stopped', 'error');
-        }
-    };
-    recognition.onend = () => {
-        voiceRecognition = null;
-        if (!voiceRecognitionActive) {
-            setVoiceState('idle');
-            input.focus();
-            return;
-        }
-        voiceRecognitionActive = false;
-        setVoiceState('idle');
-        input.focus();
-    };
-    recognition.start();
-    setVoiceState('listening');
-}
-
 async function startRecordedVoiceInput() {
     if (voiceRecorder && voiceRecorder.state === 'recording') {
         voiceRecorder.stop();
@@ -1485,10 +1421,6 @@ async function toggleVoiceInput() {
         stopDeepgramVoiceInput();
         return;
     }
-    if (voiceRecognitionActive) {
-        stopLiveRecognition();
-        return;
-    }
     if (voiceRecorder && voiceRecorder.state === 'recording') {
         voiceRecorder.stop();
         return;
@@ -1504,16 +1436,6 @@ async function toggleVoiceInput() {
         if (error.name === 'AbortError') return;
     }
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-        try {
-            startLiveRecognition(SpeechRecognition);
-            return;
-        } catch (_) {
-            voiceRecognitionActive = false;
-            voiceRecognition = null;
-        }
-    }
     await startRecordedVoiceInput();
 }
 
@@ -1530,16 +1452,6 @@ async function submitChat() {
     if (deepgramSocket) cancelDeepgramVoiceInput();
     else if (voiceLive?.dataset.state === 'connecting') {
         deepgramStartId += 1;
-        setVoiceState('idle');
-    }
-    if (voiceRecognition) {
-        const recognition = voiceRecognition;
-        voiceRecognition = null;
-        voiceRecognitionActive = false;
-        recognition.onresult = null;
-        recognition.onerror = null;
-        recognition.onend = null;
-        try { recognition.abort(); } catch (_) {}
         setVoiceState('idle');
     }
     await ensureMemoryStatusBaseline();

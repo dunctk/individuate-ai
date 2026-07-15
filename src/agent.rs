@@ -313,6 +313,8 @@ mod runtime {
         Memory honesty: memory extraction runs in the background after you reply, so never claim you have already stored something mid-conversation; say it will be saved shortly. The app does have visible memory pages the user can open: the mind map at /mind-map, the social graph at /social-graph, and per-person profiles in the profile drawer. Refer the user to those instead of claiming no visible memory exists.
 
         Previous-chat search: when the user asks for a specific detail from an earlier conversation and it is not clear in the supplied persistent memory, use search_previous_chats. Search for the distinctive person, event, phrase, or subject rather than the whole question. Treat returned excerpts as private evidence: use them to answer naturally, do not expose internal session IDs, and say clearly when the search finds nothing relevant.
+
+        Response preferences: your system instructions may end with a <response_preferences> block containing the user's explicit standing instructions for how you should respond. Follow them in every later response, but treat them as subordinate to safety, accuracy, and this therapist role. Use store_meta_memory only when the user explicitly asks you to persist, change, or forget a response preference (for example, analysis depth, tone, or response structure). Do not use it for autobiographical facts, events, relationships, mind-map concepts, inferred preferences, or the text-to-speech voice. For an upsert, choose a stable short key and store the requested preference as its value; reuse that key when changing it. For removal, use the existing key. A successful tool call affects future requests; honor the user's current instruction directly in the current response.
     "###;
     const DRAFT_SYSTEM_PROMPT: &str = r###"
         You write messages on behalf of the user.
@@ -640,8 +642,12 @@ mod runtime {
     #[derive(Clone)]
     struct CurrentDateTimeTool;
 
+    const META_MEMORY_KEY_MAX_CHARS: usize = 64;
+    const META_MEMORY_VALUE_MAX_CHARS: usize = 4_000;
+    const META_MEMORY_MAX_ROWS: usize = 50;
+
     tokio::task_local! {
-        static MEMORY_SEARCH_USER_ID: String;
+        static AUTHENTICATED_TOOL_USER_ID: String;
     }
 
     #[derive(Clone)]
@@ -649,6 +655,59 @@ mod runtime {
         conn: Connection,
         active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
     }
+
+    #[derive(Clone)]
+    struct StoreMetaMemoryTool {
+        conn: Connection,
+        active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
+    }
+
+    #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    enum MetaMemoryOperation {
+        Upsert,
+        Remove,
+    }
+
+    #[derive(Clone, Debug, Deserialize, JsonSchema)]
+    struct StoreMetaMemoryArgs {
+        /// Whether to save/update the preference or remove it.
+        operation: MetaMemoryOperation,
+        /// Stable short name for the response preference, such as `analysis_depth`.
+        key: String,
+        /// Preference instruction. Required for upsert and omitted for remove.
+        value: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Serialize)]
+    struct MetaMemory {
+        key: String,
+        value: String,
+    }
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    struct TherapistContext {
+        response_preferences: String,
+        persistent_memory: String,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    struct StoreMetaMemoryOutput {
+        operation: String,
+        key: String,
+        changed: bool,
+    }
+
+    #[derive(Debug)]
+    struct StoreMetaMemoryError(String);
+
+    impl std::fmt::Display for StoreMetaMemoryError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for StoreMetaMemoryError {}
 
     #[derive(Clone, Debug, Deserialize, JsonSchema)]
     struct SearchPreviousChatsArgs {
@@ -874,6 +933,18 @@ mod runtime {
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS meta_memories (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    key_ciphertext BLOB NOT NULL,
+                    value_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_meta_memories_user_id
+                    ON meta_memories(user_id);
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -3260,6 +3331,229 @@ mod runtime {
         }
     }
 
+    fn normalized_meta_memory_key(key: &str) -> std::result::Result<String, String> {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err("Preference key cannot be empty".to_string());
+        }
+        if key.chars().count() > META_MEMORY_KEY_MAX_CHARS {
+            return Err(format!(
+                "Preference key cannot exceed {META_MEMORY_KEY_MAX_CHARS} characters"
+            ));
+        }
+
+        let mut normalized = String::new();
+        let mut pending_separator = false;
+        for character in key.chars() {
+            if character.is_alphanumeric() {
+                if pending_separator && !normalized.is_empty() {
+                    normalized.push('_');
+                }
+                pending_separator = false;
+                normalized.extend(character.to_lowercase());
+            } else if character == '_' || character == '-' || character.is_whitespace() {
+                pending_separator = true;
+            } else {
+                return Err(
+                    "Preference key may contain only letters, numbers, spaces, hyphens, and underscores"
+                        .to_string(),
+                );
+            }
+        }
+        if normalized.is_empty() {
+            return Err("Preference key cannot be empty".to_string());
+        }
+        if normalized.chars().count() > META_MEMORY_KEY_MAX_CHARS {
+            return Err(format!(
+                "Normalized preference key cannot exceed {META_MEMORY_KEY_MAX_CHARS} characters"
+            ));
+        }
+        Ok(normalized)
+    }
+
+    fn validated_meta_memory_value(value: &str) -> std::result::Result<String, String> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err("Preference value cannot be empty".to_string());
+        }
+        if value.chars().count() > META_MEMORY_VALUE_MAX_CHARS {
+            return Err(format!(
+                "Preference value cannot exceed {META_MEMORY_VALUE_MAX_CHARS} characters"
+            ));
+        }
+        Ok(value.to_string())
+    }
+
+    fn meta_memory_aad(user_id: &str, row_id: &str, field: &str) -> String {
+        format!("meta_memories:{user_id}:{row_id}:{field}")
+    }
+
+    fn active_dek_from_cache(
+        active_deks: &DashMap<String, (Instant, Vec<u8>)>,
+        user_id: &str,
+    ) -> std::result::Result<Vec<u8>, String> {
+        let mut entry = active_deks
+            .get_mut(user_id)
+            .ok_or_else(|| "User key is not unlocked".to_string())?;
+        if entry.value().0.elapsed() > Duration::from_secs(30 * 60) {
+            return Err("User key has expired".to_string());
+        }
+        entry.value_mut().0 = Instant::now();
+        Ok(entry.value().1.clone())
+    }
+
+    async fn list_meta_memories(
+        conn: &Connection,
+        user_id: &str,
+        dek: &[u8],
+    ) -> Result<Vec<(String, MetaMemory)>> {
+        let user_id = user_id.to_string();
+        let dek = dek.to_vec();
+        conn.call(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, key_ciphertext, value_ciphertext FROM meta_memories WHERE user_id = ?1",
+            )?;
+            let rows = statement.query_map([user_id.clone()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?;
+            let mut memories = Vec::new();
+            for row in rows {
+                let (id, key_ciphertext, value_ciphertext) = row?;
+                let key = String::from_utf8(
+                    security::decrypt(
+                        &dek,
+                        &key_ciphertext,
+                        meta_memory_aad(&user_id, &id, "key").as_bytes(),
+                    )
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                )
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let value = String::from_utf8(
+                    security::decrypt(
+                        &dek,
+                        &value_ciphertext,
+                        meta_memory_aad(&user_id, &id, "value").as_bytes(),
+                    )
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                )
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                memories.push((id, MetaMemory { key, value }));
+            }
+            memories.sort_by(|left, right| left.1.key.cmp(&right.1.key));
+            Ok(memories)
+        })
+        .await
+        .context("Listing encrypted response preferences")
+    }
+
+    async fn upsert_meta_memory(
+        conn: &Connection,
+        user_id: &str,
+        dek: &[u8],
+        key: &str,
+        value: &str,
+    ) -> Result<String> {
+        let key = normalized_meta_memory_key(key).map_err(anyhow::Error::msg)?;
+        let value = validated_meta_memory_value(value).map_err(anyhow::Error::msg)?;
+        let memories = list_meta_memories(conn, user_id, dek).await?;
+        let row_id = memories
+            .iter()
+            .find(|(_, memory)| memory.key == key)
+            .map(|(id, _)| id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if !memories.iter().any(|(id, _)| id == &row_id) && memories.len() >= META_MEMORY_MAX_ROWS {
+            anyhow::bail!("No more than {META_MEMORY_MAX_ROWS} response preferences may be saved");
+        }
+
+        let key_ciphertext = security::encrypt(
+            dek,
+            key.as_bytes(),
+            meta_memory_aad(user_id, &row_id, "key").as_bytes(),
+        )
+        .map_err(|_| anyhow::anyhow!("Could not encrypt preference key"))?;
+        let value_ciphertext = security::encrypt(
+            dek,
+            value.as_bytes(),
+            meta_memory_aad(user_id, &row_id, "value").as_bytes(),
+        )
+        .map_err(|_| anyhow::anyhow!("Could not encrypt preference value"))?;
+        let user_id = user_id.to_string();
+        conn.call(move |conn| {
+            conn.execute(
+                r###"
+                INSERT INTO meta_memories
+                    (user_id, id, key_ciphertext, value_ciphertext)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(user_id, id) DO UPDATE SET
+                    key_ciphertext = excluded.key_ciphertext,
+                    value_ciphertext = excluded.value_ciphertext,
+                    updated_at = CURRENT_TIMESTAMP
+                "###,
+                rusqlite::params![user_id, row_id, key_ciphertext, value_ciphertext],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("Saving encrypted response preference")?;
+        Ok(key)
+    }
+
+    async fn remove_meta_memory(
+        conn: &Connection,
+        user_id: &str,
+        dek: &[u8],
+        key: &str,
+    ) -> Result<(String, bool)> {
+        let key = normalized_meta_memory_key(key).map_err(anyhow::Error::msg)?;
+        let memories = list_meta_memories(conn, user_id, dek).await?;
+        let Some(row_id) = memories
+            .into_iter()
+            .find(|(_, memory)| memory.key == key)
+            .map(|(id, _)| id)
+        else {
+            return Ok((key, false));
+        };
+        let user_id = user_id.to_string();
+        let changed = conn
+            .call(move |conn| {
+                Ok(conn.execute(
+                    "DELETE FROM meta_memories WHERE user_id = ?1 AND id = ?2",
+                    rusqlite::params![user_id, row_id],
+                )?)
+            })
+            .await
+            .context("Removing encrypted response preference")?
+            > 0;
+        Ok((key, changed))
+    }
+
+    fn format_response_preferences_block(memories: &[(String, MetaMemory)]) -> String {
+        let preferences = if memories.is_empty() {
+            "none".to_string()
+        } else {
+            memories
+                .iter()
+                .map(|(_, memory)| format!("- {}: {}", memory.key, memory.value))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        format!(
+            "<response_preferences>\nStanding user instructions for response style and approach (subordinate to safety, accuracy, and the therapist role):\n{preferences}\n</response_preferences>"
+        )
+    }
+
+    fn therapist_preamble(response_preferences: &str) -> String {
+        format!("{THERAPIST_SYSTEM_PROMPT}\n\n{response_preferences}")
+    }
+
+    fn therapist_user_prompt(persistent_memory: &str, prompt: &str) -> String {
+        format!("{persistent_memory}\n\n{prompt}")
+    }
+
     impl Tool for CurrentDateTimeTool {
         const NAME: &'static str = "current_datetime";
         type Error = std::convert::Infallible;
@@ -3294,26 +3588,21 @@ mod runtime {
         }
 
         async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-            let user_id = MEMORY_SEARCH_USER_ID.try_with(Clone::clone).map_err(|_| {
-                SearchPreviousChatsError(
-                    "Chat search is unavailable outside an authenticated response".to_string(),
-                )
-            })?;
+            let user_id = AUTHENTICATED_TOOL_USER_ID
+                .try_with(Clone::clone)
+                .map_err(|_| {
+                    SearchPreviousChatsError(
+                        "Chat search is unavailable outside an authenticated response".to_string(),
+                    )
+                })?;
             let query = args.query.trim().chars().take(300).collect::<String>();
             if query.is_empty() {
                 return Err(SearchPreviousChatsError(
                     "Search query cannot be empty".to_string(),
                 ));
             }
-            let dek = {
-                let entry = self.active_deks.get(&user_id).ok_or_else(|| {
-                    SearchPreviousChatsError("User key is not unlocked".to_string())
-                })?;
-                if entry.value().0.elapsed() > Duration::from_secs(30 * 60) {
-                    return Err(SearchPreviousChatsError("User key has expired".to_string()));
-                }
-                entry.value().1.clone()
-            };
+            let dek = active_dek_from_cache(&self.active_deks, &user_id)
+                .map_err(SearchPreviousChatsError)?;
             let max_results = args.max_results.unwrap_or(6).clamp(1, 10);
             let query_terms = tokenize(&query);
             let query_lower = query.to_lowercase();
@@ -3400,6 +3689,59 @@ mod runtime {
         }
     }
 
+    impl Tool for StoreMetaMemoryTool {
+        const NAME: &'static str = "store_meta_memory";
+        type Error = StoreMetaMemoryError;
+        type Args = StoreMetaMemoryArgs;
+        type Output = StoreMetaMemoryOutput;
+
+        async fn definition(&self, _prompt: String) -> ToolDefinition {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Store, update, or remove an explicit standing response preference for this authenticated user. Use only when the user explicitly asks to persist, change, or forget how the therapist should respond. Do not use for autobiographical facts, events, relationships, inferred preferences, or text-to-speech settings. The user scope is enforced by the server and cannot be selected by the model.".to_string(),
+                parameters: serde_json::json!(schema_for!(StoreMetaMemoryArgs)),
+            }
+        }
+
+        async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
+            let user_id = AUTHENTICATED_TOOL_USER_ID
+                .try_with(Clone::clone)
+                .map_err(|_| {
+                    StoreMetaMemoryError(
+                        "Preference storage is unavailable outside an authenticated response"
+                            .to_string(),
+                    )
+                })?;
+            let dek =
+                active_dek_from_cache(&self.active_deks, &user_id).map_err(StoreMetaMemoryError)?;
+            match args.operation {
+                MetaMemoryOperation::Upsert => {
+                    let value = args.value.as_deref().ok_or_else(|| {
+                        StoreMetaMemoryError("Preference value is required for upsert".to_string())
+                    })?;
+                    let key = upsert_meta_memory(&self.conn, &user_id, &dek, &args.key, value)
+                        .await
+                        .map_err(|error| StoreMetaMemoryError(error.to_string()))?;
+                    Ok(StoreMetaMemoryOutput {
+                        operation: "upsert".to_string(),
+                        key,
+                        changed: true,
+                    })
+                }
+                MetaMemoryOperation::Remove => {
+                    let (key, changed) = remove_meta_memory(&self.conn, &user_id, &dek, &args.key)
+                        .await
+                        .map_err(|error| StoreMetaMemoryError(error.to_string()))?;
+                    Ok(StoreMetaMemoryOutput {
+                        operation: "remove".to_string(),
+                        key,
+                        changed,
+                    })
+                }
+            }
+        }
+    }
+
     pub struct AgentRuntime {
         therapist_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
@@ -3476,6 +3818,10 @@ mod runtime {
                     .additional_params(openrouter_privacy_params())
                     .tool(CurrentDateTimeTool)
                     .tool(SearchPreviousChatsTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                    })
+                    .tool(StoreMetaMemoryTool {
                         conn: conn.clone(),
                         active_deks: Arc::clone(&active_deks),
                     })
@@ -5750,7 +6096,13 @@ mod runtime {
             ))
         }
 
-        async fn build_therapist_context(&self, user_id: String, prompt: String) -> Result<String> {
+        async fn build_therapist_context(
+            &self,
+            user_id: String,
+            prompt: String,
+        ) -> Result<TherapistContext> {
+            let dek = self.active_dek(&user_id)?;
+            let meta_memories = list_meta_memories(&self.conn, &user_id, &dek).await?;
             let graph = self
                 .read_patient_graph(user_id.clone())
                 .await
@@ -5893,12 +6245,24 @@ mod runtime {
                 .collect();
             let episode_hits = relevant_episode_lines(&episodes, &walk_episode_scores, 4);
 
-            Ok(format_persistent_memory_block(
-                &broader_memories,
-                &graph_hits,
-                &social_hits,
-                &episode_hits,
-            ))
+            Ok(TherapistContext {
+                response_preferences: format_response_preferences_block(&meta_memories),
+                persistent_memory: format_persistent_memory_block(
+                    &broader_memories,
+                    &graph_hits,
+                    &social_hits,
+                    &episode_hits,
+                ),
+            })
+        }
+
+        fn therapist_agent_for_response(
+            &self,
+            response_preferences: &str,
+        ) -> rig::agent::Agent<openrouter::completion::CompletionModel> {
+            let mut agent = self.therapist_agent.clone();
+            agent.preamble = Some(therapist_preamble(response_preferences));
+            agent
         }
 
         async fn read_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
@@ -6115,16 +6479,19 @@ mod runtime {
                     .unwrap_or_default()
             };
 
-            let memory_context = self
+            let therapist_context = self
                 .build_therapist_context(user_id.to_string(), prompt.clone())
                 .await
                 .unwrap_or_default();
-            let enriched_prompt = format!("{}\n\n{}", memory_context, prompt);
+            let therapist_agent =
+                self.therapist_agent_for_response(&therapist_context.response_preferences);
+            let enriched_prompt =
+                therapist_user_prompt(&therapist_context.persistent_memory, &prompt);
 
             let mut history_clone = history.clone();
-            let reply = MEMORY_SEARCH_USER_ID
+            let reply = AUTHENTICATED_TOOL_USER_ID
                 .scope(user_id.to_string(), async {
-                    self.therapist_agent
+                    therapist_agent
                         .prompt(Message::user(enriched_prompt))
                         .with_history(&mut history_clone)
                         .multi_turn(2)
@@ -6456,15 +6823,18 @@ mod runtime {
                     .unwrap_or_default()
             };
 
-            let memory_context = self
+            let therapist_context = self
                 .build_therapist_context(user_id.clone(), prompt.clone())
                 .await
                 .unwrap_or_default();
-            let enriched_prompt = format!("{}\n\n{}", memory_context, prompt);
+            let therapist_agent =
+                self.therapist_agent_for_response(&therapist_context.response_preferences);
+            let enriched_prompt =
+                therapist_user_prompt(&therapist_context.persistent_memory, &prompt);
 
-            let mut stream = MEMORY_SEARCH_USER_ID
+            let mut stream = AUTHENTICATED_TOOL_USER_ID
                 .scope(user_id.clone(), async {
-                    self.therapist_agent
+                    therapist_agent
                         .stream_prompt(Message::user(enriched_prompt))
                         .with_history(history.clone())
                         .multi_turn(2)
@@ -6478,7 +6848,7 @@ mod runtime {
             let user_id_clone = user_id.clone();
 
             tokio::spawn(
-                MEMORY_SEARCH_USER_ID.scope(user_id_clone.clone(), async move {
+                AUTHENTICATED_TOOL_USER_ID.scope(user_id_clone.clone(), async move {
                     let mut assembled = String::new();
                     let mut final_text = None;
                     loop {
@@ -7481,7 +7851,7 @@ mod runtime {
             let active_deks = Arc::new(DashMap::new());
             active_deks.insert("user-a".to_string(), (Instant::now(), user_dek.to_vec()));
             let tool = SearchPreviousChatsTool { conn, active_deks };
-            let output = MEMORY_SEARCH_USER_ID
+            let output = AUTHENTICATED_TOOL_USER_ID
                 .scope("user-a".to_string(), async {
                     tool.call(SearchPreviousChatsArgs {
                         query: "blue orchid".to_string(),
@@ -7496,6 +7866,281 @@ mod runtime {
             assert_eq!(output.results[0].session_title, "Garden plans");
             assert!(output.results[0].excerpt.contains("kitchen window"));
             assert!(!output.results[0].excerpt.contains("somebody else"));
+        }
+
+        #[tokio::test]
+        async fn meta_memory_crud_is_encrypted_and_user_scoped() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            ensure_schema(&conn).await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO users (id, username) VALUES ('user-a', 'user-a');
+                     INSERT INTO users (id, username) VALUES ('user-b', 'user-b');",
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+            let user_a_dek = security::generate_dek();
+            let user_b_dek = security::generate_dek();
+
+            let key = upsert_meta_memory(
+                &conn,
+                "user-a",
+                &user_a_dek,
+                "Analysis Depth",
+                "Give me more in-depth Jungian analysis.",
+            )
+            .await
+            .unwrap();
+            assert_eq!(key, "analysis_depth");
+            assert_eq!(
+                list_meta_memories(&conn, "user-a", &user_a_dek)
+                    .await
+                    .unwrap()[0]
+                    .1,
+                MetaMemory {
+                    key: "analysis_depth".to_string(),
+                    value: "Give me more in-depth Jungian analysis.".to_string(),
+                }
+            );
+            assert!(list_meta_memories(&conn, "user-b", &user_b_dek)
+                .await
+                .unwrap()
+                .is_empty());
+
+            let (raw_key, raw_value, row_id): (Vec<u8>, Vec<u8>, String) = conn
+                .call(|conn| {
+                    conn.query_row(
+                        "SELECT key_ciphertext, value_ciphertext, id FROM meta_memories WHERE user_id = 'user-a'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(Into::into)
+                })
+                .await
+                .unwrap();
+            assert!(uuid::Uuid::parse_str(&row_id).is_ok());
+            assert!(!raw_key
+                .windows(b"analysis_depth".len())
+                .any(|window| window == b"analysis_depth"));
+            assert!(!raw_value
+                .windows(b"Jungian analysis".len())
+                .any(|window| window == b"Jungian analysis"));
+
+            upsert_meta_memory(
+                &conn,
+                "user-a",
+                &user_a_dek,
+                "analysis-depth",
+                "Prefer concise Jungian analysis.",
+            )
+            .await
+            .unwrap();
+            let updated = list_meta_memories(&conn, "user-a", &user_a_dek)
+                .await
+                .unwrap();
+            assert_eq!(updated.len(), 1);
+            assert_eq!(updated[0].0, row_id);
+            assert_eq!(updated[0].1.value, "Prefer concise Jungian analysis.");
+
+            assert_eq!(
+                remove_meta_memory(&conn, "user-b", &user_b_dek, "analysis_depth")
+                    .await
+                    .unwrap(),
+                ("analysis_depth".to_string(), false)
+            );
+            assert_eq!(
+                list_meta_memories(&conn, "user-a", &user_a_dek)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                remove_meta_memory(&conn, "user-a", &user_a_dek, "analysis_depth")
+                    .await
+                    .unwrap(),
+                ("analysis_depth".to_string(), true)
+            );
+            assert!(list_meta_memories(&conn, "user-a", &user_a_dek)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn store_meta_memory_tool_uses_authenticated_scope_without_user_id_argument() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            ensure_schema(&conn).await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO users (id, username) VALUES ('user-a', 'user-a');
+                     INSERT INTO users (id, username) VALUES ('user-b', 'user-b');",
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+            let active_deks = Arc::new(DashMap::new());
+            let user_a_dek = security::generate_dek();
+            let user_b_dek = security::generate_dek();
+            active_deks.insert("user-a".to_string(), (Instant::now(), user_a_dek.to_vec()));
+            active_deks.insert("user-b".to_string(), (Instant::now(), user_b_dek.to_vec()));
+            let tool = StoreMetaMemoryTool {
+                conn: conn.clone(),
+                active_deks,
+            };
+
+            let definition = tool.definition(String::new()).await;
+            assert!(!definition.parameters.to_string().contains("user_id"));
+            let output = AUTHENTICATED_TOOL_USER_ID
+                .scope("user-a".to_string(), async {
+                    tool.call(StoreMetaMemoryArgs {
+                        operation: MetaMemoryOperation::Upsert,
+                        key: "reflection style".to_string(),
+                        value: Some("Lead with a reflection before questions.".to_string()),
+                    })
+                    .await
+                })
+                .await
+                .unwrap();
+            assert_eq!(output.key, "reflection_style");
+            assert!(output.changed);
+
+            let other_user_remove = AUTHENTICATED_TOOL_USER_ID
+                .scope("user-b".to_string(), async {
+                    tool.call(StoreMetaMemoryArgs {
+                        operation: MetaMemoryOperation::Remove,
+                        key: "reflection_style".to_string(),
+                        value: None,
+                    })
+                    .await
+                })
+                .await
+                .unwrap();
+            assert!(!other_user_remove.changed);
+            assert_eq!(
+                list_meta_memories(&conn, "user-a", &user_a_dek)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn meta_memory_enforces_per_user_row_cap() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            ensure_schema(&conn).await.unwrap();
+            conn.call(|conn| {
+                conn.execute(
+                    "INSERT INTO users (id, username) VALUES ('user-a', 'user-a')",
+                    [],
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+            let dek = security::generate_dek();
+            for index in 0..META_MEMORY_MAX_ROWS {
+                upsert_meta_memory(
+                    &conn,
+                    "user-a",
+                    &dek,
+                    &format!("preference_{index}"),
+                    "Saved response preference",
+                )
+                .await
+                .unwrap();
+            }
+            let error = upsert_meta_memory(
+                &conn,
+                "user-a",
+                &dek,
+                "one_too_many",
+                "This should not be saved",
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("No more than"));
+
+            upsert_meta_memory(
+                &conn,
+                "user-a",
+                &dek,
+                "preference_0",
+                "An existing preference may still be updated at the cap",
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                list_meta_memories(&conn, "user-a", &dek)
+                    .await
+                    .unwrap()
+                    .len(),
+                META_MEMORY_MAX_ROWS
+            );
+        }
+
+        #[test]
+        fn meta_memory_limits_and_prompt_block_are_explicit() {
+            assert!(normalized_meta_memory_key("").is_err());
+            assert!(
+                normalized_meta_memory_key(&"x".repeat(META_MEMORY_KEY_MAX_CHARS + 1)).is_err()
+            );
+            assert!(validated_meta_memory_value("").is_err());
+            assert!(
+                validated_meta_memory_value(&"x".repeat(META_MEMORY_VALUE_MAX_CHARS + 1)).is_err()
+            );
+
+            let block = format_response_preferences_block(&[(
+                "opaque-row-id".to_string(),
+                MetaMemory {
+                    key: "analysis_depth".to_string(),
+                    value: "Give me more in-depth Jungian analysis.".to_string(),
+                },
+            )]);
+            assert!(block.starts_with("<response_preferences>"));
+            assert!(block.contains("analysis_depth: Give me more in-depth Jungian analysis."));
+            assert!(block.contains("subordinate to safety, accuracy, and the therapist role"));
+            assert!(block.ends_with("</response_preferences>"));
+        }
+
+        #[test]
+        fn response_preferences_are_system_preamble_not_user_context() {
+            let response_preferences = format_response_preferences_block(&[(
+                "opaque-row-id".to_string(),
+                MetaMemory {
+                    key: "analysis_depth".to_string(),
+                    value: "Give me more in-depth Jungian analysis.".to_string(),
+                },
+            )]);
+            let persistent_memory = format_persistent_memory_block(
+                &["The user described a recurring dream.".to_string()],
+                &[],
+                &[],
+                &[],
+            );
+            let user_input = "What might the dream mean?";
+
+            let preamble = therapist_preamble(&response_preferences);
+            let user_prompt = therapist_user_prompt(&persistent_memory, user_input);
+
+            assert_eq!(
+                preamble,
+                format!("{THERAPIST_SYSTEM_PROMPT}\n\n{response_preferences}")
+            );
+            assert!(preamble.contains("<response_preferences>"));
+            assert!(preamble.contains("Give me more in-depth Jungian analysis."));
+            assert!(!preamble.contains("The user described a recurring dream."));
+            assert!(!preamble.contains(user_input));
+
+            assert_eq!(user_prompt, format!("{persistent_memory}\n\n{user_input}"));
+            assert!(user_prompt.contains("<persistent_memory>"));
+            assert!(!user_prompt.contains("<response_preferences>"));
+            assert!(!user_prompt.contains("Give me more in-depth Jungian analysis."));
+            assert!(!user_prompt.contains(THERAPIST_SYSTEM_PROMPT));
         }
 
         #[test]

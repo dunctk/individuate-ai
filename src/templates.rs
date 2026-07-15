@@ -285,7 +285,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260715-graph-labels"));
+        assert!(html.contains("individuateai.css?v=20260715-security-dossier"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }
@@ -336,6 +336,11 @@ mod tests {
         assert!(html.contains("Zero-retention AI routing"));
         assert!(html.contains("processed by Deepgram within the European Union"));
         assert!(html.contains("retained only for the time required to process the request"));
+        assert!(html.contains("privacy-vault"));
+        assert!(html.contains("privacy-mobile-toc"));
+        assert!(html.contains("privacy-boundary"));
+        assert!(html.contains("privacy-access-flow"));
+        assert!(html.contains("Security dossier"));
         assert!(html.contains("href=\"/\""));
     }
 

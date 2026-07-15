@@ -285,6 +285,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
+        assert!(html.contains("individuateai.css?v=20260715-graph-labels"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }

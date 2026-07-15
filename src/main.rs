@@ -1,7 +1,7 @@
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -179,7 +179,8 @@ async fn main() {
         .merge(rate_limited_routes)
         // Auth middleware
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn(add_app_search_headers));
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3008".to_string());
     let addr = format!("0.0.0.0:{}", port);
@@ -191,6 +192,18 @@ async fn main() {
 }
 
 // --- Auth Middleware ---
+
+async fn add_app_search_headers(
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let mut response = next.run(req).await;
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-robots-tag"),
+        HeaderValue::from_static("noindex, nofollow, noarchive"),
+    );
+    response
+}
 
 async fn auth_guard(
     State(state): State<AppState>,

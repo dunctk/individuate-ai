@@ -126,6 +126,7 @@ async fn main() {
     let app = Router::new()
         // Pages
         .route("/", get(landing_page))
+        .route("/privacy-and-security", get(privacy_security_page))
         .route("/chat", get(home_page))
         .route("/login", get(login_page))
         .route("/recovery", get(recovery_page))
@@ -332,6 +333,11 @@ async fn home_page(
 
 async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
     let html = templates::render_login(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+}
+
+async fn privacy_security_page(State(state): State<AppState>) -> impl IntoResponse {
+    let html = templates::render_privacy_security(&state.templates);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
 }
 

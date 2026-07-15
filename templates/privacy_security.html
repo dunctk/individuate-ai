@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Privacy & Security · IndividuateAI{% endblock %}
+{% block content %}
+<div class="privacy-page min-h-screen">
+    <header class="landing-nav fixed inset-x-0 top-0 z-30">
+        <nav class="max-w-6xl mx-auto px-4 sm:px-6 min-h-[68px] flex items-center justify-between gap-3" aria-label="Privacy page navigation">
+            <a href="/" class="brand-mark text-lg sm:text-xl no-underline">IndividuateAI</a>
+            <div class="flex items-center gap-2">
+                <a href="/" class="min-h-11 inline-flex items-center px-3 text-sm font-semibold text-sage-light hover:text-parchment transition-colors">Home</a>
+                <a href="/signup" class="min-h-11 inline-flex items-center rounded-xl px-4 text-sm font-bold text-void-deep bg-integral-turquoise-bright hover:bg-systemic-yellow-soft transition-colors">Get started</a>
+            </div>
+        </nav>
+    </header>
+
+    <main class="pt-28 sm:pt-36 pb-20 px-4 sm:px-6">
+        <div class="privacy-radial" aria-hidden="true"></div>
+        <div class="max-w-6xl mx-auto relative">
+            <section class="max-w-3xl">
+                <p class="landing-kicker mb-5"><span></span> Privacy &amp; security</p>
+                <h1 class="landing-display text-[2.8rem] sm:text-6xl text-parchment">Your inner life should not become someone else’s dataset.</h1>
+                <p class="mt-6 text-lg sm:text-xl leading-relaxed text-sage-light max-w-2xl">
+                    IndividuateAI stores conversations, memories, and relationship maps. We treat that as exceptionally sensitive data and design the system so there is no operator-held master key for user content.
+                </p>
+                <div class="privacy-status mt-8" aria-label="Security design summary">
+                    <span>Passkey-only access</span>
+                    <span>Per-user encryption</span>
+                    <span>Zero-retention AI routing</span>
+                </div>
+            </section>
+
+            <div class="mt-16 sm:mt-20 grid lg:grid-cols-[220px_minmax(0,1fr)] gap-10 lg:gap-16 items-start">
+                <nav class="privacy-toc hidden lg:block sticky top-28" aria-label="On this page">
+                    <p class="role-label mb-4">On this page</p>
+                    <a href="#promise">The promise</a>
+                    <a href="#limits">The limits</a>
+                    <a href="#encryption">Encryption</a>
+                    <a href="#access">Passkeys &amp; recovery</a>
+                    <a href="#providers">AI &amp; voice providers</a>
+                    <a href="#operations">Operational safeguards</a>
+                </nav>
+
+                <article class="privacy-article min-w-0">
+                    <section id="promise" class="privacy-section scroll-mt-28">
+                        <p class="role-label">01 · The promise</p>
+                        <h2>What the design protects</h2>
+                        <p>A stolen database, disk, or backup should not reveal your conversations or saved memories. A compromise of the server while you are offline should not expose the key needed to decrypt your account.</p>
+                        <div class="privacy-grid">
+                            <div>
+                                <h3>No master content key</h3>
+                                <p>Each account has its own random 256-bit data-encryption key. We do not retain a universal key that can unlock everyone’s content.</p>
+                            </div>
+                            <div>
+                                <h3>Encrypted at two layers</h3>
+                                <p>The SQLite database is encrypted at rest, and sensitive content is separately encrypted with your account’s own key.</p>
+                            </div>
+                            <div>
+                                <h3>Small active window</h3>
+                                <p>Your key reaches the server inside your encrypted session cookie and remains in memory only briefly while active requests and background memory work finish.</p>
+                            </div>
+                            <div>
+                                <h3>Inspectable implementation</h3>
+                                <p>The application is open source, so these claims can be checked against the code rather than accepted as marketing language.</p>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section id="limits" class="privacy-section scroll-mt-28">
+                        <p class="role-label">02 · The limits</p>
+                        <h2>Where encryption cannot help</h2>
+                        <p>We want the boundary to be explicit. The model must receive readable conversation text to respond. A root attacker controlling the live server could also capture the keys and content of people actively using it during that compromise.</p>
+                        <div class="privacy-caution">
+                            <strong>The system reduces the blast radius; it does not make a live compromised server harmless.</strong>
+                            <p>It changes the risk from “every user, at any time” to “active users during the compromise window.” Provider exposure is controlled through zero-retention routing and contractual safeguards, not end-to-end encryption.</p>
+                        </div>
+                    </section>
+
+                    <section id="encryption" class="privacy-section scroll-mt-28">
+                        <p class="role-label">03 · Encryption</p>
+                        <h2>How saved content is protected</h2>
+                        <ol class="privacy-steps">
+                            <li><span>1</span><div><h3>Database encryption</h3><p>SQLCipher encrypts the complete SQLite database on disk. The deployment key lives in the protected server environment, not in the repository.</p></div></li>
+                            <li><span>2</span><div><h3>Per-user content encryption</h3><p>Messages, memory fragments, embeddings, episodes, relationship profiles, and graph labels are encrypted again with XChaCha20-Poly1305 under your account’s unique key.</p></div></li>
+                            <li><span>3</span><div><h3>Encrypted recall</h3><p>Embeddings are decrypted only in memory for your own searches. This avoids keeping a plaintext vector index that could reconstruct sensitive text.</p></div></li>
+                        </ol>
+                    </section>
+
+                    <section id="access" class="privacy-section scroll-mt-28">
+                        <p class="role-label">04 · Passkeys &amp; recovery</p>
+                        <h2>Your credentials unlock your key</h2>
+                        <p>Authentication is passkey-only. A passkey seals a copy of your account key using WebAuthn PRF or, for supported Apple passkeys, synced largeBlob storage. Your recovery key seals another independent copy.</p>
+                        <div class="privacy-caution privacy-caution-warm">
+                            <strong>There is deliberately no password-reset back door.</strong>
+                            <p>If you lose every passkey and your recovery key, the encrypted content cannot be recovered by us. Any recovery mechanism we controlled would also be a mechanism capable of bypassing your encryption.</p>
+                        </div>
+                        <p>After sign-in, the unlocked account key travels inside the encrypted authentication cookie so you can stay signed in without repeatedly entering a PIN. Short PINs are not used because they can be brute-forced offline.</p>
+                    </section>
+
+                    <section id="providers" class="privacy-section scroll-mt-28">
+                        <p class="role-label">05 · AI &amp; voice providers</p>
+                        <h2>What leaves the application</h2>
+                        <div class="privacy-provider-list">
+                            <div><h3>Language models</h3><p>Conversation context is routed through OpenRouter with data collection denied, restricting requests to providers that do not retain prompts or use them for training.</p></div>
+                            <div><h3>Voice transcription</h3><p>Microphone audio is sent directly to Deepgram using a short-lived signed-in token. The long-lived provider key never reaches the browser, and model-improvement use is disabled.</p></div>
+                            <div><h3>Spoken responses</h3><p>Text-to-speech audio is streamed into browser memory for the current response. The app does not write generated speech audio to your database.</p></div>
+                        </div>
+                    </section>
+
+                    <section id="operations" class="privacy-section scroll-mt-28">
+                        <p class="role-label">06 · Operational safeguards</p>
+                        <h2>Security also depends on operations</h2>
+                        <ul class="privacy-list">
+                            <li>Secrets and API keys live in the deployment environment and are never committed.</li>
+                            <li>Authentication cookies are encrypted and require a strong server secret.</li>
+                            <li>Every memory, graph, session, and streaming request is scoped to the authenticated user.</li>
+                            <li>Conversation content is excluded from application logs.</li>
+                            <li>Authentication endpoints are rate-limited.</li>
+                        </ul>
+                        <div class="mt-8 flex flex-col sm:flex-row gap-3">
+                            <a href="https://github.com/dunctk/individuate-ai" target="_blank" rel="noopener noreferrer" class="landing-primary min-h-12 inline-flex items-center justify-center px-6 rounded-2xl font-bold">Inspect the source code <span aria-hidden="true">↗</span></a>
+                            <a href="/signup" class="min-h-12 inline-flex items-center justify-center px-6 rounded-2xl border border-sage-mist/30 text-parchment font-bold hover:border-integral-turquoise/60 transition-colors">Create an account</a>
+                        </div>
+                    </section>
+                </article>
+            </div>
+        </div>
+    </main>
+
+    <footer class="border-t border-sage-mist/15 px-4 sm:px-6 py-8">
+        <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 text-xs text-sage-mist">
+            <div><p class="brand-mark text-base">IndividuateAI</p><p class="mt-1">Private AI reflection with inspectable memory.</p></div>
+            <div class="flex flex-wrap gap-x-6 gap-y-3">
+                <a href="/" class="hover:text-parchment transition-colors">Home</a>
+                <a href="/login" class="hover:text-parchment transition-colors">Sign in</a>
+                <a href="https://github.com/dunctk/individuate-ai" target="_blank" rel="noopener noreferrer" class="hover:text-parchment transition-colors">Source code</a>
+            </div>
+        </div>
+    </footer>
+</div>
+{% endblock %}

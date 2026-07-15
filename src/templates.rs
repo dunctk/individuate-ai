@@ -51,6 +51,11 @@ pub fn create_env() -> Environment<'static> {
         .unwrap();
     env.add_template("landing", include_str!("../templates/landing.html"))
         .unwrap();
+    env.add_template(
+        "privacy_security",
+        include_str!("../templates/privacy_security.html"),
+    )
+    .unwrap();
     env.add_template("login", include_str!("../templates/login.html"))
         .unwrap();
     env.add_template("recovery", include_str!("../templates/recovery.html"))
@@ -90,6 +95,13 @@ pub fn render_login(env: &Environment) -> String {
 
 pub fn render_landing(env: &Environment) -> String {
     env.get_template("landing")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
+pub fn render_privacy_security(env: &Environment) -> String {
+    env.get_template("privacy_security")
         .unwrap()
         .render(json!({}))
         .unwrap()
@@ -258,6 +270,7 @@ mod tests {
             "profile_drawer",
             "mind_map",
             "social_graph",
+            "privacy_security",
         ] {
             env.get_template(name).expect("template registered");
         }
@@ -308,6 +321,18 @@ mod tests {
         assert!(html.contains("The AI provider must read a message to answer it"));
         assert!(html.contains("github.com/dunctk/individuate-ai"));
         assert!(html.contains("href=\"/login\""));
+        assert!(html.contains("href=\"/privacy-and-security\""));
+    }
+
+    #[test]
+    fn privacy_security_page_explains_boundaries_and_recovery() {
+        let env = create_env();
+        let html = render_privacy_security(&env);
+        assert!(html.contains("Your inner life should not become someone else"));
+        assert!(html.contains("Where encryption cannot help"));
+        assert!(html.contains("There is deliberately no password-reset back door"));
+        assert!(html.contains("Zero-retention AI routing"));
+        assert!(html.contains("href=\"/\""));
     }
 
     #[test]

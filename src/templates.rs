@@ -285,7 +285,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260715-security-dossier"));
+        assert!(html.contains("individuateai.css?v=20260715-chat-copy"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }
@@ -406,6 +406,8 @@ mod tests {
         assert!(html.contains("min-w-0 w-full items-end"));
         assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("copy-thread-button"));
+        assert!(html.contains("<span class=\"thread-copy-label\">Copy</span>"));
+        assert!(!html.contains("thread-copy-label sr-only"));
         assert!(html.contains("copyThreadMarkdown()"));
         assert!(html.contains("# Conversation"));
         assert!(html.contains("voice-live"));

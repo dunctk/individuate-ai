@@ -997,17 +997,28 @@
 
     .thread-copy-button {
         display: inline-flex;
-        width: 44px;
-        min-width: 44px;
-        height: 44px;
+        min-width: 0;
+        height: 30px;
+        position: relative;
         align-items: center;
         justify-content: center;
-        gap: 0;
-        border: 1px solid transparent;
-        border-radius: 9999px;
-        color: #6B8A82;
-        background: transparent;
+        gap: 0.34rem;
+        margin: 7px 0 7px 5px;
+        padding: 0 0.62rem;
+        border: 1px solid rgba(74, 99, 93, 0.3);
+        border-radius: 0.62rem;
+        color: #89A39B;
+        background: rgba(20, 38, 33, 0.46);
+        font-size: 0.7rem;
+        font-weight: 750;
+        letter-spacing: 0.01em;
         transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease, transform 100ms ease-out;
+    }
+
+    .thread-copy-button::before {
+        content: "";
+        position: absolute;
+        inset: -7px 0;
     }
 
     .thread-copy-button:hover:not(:disabled) {
@@ -1025,7 +1036,7 @@
 
     .thread-copy-button:disabled {
         cursor: default;
-        opacity: 0.32;
+        opacity: 0.4;
     }
 
     .thread-copy-button[data-copied="true"] {
@@ -1035,8 +1046,8 @@
     }
 
     .thread-copy-button svg {
-        width: 17px;
-        height: 17px;
+        width: 13px;
+        height: 13px;
         flex: none;
         stroke-width: 1.8;
         stroke-linecap: round;
@@ -1044,6 +1055,7 @@
     }
 
     .thread-copy-check { display: none; }
+    .thread-copy-label { line-height: 1; white-space: nowrap; }
     .thread-copy-button[data-copied="true"] .thread-copy-icon { display: none; }
     .thread-copy-button[data-copied="true"] .thread-copy-check { display: block; }
 

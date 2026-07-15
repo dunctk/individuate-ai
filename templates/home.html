@@ -141,7 +141,7 @@
                             <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                                 <path d="m5 12 4 4L19 6"></path>
                             </svg>
-                            <span class="thread-copy-label sr-only">Copy thread</span>
+                            <span class="thread-copy-label">Copy</span>
                         </button>
                     </div>
                     <label class="auto-read-toggle" for="auto-read-responses">
@@ -1545,7 +1545,7 @@ async function copyThreadMarkdown() {
         showToast('Thread copied as Markdown');
         copyThreadFeedbackTimer = setTimeout(() => {
             button.dataset.copied = 'false';
-            button.querySelector('.thread-copy-label').textContent = 'Copy thread';
+            button.querySelector('.thread-copy-label').textContent = 'Copy';
         }, 2200);
     } catch (_) {
         showToast('Could not copy the thread', 'error');

@@ -12,8 +12,12 @@ use base64::Engine;
 use dashmap::DashMap;
 use individuateai::agent::{
     self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
-    is_supported_tts_voice, stream_handler, AuthSession, MemoryEdit, RelationshipProfile, User,
-    DEFAULT_TTS_VOICE,
+    is_supported_tts_voice, stream_handler, AuthSession, MemoryEdit, RelationshipProfile,
+    UsageKind, User, DEFAULT_TTS_VOICE,
+};
+use individuateai::billing::{
+    event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
+    StripeSubscription,
 };
 use individuateai::fileserv;
 use individuateai::templates;
@@ -24,9 +28,19 @@ use std::time::{Duration, Instant};
 
 const DEEPGRAM_EU_API_BASE: &str = "https://api.eu.deepgram.com";
 const DEEPGRAM_MIP_OPT_OUT: &str = "true";
+const DEFAULT_MONTHLY_VOICE_TOKEN_SOFT_LIMIT: usize = 600;
+const DEFAULT_MONTHLY_TTS_CHARACTER_SOFT_LIMIT: usize = 150_000;
 
 fn deepgram_eu_endpoint(path: &str) -> String {
     format!("{DEEPGRAM_EU_API_BASE}{path}")
+}
+
+fn usage_limit(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 #[derive(Clone)]
@@ -35,6 +49,7 @@ struct AppState {
     templates: Arc<Environment<'static>>,
     rate_limiter: RateLimiter,
     speech_rate_limiter: RateLimiter,
+    stripe: Option<StripeConfig>,
 }
 
 impl axum::extract::FromRef<AppState> for Key {
@@ -101,12 +116,15 @@ async fn main() {
     let _ = dotenvy::dotenv();
     let key = cookie_key();
     let env = Arc::new(templates::create_env());
+    let stripe = StripeConfig::from_env()
+        .unwrap_or_else(|error| panic!("Invalid Stripe billing configuration: {error}"));
 
     let state = AppState {
         key: key.clone(),
         templates: env.clone(),
         rate_limiter: RateLimiter::new(10, 60), // 10 attempts per 60s window
         speech_rate_limiter: RateLimiter::new(90, 60),
+        stripe,
     };
 
     let rate_limited_routes = Router::new()
@@ -138,6 +156,9 @@ async fn main() {
         .route("/login", get(login_page))
         .route("/recovery", get(recovery_page))
         .route("/signup", get(signup_page))
+        .route("/subscribe", get(subscribe_page))
+        .route("/billing/success", get(billing_success_page))
+        .route("/admin", get(admin_page))
         .route("/mind-map", get(mind_map_page))
         .route("/social-graph", get(social_graph_page))
         // Fragments
@@ -147,6 +168,17 @@ async fn main() {
         // API (non-rate-limited)
         .route("/api/logout", get(logout_handler))
         .route("/api/whoami", get(whoami_handler))
+        .route("/api/billing/checkout", post(create_checkout_handler))
+        .route("/api/billing/portal", post(create_billing_portal_handler))
+        .route(
+            "/api/admin/users/:user_id/lifetime-access/grant",
+            post(grant_lifetime_access_handler),
+        )
+        .route(
+            "/api/admin/users/:user_id/lifetime-access/revoke",
+            post(revoke_lifetime_access_handler),
+        )
+        .route("/api/stripe/webhook", post(stripe_webhook_handler))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/:id/history", get(chat_history))
         .route("/api/profiles", get(list_profiles))
@@ -212,13 +244,18 @@ async fn auth_guard(
 ) -> Response {
     let path = req.uri().path().trim_end_matches('/');
     let protected = path == "/chat"
+        || path == "/subscribe"
+        || path == "/billing/success"
+        || path == "/admin"
         || path == "/mind-map"
         || path == "/social-graph"
         || path.starts_with("/fragments")
         || path.starts_with("/api/sessions")
         || path.starts_with("/api/profiles")
         || path.starts_with("/api/chat");
+    let is_public_webhook = path == "/api/stripe/webhook";
     let is_api = path.starts_with("/api/")
+        && !is_public_webhook
         && !path.contains("/login")
         && !path.contains("/signup")
         && !path.contains("/passkey/login")
@@ -235,7 +272,59 @@ async fn auth_guard(
         }
         return Redirect::temporary("/login").into_response();
     }
+
+    let account_security_api = path.starts_with("/api/passkey/")
+        || path.starts_with("/api/recovery/")
+        || path == "/api/logout"
+        || path == "/api/whoami"
+        || path == "/admin"
+        || path.starts_with("/api/billing/")
+        || path.starts_with("/api/admin/");
+    let requires_paid_access = !is_public_webhook
+        && path != "/subscribe"
+        && path != "/billing/success"
+        && !account_security_api
+        && (protected || is_api);
+    if state.stripe.is_some() && requires_paid_access {
+        let has_access = match get_authed_user(req.headers(), &state.key).await {
+            Some(user) => match user_has_application_access(&user).await {
+                Ok(has_access) => has_access,
+                Err(error) => {
+                    tracing::error!("Could not check application access: {error}");
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+            },
+            None => false,
+        };
+        if !has_access {
+            if path.starts_with("/api/") {
+                return (
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(serde_json::json!({
+                        "error": "A paid subscription is required",
+                        "subscribe_url": "/subscribe"
+                    })),
+                )
+                    .into_response();
+            }
+            return Redirect::temporary("/subscribe").into_response();
+        }
+    }
     next.run(req).await
+}
+
+async fn user_has_application_access(user: &User) -> anyhow::Result<bool> {
+    if is_admin_email(&user.username) {
+        return Ok(true);
+    }
+    let runtime = agent_runtime().await?;
+    if runtime.has_lifetime_access(user.id.clone()).await? {
+        return Ok(true);
+    }
+    Ok(runtime
+        .get_billing_account(user.id.clone())
+        .await?
+        .is_some_and(|account| account.has_paid_access()))
 }
 
 // --- Rate Limiting Middleware ---
@@ -371,6 +460,162 @@ async fn signup_page(State(state): State<AppState>) -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
 }
 
+async fn subscribe_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return Redirect::temporary("/login").into_response(),
+    };
+    if user_has_application_access(&user).await.unwrap_or(false) {
+        return Redirect::temporary("/chat").into_response();
+    }
+    let html = templates::render_subscribe(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn admin_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) if is_admin_email(&user.username) => user,
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => return Redirect::temporary("/login").into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open access administration store: {error}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    match runtime.list_admin_users().await {
+        Ok(users) => {
+            let html = templates::render_admin(&state.templates, &users, &user.username);
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+        }
+        Err(error) => {
+            tracing::error!("Could not list users for access administration: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn grant_lifetime_access_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_user_id): Path<String>,
+) -> Response {
+    update_lifetime_access(state, headers, target_user_id, true).await
+}
+
+async fn revoke_lifetime_access_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_user_id): Path<String>,
+) -> Response {
+    update_lifetime_access(state, headers, target_user_id, false).await
+}
+
+async fn update_lifetime_access(
+    state: AppState,
+    headers: HeaderMap,
+    target_user_id: String,
+    grant: bool,
+) -> Response {
+    let admin = match get_authed_user(&headers, &state.key).await {
+        Some(user) if is_admin_email(&user.username) => user,
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "Administrator access required"})),
+            )
+                .into_response()
+        }
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    if target_user_id == admin.id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "The environment administrator already has access"
+            })),
+        )
+            .into_response();
+    }
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open access administration store: {error}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let result = if grant {
+        runtime
+            .grant_lifetime_access(target_user_id, admin.id)
+            .await
+    } else {
+        runtime
+            .revoke_lifetime_access(target_user_id, admin.id)
+            .await
+    };
+    match result {
+        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "User or active grant not found"})),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("Could not update lifetime access: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not update access"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn billing_success_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return Redirect::temporary("/login").into_response(),
+    };
+    let stripe = match state.stripe.as_ref() {
+        Some(stripe) => stripe,
+        None => return Redirect::temporary("/chat").into_response(),
+    };
+    let session_id = match params.get("session_id") {
+        Some(session_id) => session_id,
+        None => return Redirect::temporary("/subscribe?checkout=invalid").into_response(),
+    };
+    let result = async {
+        let checkout = stripe.retrieve_checkout(session_id).await?;
+        if checkout.user_id != user.id {
+            anyhow::bail!("Checkout session belongs to a different account");
+        }
+        let subscription = stripe
+            .retrieve_subscription(&checkout.subscription_id)
+            .await?;
+        if subscription.customer_id != checkout.customer_id {
+            anyhow::bail!("Checkout customer does not match its subscription");
+        }
+        let runtime = agent_runtime().await?;
+        runtime
+            .upsert_billing_account(user.id.clone(), subscription)
+            .await
+    }
+    .await;
+    match result {
+        Ok(()) => Redirect::to("/chat?subscription=active").into_response(),
+        Err(error) => {
+            tracing::error!("Could not reconcile successful Checkout session: {error}");
+            Redirect::temporary("/subscribe?checkout=pending").into_response()
+        }
+    }
+}
+
 async fn mind_map_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match get_authed_user(&headers, &state.key).await {
         Some(u) => u,
@@ -479,6 +724,252 @@ async fn profile_drawer_fragment(
 }
 
 // --- API Handlers ---
+
+#[derive(Deserialize)]
+struct CreateCheckoutPayload {
+    plan: String,
+}
+
+async fn create_checkout_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateCheckoutPayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    match user_has_application_access(&user).await {
+        Ok(true) => return Json(serde_json::json!({"url": "/chat"})).into_response(),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!("Could not check access before Checkout: {error}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    }
+    let plan = match BillingPlan::parse(&payload.plan) {
+        Some(plan) => plan,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Unknown billing plan"})),
+            )
+                .into_response()
+        }
+    };
+    let stripe = match state.stripe.as_ref() {
+        Some(stripe) => stripe,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Billing is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open billing store: {error}");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let existing = runtime
+        .get_billing_account(user.id.clone())
+        .await
+        .ok()
+        .flatten();
+    if existing
+        .as_ref()
+        .map(|account| account.has_paid_access())
+        .unwrap_or(false)
+    {
+        return Json(serde_json::json!({"url": "/chat"})).into_response();
+    }
+    match stripe
+        .create_checkout_session(
+            &user.id,
+            &user.username,
+            plan,
+            existing
+                .as_ref()
+                .map(|account| account.stripe_customer_id.as_str()),
+        )
+        .await
+    {
+        Ok(url) => Json(serde_json::json!({"url": url})).into_response(),
+        Err(error) => {
+            tracing::error!("Could not create Stripe Checkout session: {error}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Could not start secure checkout"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn create_billing_portal_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let stripe = match state.stripe.as_ref() {
+        Some(stripe) => stripe,
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let account = match runtime.get_billing_account(user.id).await {
+        Ok(Some(account)) => account,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "No billing account exists yet"})),
+            )
+                .into_response()
+        }
+    };
+    match stripe
+        .create_portal_session(&account.stripe_customer_id)
+        .await
+    {
+        Ok(url) => Json(serde_json::json!({"url": url})).into_response(),
+        Err(error) => {
+            tracing::error!("Could not create Stripe billing portal session: {error}");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "Could not open billing settings"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn stripe_webhook_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let stripe = match state.stripe.as_ref() {
+        Some(stripe) => stripe,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let signature = match headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(signature) => signature,
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if let Err(error) = stripe.verify_webhook(&body, signature) {
+        tracing::warn!("Rejected Stripe webhook: {error}");
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let event: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(event) => event,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let event_id = match event.get("id").and_then(|value| value.as_str()) {
+        Some(event_id) => event_id.to_string(),
+        None => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not open billing store for Stripe webhook: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if runtime
+        .stripe_event_was_processed(event_id.clone())
+        .await
+        .unwrap_or(false)
+    {
+        return StatusCode::OK.into_response();
+    }
+    let event_type = event
+        .get("type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let object = &event["data"]["object"];
+    let process_result: anyhow::Result<()> = async {
+        let (user_id, subscription): (Option<String>, Option<StripeSubscription>) = match event_type
+        {
+            "checkout.session.completed" => {
+                let subscription_id = object
+                    .get("subscription")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let subscription = match subscription_id {
+                    Some(subscription_id) => {
+                        Some(stripe.retrieve_subscription(&subscription_id).await?)
+                    }
+                    None => None,
+                };
+                (event_user_id(object), subscription)
+            }
+            "customer.subscription.created" | "customer.subscription.updated" => {
+                let subscription_id = object
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Subscription event is missing its ID"))?;
+                (
+                    event_user_id(object),
+                    Some(stripe.retrieve_subscription(subscription_id).await?),
+                )
+            }
+            "customer.subscription.deleted" => (
+                event_user_id(object),
+                Some(subscription_from_value(object)?),
+            ),
+            _ => (None, None),
+        };
+        if let Some(subscription) = subscription {
+            let user_id = match user_id {
+                Some(user_id) => Some(user_id),
+                None => {
+                    runtime
+                        .user_id_for_stripe_customer(subscription.customer_id.clone())
+                        .await?
+                }
+            };
+            if let Some(user_id) = user_id {
+                runtime
+                    .upsert_billing_account(user_id, subscription)
+                    .await?;
+            } else {
+                anyhow::bail!("Could not associate Stripe subscription with an app user");
+            }
+        }
+        runtime.mark_stripe_event_processed(event_id).await
+    }
+    .await;
+    match process_result {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(error) => {
+            tracing::error!("Stripe webhook processing failed: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
 
 async fn logout_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let jar = PrivateCookieJar::from_headers(&headers, state.key.clone());
@@ -828,13 +1319,16 @@ async fn transcribe_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if get_authed_user(&headers, &state.key).await.is_none() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Unauthorized"})),
-        )
-            .into_response();
-    }
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
 
     const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
     if body.is_empty() {
@@ -850,6 +1344,30 @@ async fn transcribe_handler(
             Json(serde_json::json!({"error": "Recording is too large"})),
         )
             .into_response();
+    }
+    if let Ok(runtime) = agent_runtime().await {
+        match runtime
+            .consume_monthly_usage(
+                user.id,
+                UsageKind::VoiceToken,
+                1,
+                usage_limit(
+                    "MONTHLY_VOICE_TOKEN_SOFT_LIMIT",
+                    DEFAULT_MONTHLY_VOICE_TOKEN_SOFT_LIMIT,
+                ),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": "Voice is temporarily unavailable for this account"})),
+                )
+                    .into_response()
+            }
+            Err(error) => tracing::error!("Could not record voice usage: {error}"),
+        }
     }
 
     let api_key = match std::env::var("DEEPGRAM_API_KEY") {
@@ -935,6 +1453,30 @@ async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMa
                 .into_response()
         }
     };
+    if let Ok(runtime) = agent_runtime().await {
+        match runtime
+            .consume_monthly_usage(
+                user.id.clone(),
+                UsageKind::VoiceToken,
+                1,
+                usage_limit(
+                    "MONTHLY_VOICE_TOKEN_SOFT_LIMIT",
+                    DEFAULT_MONTHLY_VOICE_TOKEN_SOFT_LIMIT,
+                ),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": "Voice is temporarily unavailable for this account"})),
+                )
+                    .into_response()
+            }
+            Err(error) => tracing::error!("Could not record voice usage: {error}"),
+        }
+    }
 
     let api_key = match std::env::var("DEEPGRAM_API_KEY") {
         Ok(value) if !value.trim().is_empty() => value,
@@ -1051,6 +1593,30 @@ async fn speak_handler(
             Json(serde_json::json!({"error": "Speech text must be between 1 and 2000 characters"})),
         )
             .into_response();
+    }
+    if let Ok(runtime) = agent_runtime().await {
+        match runtime
+            .consume_monthly_usage(
+                user.id.clone(),
+                UsageKind::TtsCharacter,
+                text.chars().count(),
+                usage_limit(
+                    "MONTHLY_TTS_CHARACTER_SOFT_LIMIT",
+                    DEFAULT_MONTHLY_TTS_CHARACTER_SOFT_LIMIT,
+                ),
+            )
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({"error": "Spoken responses are temporarily unavailable for this account"})),
+                )
+                    .into_response()
+            }
+            Err(error) => tracing::error!("Could not record speech usage: {error}"),
+        }
     }
 
     let api_key = match std::env::var("DEEPGRAM_API_KEY") {
@@ -1346,7 +1912,17 @@ async fn passkey_register_start(
     headers: HeaderMap,
     Json(payload): Json<PasskeyEmailPayload>,
 ) -> Response {
-    let runtime = agent_runtime().await.unwrap();
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not initialize account store: {error}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Account setup is temporarily unavailable"})),
+            )
+                .into_response();
+        }
+    };
     let can_register = match get_authed_user(&headers, &state.key).await {
         Some(user) => runtime.start_passkey_registration(user.id).await,
         None => {
@@ -1433,6 +2009,11 @@ async fn passkey_register_complete(
         .await
     {
         Ok((user, dek, recovery_key)) => {
+            let redirect = if state.stripe.is_some() && !is_admin_email(&user.username) {
+                "/subscribe"
+            } else {
+                "/chat"
+            };
             let is_secure = cookie_is_secure(&headers);
             let session = AuthSession {
                 user_id: user.id,
@@ -1442,7 +2023,7 @@ async fn passkey_register_complete(
             let mut jar = cookie::CookieJar::new();
             jar.private_mut(&state.key).add(cookie);
             let mut resp =
-                Json(serde_json::json!({"redirect": "/chat", "recovery_key": recovery_key}))
+                Json(serde_json::json!({"redirect": redirect, "recovery_key": recovery_key}))
                     .into_response();
             if let Some(h) = jar.delta().last() {
                 resp.headers_mut().insert(

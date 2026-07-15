@@ -4,8 +4,9 @@
 <div class="min-h-screen flex items-center justify-center px-4 py-8">
     <div class="w-full max-w-sm">
         <div class="text-center mb-8">
+            <p class="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-systemic-yellow">Step 1 of 2 · Secure your account</p>
             <h1 class="text-3xl font-fraunces font-bold text-integral-turquoise mb-2">Create Account</h1>
-            <p class="text-sage-mist text-sm">Set up a passkey to get started</p>
+            <p class="text-sage-mist text-sm">Create your passkey before choosing and paying for a plan.</p>
         </div>
         <div class="bg-void-green border border-sage-mist rounded-xl p-6 space-y-5">
             <div id="account-recovery-warning" class="rounded-xl border border-systemic-yellow/40 bg-systemic-yellow/10 p-4" role="note">
@@ -35,7 +36,7 @@
                 <button id="create-passkey-btn"
                     disabled
                     class="w-full min-h-11 mt-4 bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-base hover:bg-integral-turquoise/90 disabled:opacity-45 disabled:cursor-not-allowed transition-colors">
-                    Create Passkey
+                    Create Passkey &amp; Continue
                 </button>
                 <div id="signup-error" class="text-red-400 text-sm mt-2 hidden" role="alert"></div>
             </div>
@@ -82,16 +83,15 @@ document.getElementById('create-passkey-btn').addEventListener('click', async ()
             if (recovery === null) { return; }
         }
         if (result.redirect) {
-            window.location.href = passkey.large_blob_supported
-                ? '/chat?setup_passkey_sync=1'
-                : result.redirect;
+            if (passkey.large_blob_supported) localStorage.setItem('setup_passkey_sync', '1');
+            window.location.href = result.redirect;
         }
     } catch (e) {
         errEl.textContent = e.message;
         errEl.classList.remove('hidden');
     } finally {
         createPasskeyButton.disabled = !recoveryWarningAck.checked;
-        createPasskeyButton.textContent = 'Create Passkey';
+        createPasskeyButton.textContent = 'Create Passkey & Continue';
     }
 });
 </script>

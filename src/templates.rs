@@ -1,4 +1,6 @@
-use crate::agent::{ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES};
+use crate::agent::{
+    AdminUserAccess, ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES,
+};
 use minijinja::Environment;
 use serde_json::json;
 
@@ -62,6 +64,10 @@ pub fn create_env() -> Environment<'static> {
         .unwrap();
     env.add_template("signup", include_str!("../templates/signup.html"))
         .unwrap();
+    env.add_template("subscribe", include_str!("../templates/subscribe.html"))
+        .unwrap();
+    env.add_template("admin", include_str!("../templates/admin.html"))
+        .unwrap();
     env.add_template("home", include_str!("../templates/home.html"))
         .unwrap();
     env.add_template("sidebar", include_str!("../templates/sidebar.html"))
@@ -121,6 +127,13 @@ pub fn render_signup(env: &Environment) -> String {
         .unwrap()
 }
 
+pub fn render_subscribe(env: &Environment) -> String {
+    env.get_template("subscribe")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
 fn chat_message_values(messages: &[ChatLog]) -> Vec<serde_json::Value> {
     messages
         .iter()
@@ -168,6 +181,35 @@ pub fn render_sidebar(env: &Environment, sessions: &[Session], user: &User) -> S
         .render(json!({
             "sessions": session_list,
             "username": user.username,
+            "is_admin": crate::billing::is_admin_email(&user.username),
+        }))
+        .unwrap()
+}
+
+pub fn render_admin(env: &Environment, users: &[AdminUserAccess], admin_email: &str) -> String {
+    let users = users
+        .iter()
+        .map(|user| {
+            let is_admin = user.username.eq_ignore_ascii_case(admin_email);
+            let has_paid_access = user
+                .billing_status
+                .as_deref()
+                .is_some_and(|status| matches!(status, "active" | "trialing" | "past_due"));
+            json!({
+                "id": user.id,
+                "username": user.username,
+                "billing_status": user.billing_status,
+                "has_paid_access": has_paid_access,
+                "has_lifetime_access": user.has_lifetime_access,
+                "is_admin": is_admin,
+            })
+        })
+        .collect::<Vec<_>>();
+    env.get_template("admin")
+        .unwrap()
+        .render(json!({
+            "users": users,
+            "admin_email": admin_email,
         }))
         .unwrap()
 }
@@ -264,6 +306,7 @@ mod tests {
             "login",
             "recovery",
             "signup",
+            "subscribe",
             "home",
             "sidebar",
             "chat_messages",
@@ -328,6 +371,9 @@ mod tests {
         assert!(html.contains("github.com/dunctk/individuate-ai"));
         assert!(html.contains("href=\"/login\""));
         assert!(html.contains("href=\"/privacy-and-security\""));
+        assert!(html.contains("data-landing-currency-panel=\"usd\""));
+        assert!(html.contains("data-landing-currency-panel=\"eur\""));
+        assert!(html.contains("Show euro pricing"));
     }
 
     #[test]
@@ -376,6 +422,44 @@ mod tests {
         assert!(html.contains("We cannot recover them for you"));
         assert!(html.contains("recovery-warning-ack"));
         assert!(html.contains("must save my recovery key"));
+        assert!(html.contains("Step 1 of 2"));
+        assert!(html.contains("before choosing and paying for a plan"));
+    }
+
+    #[test]
+    fn subscription_page_has_paid_only_usd_and_eur_options() {
+        let env = create_env();
+        let html = render_subscribe(&env);
+        assert!(html.contains("$24.99 monthly"));
+        assert!(html.contains("$239 yearly"));
+        assert!(html.contains("€29.99 monthly"));
+        assert!(html.contains("€289 yearly"));
+        assert!(html.contains("/api/billing/checkout"));
+        assert!(html.contains("Step 2 of 2"));
+        assert!(html.contains("Account and passkey created"));
+        assert!(html.contains("data-currency-panel=\"usd\""));
+        assert!(html.contains("data-currency-panel=\"eur\""));
+        assert!(html.contains("Show euro pricing"));
+        assert!(html.contains("billing_currency"));
+        assert!(!html.to_ascii_lowercase().contains("unlimited"));
+        assert!(!html.to_ascii_lowercase().contains("free trial"));
+    }
+
+    #[test]
+    fn admin_page_renders_access_controls() {
+        let env = create_env();
+        let users = vec![AdminUserAccess {
+            id: "user-1".into(),
+            username: "person@example.com".into(),
+            billing_status: None,
+            has_lifetime_access: false,
+        }];
+        let html = render_admin(&env, &users, "admin@example.com");
+        assert!(html.contains("Complimentary access"));
+        assert!(html.contains("person@example.com"));
+        assert!(html.contains("Grant lifetime"));
+        assert!(html.contains("/api/admin/users/"));
+        assert!(html.contains("does not cancel an existing paid subscription"));
     }
 
     #[test]

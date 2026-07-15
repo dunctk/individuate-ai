@@ -58,6 +58,38 @@ pub struct User {
     pub username: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BillingAccount {
+    pub user_id: String,
+    pub stripe_customer_id: String,
+    pub stripe_subscription_id: String,
+    pub status: String,
+    pub price_id: String,
+    pub current_period_end: Option<i64>,
+    pub cancel_at_period_end: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AdminUserAccess {
+    pub id: String,
+    pub username: String,
+    pub billing_status: Option<String>,
+    pub has_lifetime_access: bool,
+}
+
+impl BillingAccount {
+    pub fn has_paid_access(&self) -> bool {
+        matches!(self.status.as_str(), "active" | "trialing" | "past_due")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum UsageKind {
+    ChatResponse,
+    VoiceToken,
+    TtsCharacter,
+}
+
 /// The only authenticated session material the server accepts.  The DEK is
 /// encrypted by the private cookie; it is never persisted in SQLite.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -247,9 +279,10 @@ fn default_memory_link_weight() -> usize {
 
 mod runtime {
     use super::{
-        ChatLog, EditableMemory, Episode, EpisodeWithLinks, GraphEdge, GraphNode, MemoryEdit,
-        MemoryLink, MemoryStatus, PatientGraph, RelationshipProfile, Session, SocialGraph,
-        SocialGraphEdge, SocialGraphNode, User,
+        AdminUserAccess, BillingAccount, ChatLog, EditableMemory, Episode, EpisodeWithLinks,
+        GraphEdge, GraphNode, MemoryEdit, MemoryLink, MemoryStatus, PatientGraph,
+        RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode, UsageKind,
+        User,
     };
     use crate::security;
     use std::{
@@ -295,6 +328,7 @@ mod runtime {
     const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
     const DEFAULT_SESSION_SUMMARY_INTERVAL: usize = 4;
     const DEFAULT_MAX_HISTORY_MESSAGES: usize = 24;
+    const DEFAULT_MONTHLY_CHAT_SOFT_LIMIT: usize = 500;
 
     const THERAPIST_SYSTEM_PROMPT: &str = r###"
         You are IndividuateAI, a Jungian, gestalt-informed, somatic-aware therapist. Keep responses grounded and practical, usually under ~180 words; go longer only when the user brings heavy material that deserves room. If the user shares safety-critical content, encourage professional or emergency support.
@@ -925,6 +959,57 @@ mod runtime {
         Ok(false)
     }
 
+    fn drop_legacy_vector_store(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
+        let legacy_vector_sql = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'therapy_memory_embeddings'",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        if legacy_vector_sql
+            .as_deref()
+            .is_some_and(|sql| sql.to_ascii_lowercase().contains("using vec0"))
+        {
+            let shadow_tables = {
+                let mut statement = conn.prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'therapy_memory_embeddings_*'",
+                )?;
+                let tables = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                tables
+            };
+
+            // SQLite requires a virtual table's module even to drop it. This
+            // store no longer links sqlite-vec, so remove the one known legacy
+            // schema entry directly, reset the schema cache, then drop only
+            // its validated shadow tables through normal SQLite statements.
+            conn.execute_batch(
+                r###"
+                PRAGMA writable_schema = ON;
+                DELETE FROM sqlite_master
+                WHERE type = 'table' AND name = 'therapy_memory_embeddings';
+                PRAGMA writable_schema = RESET;
+                "###,
+            )?;
+            for table in shadow_tables {
+                if table
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+                {
+                    conn.execute(&format!("DROP TABLE IF EXISTS \"{table}\""), [])?;
+                }
+            }
+        } else {
+            conn.execute("DROP TABLE IF EXISTS therapy_memory_embeddings", [])?;
+        }
+        conn.execute("DROP TABLE IF EXISTS therapy_memory", [])?;
+        Ok(())
+    }
+
     async fn ensure_schema(conn: &Connection) -> Result<()> {
         conn.call(|conn| {
             conn.execute_batch(
@@ -1081,14 +1166,61 @@ mod runtime {
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS billing_accounts (
+                    user_id TEXT PRIMARY KEY,
+                    stripe_customer_id TEXT NOT NULL UNIQUE,
+                    stripe_subscription_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    price_id TEXT NOT NULL DEFAULT '',
+                    current_period_end INTEGER,
+                    cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_billing_accounts_customer
+                    ON billing_accounts(stripe_customer_id);
+                CREATE TABLE IF NOT EXISTS stripe_events (
+                    event_id TEXT PRIMARY KEY,
+                    processed_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS monthly_usage (
+                    user_id TEXT NOT NULL,
+                    period TEXT NOT NULL,
+                    chat_responses INTEGER NOT NULL DEFAULT 0,
+                    voice_tokens INTEGER NOT NULL DEFAULT 0,
+                    tts_characters INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, period),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS lifetime_access_grants (
+                    user_id TEXT PRIMARY KEY,
+                    granted_by_user_id TEXT NOT NULL,
+                    granted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    revoked_by_user_id TEXT,
+                    revoked_at TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(granted_by_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(revoked_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+                );
+                CREATE TABLE IF NOT EXISTS lifetime_access_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_user_id TEXT NOT NULL,
+                    actor_user_id TEXT NOT NULL,
+                    action TEXT NOT NULL CHECK(action IN ('grant', 'revoke')),
+                    occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(target_user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS idx_lifetime_access_events_target
+                    ON lifetime_access_events(target_user_id, occurred_at);
                 "###,
             )
             .map_err(tokio_rusqlite::Error::Rusqlite)?;
             // Do not leave the legacy sqlite-vec copy of therapy text or
             // embeddings in the encrypted database.  New rows use the
             // per-user encrypted_memory table above.
-            conn.execute_batch("DROP TABLE IF EXISTS therapy_memory_embeddings; DROP TABLE IF EXISTS therapy_memory;")
-                .map_err(tokio_rusqlite::Error::Rusqlite)?;
+            drop_legacy_vector_store(conn).map_err(tokio_rusqlite::Error::Rusqlite)?;
 
             if table_exists(conn, "users").map_err(tokio_rusqlite::Error::Rusqlite)?
                 && !table_has_column(conn, "users", "email_verified")
@@ -6710,6 +6842,22 @@ mod runtime {
             prompt: String,
         ) -> Result<String> {
             self.require_session_ownership(user_id, session_id).await?;
+            if !self
+                .consume_monthly_usage(
+                    user_id.to_string(),
+                    UsageKind::ChatResponse,
+                    1,
+                    env_usize(
+                        "MONTHLY_CHAT_SOFT_LIMIT",
+                        DEFAULT_MONTHLY_CHAT_SOFT_LIMIT,
+                        50,
+                        100_000,
+                    ),
+                )
+                .await?
+            {
+                anyhow::bail!("This account has reached its current usage capacity");
+            }
             self.save_message(session_id.to_string(), "user".into(), prompt.clone())
                 .await?;
 
@@ -6818,6 +6966,22 @@ mod runtime {
             directness: i32,
         ) -> Result<String> {
             self.require_session_ownership(user_id, session_id).await?;
+            if !self
+                .consume_monthly_usage(
+                    user_id.to_string(),
+                    UsageKind::ChatResponse,
+                    1,
+                    env_usize(
+                        "MONTHLY_CHAT_SOFT_LIMIT",
+                        DEFAULT_MONTHLY_CHAT_SOFT_LIMIT,
+                        50,
+                        100_000,
+                    ),
+                )
+                .await?
+            {
+                anyhow::bail!("This account has reached its current usage capacity");
+            }
             let request_label = format!(
                 "Draft request [{} / {}]: {}",
                 relationship_slug, intent, prompt
@@ -6922,6 +7086,22 @@ mod runtime {
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
+            if !self
+                .consume_monthly_usage(
+                    user_id.clone(),
+                    UsageKind::ChatResponse,
+                    1,
+                    env_usize(
+                        "MONTHLY_CHAT_SOFT_LIMIT",
+                        DEFAULT_MONTHLY_CHAT_SOFT_LIMIT,
+                        50,
+                        100_000,
+                    ),
+                )
+                .await?
+            {
+                anyhow::bail!("This account has reached its current usage capacity");
+            }
             let request_label = format!(
                 "Draft request [{} / {}]: {}",
                 relationship_slug, intent, prompt
@@ -7108,6 +7288,22 @@ mod runtime {
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
+            if !self
+                .consume_monthly_usage(
+                    user_id.clone(),
+                    UsageKind::ChatResponse,
+                    1,
+                    env_usize(
+                        "MONTHLY_CHAT_SOFT_LIMIT",
+                        DEFAULT_MONTHLY_CHAT_SOFT_LIMIT,
+                        50,
+                        100_000,
+                    ),
+                )
+                .await?
+            {
+                anyhow::bail!("This account has reached its current usage capacity");
+            }
             self.save_message(session_id.clone(), "user".into(), prompt.clone())
                 .await?;
 
@@ -7284,6 +7480,293 @@ mod runtime {
         }
 
         // --- Public Helpers ---
+        pub async fn get_billing_account(&self, user_id: String) -> Result<Option<BillingAccount>> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT user_id, stripe_customer_id, stripe_subscription_id, status, price_id, current_period_end, cancel_at_period_end FROM billing_accounts WHERE user_id = ?1",
+                        [user_id],
+                        |row| {
+                            Ok(BillingAccount {
+                                user_id: row.get(0)?,
+                                stripe_customer_id: row.get(1)?,
+                                stripe_subscription_id: row.get(2)?,
+                                status: row.get(3)?,
+                                price_id: row.get(4)?,
+                                current_period_end: row.get(5)?,
+                                cancel_at_period_end: row.get::<_, i64>(6)? != 0,
+                            })
+                        },
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Loading billing account")
+        }
+
+        pub async fn has_lifetime_access(&self, user_id: String) -> Result<bool> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM lifetime_access_grants WHERE user_id = ?1 AND revoked_at IS NULL)",
+                        [user_id],
+                        |row| row.get::<_, i64>(0).map(|value| value != 0),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Checking lifetime access")
+        }
+
+        pub async fn list_admin_users(&self) -> Result<Vec<AdminUserAccess>> {
+            self.conn
+                .call(|conn| {
+                    let mut statement = conn
+                        .prepare(
+                            r###"
+                            SELECT u.id, u.username, b.status,
+                                   CASE WHEN g.user_id IS NULL THEN 0 ELSE 1 END
+                            FROM users u
+                            LEFT JOIN billing_accounts b ON b.user_id = u.id
+                            LEFT JOIN lifetime_access_grants g
+                                ON g.user_id = u.id AND g.revoked_at IS NULL
+                            ORDER BY lower(u.username)
+                            "###,
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    let rows = statement
+                        .query_map([], |row| {
+                            Ok(AdminUserAccess {
+                                id: row.get(0)?,
+                                username: row.get(1)?,
+                                billing_status: row.get(2)?,
+                                has_lifetime_access: row.get::<_, i64>(3)? != 0,
+                            })
+                        })
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Listing users for access administration")
+        }
+
+        pub async fn grant_lifetime_access(
+            &self,
+            user_id: String,
+            granted_by_user_id: String,
+        ) -> Result<bool> {
+            self.conn
+                .call(move |conn| {
+                    let transaction = conn.transaction()?;
+                    let exists = transaction
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM users WHERE id = ?1)",
+                            [&user_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?
+                        != 0;
+                    if !exists {
+                        return Ok(false);
+                    }
+                    transaction.execute(
+                        r###"
+                        INSERT INTO lifetime_access_grants
+                            (user_id, granted_by_user_id, granted_at, revoked_by_user_id, revoked_at)
+                        VALUES (?1, ?2, CURRENT_TIMESTAMP, NULL, NULL)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            granted_by_user_id = excluded.granted_by_user_id,
+                            granted_at = CURRENT_TIMESTAMP,
+                            revoked_by_user_id = NULL,
+                            revoked_at = NULL
+                        "###,
+                        rusqlite::params![user_id, granted_by_user_id],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    transaction.execute(
+                        "INSERT INTO lifetime_access_events (target_user_id, actor_user_id, action) VALUES (?1, ?2, 'grant')",
+                        rusqlite::params![user_id, granted_by_user_id],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    transaction
+                        .commit()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    Ok(true)
+                })
+                .await
+                .context("Granting lifetime access")
+        }
+
+        pub async fn revoke_lifetime_access(
+            &self,
+            user_id: String,
+            revoked_by_user_id: String,
+        ) -> Result<bool> {
+            self.conn
+                .call(move |conn| {
+                    let transaction = conn.transaction()?;
+                    let changed = transaction.execute(
+                        r###"
+                        UPDATE lifetime_access_grants
+                        SET revoked_by_user_id = ?2, revoked_at = CURRENT_TIMESTAMP
+                        WHERE user_id = ?1 AND revoked_at IS NULL
+                        "###,
+                        rusqlite::params![user_id, revoked_by_user_id],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    if changed > 0 {
+                        transaction.execute(
+                            "INSERT INTO lifetime_access_events (target_user_id, actor_user_id, action) VALUES (?1, ?2, 'revoke')",
+                            rusqlite::params![user_id, revoked_by_user_id],
+                        )
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    }
+                    transaction
+                        .commit()
+                        .map_err(tokio_rusqlite::Error::Rusqlite)?;
+                    Ok(changed > 0)
+                })
+                .await
+                .context("Revoking lifetime access")
+        }
+
+        pub async fn user_id_for_stripe_customer(
+            &self,
+            customer_id: String,
+        ) -> Result<Option<String>> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT user_id FROM billing_accounts WHERE stripe_customer_id = ?1",
+                        [customer_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Resolving Stripe customer")
+        }
+
+        pub async fn upsert_billing_account(
+            &self,
+            user_id: String,
+            subscription: crate::billing::StripeSubscription,
+        ) -> Result<()> {
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO billing_accounts
+                            (user_id, stripe_customer_id, stripe_subscription_id, status, price_id, current_period_end, cancel_at_period_end)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            stripe_customer_id = excluded.stripe_customer_id,
+                            stripe_subscription_id = excluded.stripe_subscription_id,
+                            status = excluded.status,
+                            price_id = excluded.price_id,
+                            current_period_end = excluded.current_period_end,
+                            cancel_at_period_end = excluded.cancel_at_period_end,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![
+                            user_id,
+                            subscription.customer_id,
+                            subscription.id,
+                            subscription.status,
+                            subscription.price_id,
+                            subscription.current_period_end,
+                            subscription.cancel_at_period_end as i64,
+                        ],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Updating billing account")
+        }
+
+        pub async fn stripe_event_was_processed(&self, event_id: String) -> Result<bool> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM stripe_events WHERE event_id = ?1)",
+                        [event_id],
+                        |row| row.get::<_, i64>(0).map(|value| value != 0),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Checking Stripe event")
+        }
+
+        pub async fn mark_stripe_event_processed(&self, event_id: String) -> Result<()> {
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO stripe_events (event_id) VALUES (?1) ON CONFLICT(event_id) DO NOTHING",
+                        [event_id],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Recording Stripe event")
+        }
+
+        pub async fn consume_monthly_usage(
+            &self,
+            user_id: String,
+            kind: UsageKind,
+            amount: usize,
+            limit: usize,
+        ) -> Result<bool> {
+            if amount == 0 {
+                return Ok(true);
+            }
+            let (column, amount, limit) = (
+                match kind {
+                    UsageKind::ChatResponse => "chat_responses",
+                    UsageKind::VoiceToken => "voice_tokens",
+                    UsageKind::TtsCharacter => "tts_characters",
+                },
+                i64::try_from(amount).unwrap_or(i64::MAX),
+                i64::try_from(limit).unwrap_or(i64::MAX),
+            );
+            self.conn
+                .call(move |conn| {
+                    let transaction = conn.transaction()?;
+                    let period: String = transaction.query_row(
+                        "SELECT strftime('%Y-%m', 'now')",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO monthly_usage (user_id, period) VALUES (?1, ?2) ON CONFLICT(user_id, period) DO NOTHING",
+                        rusqlite::params![user_id, period],
+                    )?;
+                    let current: i64 = transaction.query_row(
+                        &format!("SELECT {column} FROM monthly_usage WHERE user_id = ?1 AND period = ?2"),
+                        rusqlite::params![user_id, period],
+                        |row| row.get(0),
+                    )?;
+                    if current.saturating_add(amount) > limit {
+                        transaction.rollback()?;
+                        return Ok(false);
+                    }
+                    transaction.execute(
+                        &format!("UPDATE monthly_usage SET {column} = {column} + ?1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?2 AND period = ?3"),
+                        rusqlite::params![amount, user_id, period],
+                    )?;
+                    transaction.commit()?;
+                    Ok(true)
+                })
+                .await
+                .context("Updating monthly usage")
+        }
+
         pub async fn list_sessions(&self, user_id: String) -> Result<Vec<Session>> {
             self.get_sessions(user_id).await
         }
@@ -7941,41 +8424,41 @@ mod runtime {
                 slug: "partner".into(),
                 display_name: "Test Partner".into(),
                 relationship_type: "wife".into(),
-                background: "Test Partner is tracking 2 reminders".into(),
-                recent_events: vec!["Upset about tracking 2 reminders with test data".into()],
+                background: "Test Partner has 2 reminders".into(),
+                recent_events: vec!["Test fixture starts with 2 reminders".into()],
                 ..RelationshipProfile::default()
             };
             let incoming = ExtractedRelationshipProfile {
                 slug: "wife".into(),
                 display_name: "Test Partner".into(),
                 relationship_type: "wife".into(),
-                background: "Test Partner is tracking 3 reminders".into(),
-                recent_events: vec!["Upset about tracking 3 reminders with test data".into()],
+                background: "Test Partner has 3 reminders".into(),
+                recent_events: vec!["Test fixture now has 3 reminders".into()],
                 ..ExtractedRelationshipProfile::default()
             };
-            let corrections = explicit_numeric_corrections("she's tracking 3 reminders not 2");
+            let corrections = explicit_numeric_corrections("it has 3 reminders not 2");
 
             let merged =
                 merge_relationship_profile("u1".into(), Some(existing), incoming, &corrections);
 
-            assert_eq!(corrections, vec![("30".into(), "39".into())]);
-            assert_eq!(merged.background, "Test Partner is tracking 3 reminders");
+            assert_eq!(corrections, vec![("2".into(), "3".into())]);
+            assert_eq!(merged.background, "Test Partner has 3 reminders");
             assert_eq!(
                 merged.recent_events,
-                vec!["Upset about tracking 3 reminders with test data"]
+                vec!["Test fixture now has 3 reminders"]
             );
-            assert!(!merged.background.contains("30"));
+            assert!(!merged.background.contains("2"));
             assert!(merged
                 .recent_events
                 .iter()
-                .all(|memory| !memory.contains("30")));
+                .all(|memory| !memory.contains("2")));
         }
 
         #[test]
         fn test_authoritative_memory_source_excludes_assistant_claims() {
-            let source = authoritative_memory_source("she is tracking 3 reminders, not 2");
+            let source = authoritative_memory_source("it has 3 reminders, not 2");
 
-            assert_eq!(source, "User: she is tracking 3 reminders, not 2");
+            assert_eq!(source, "User: it has 3 reminders, not 2");
             assert!(!source.contains("Assistant:"));
         }
 
@@ -8013,7 +8496,7 @@ mod runtime {
                 relationship_type: "wife".into(),
                 ..RelationshipProfile::default()
             }];
-            let plan = memory_extraction_plan("Test Partner seems distant lately", &known_people);
+            let plan = memory_extraction_plan("Test Partner has a new schedule", &known_people);
 
             assert!(plan.relationship_profiles);
             assert!(plan.social_relationships);
@@ -8312,6 +8795,49 @@ mod runtime {
                 .await
                 .unwrap();
             assert!(has_model);
+        }
+
+        #[tokio::test]
+        async fn ensure_schema_removes_legacy_vec0_store_without_module() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    r###"
+                    CREATE TABLE therapy_memory (id TEXT PRIMARY KEY, content TEXT);
+                    INSERT INTO therapy_memory VALUES ('legacy', 'plaintext memory');
+                    CREATE TABLE therapy_memory_embeddings_chunks (id INTEGER PRIMARY KEY);
+                    CREATE TABLE therapy_memory_embeddings_rowids (id INTEGER PRIMARY KEY);
+                    PRAGMA writable_schema = ON;
+                    INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql)
+                    VALUES (
+                        'table',
+                        'therapy_memory_embeddings',
+                        'therapy_memory_embeddings',
+                        0,
+                        'CREATE VIRTUAL TABLE therapy_memory_embeddings USING vec0(embedding float[3])'
+                    );
+                    PRAGMA writable_schema = OFF;
+                    "###,
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+            ensure_schema(&conn).await.unwrap();
+
+            let remaining = conn
+                .call(|conn| {
+                    conn.query_row(
+                        "SELECT count(*) FROM sqlite_master WHERE name = 'therapy_memory' OR name = 'therapy_memory_embeddings' OR name GLOB 'therapy_memory_embeddings_*'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .unwrap();
+            assert_eq!(remaining, 0);
         }
 
         #[tokio::test]
@@ -8723,7 +9249,7 @@ mod runtime {
             let extracted = ExtractedEpisode {
                 id: "Test Phone Incident".to_string(),
                 title: "Test phone incident".to_string(),
-                narrative: "The user said their a test participant reported a disagreement them on a Test phone call."
+                narrative: "A test participant reported a disagreement during a phone call."
                     .to_string(),
                 occurred_at: Some("Test date".to_string()),
                 participants: vec!["mother".to_string(), "unknown".to_string()],
@@ -8793,7 +9319,7 @@ mod runtime {
         }
 
         #[test]
-        fn test_social_graph_merges_test_partner_into_partner_by_display_name() {
+        fn test_social_graph_merges_alias_into_partner_by_display_name() {
             let profiles = vec![
                 test_profile("partner", "Test Partner", "partner"),
                 test_profile("test_partner", "Test Partner", "friend"),
@@ -8808,15 +9334,20 @@ mod runtime {
             );
 
             assert!(graph.nodes.iter().any(|node| {
-                node.id == "person:partner" && node.label == "Test Partner" && node.detail == "partner"
+                node.id == "person:partner"
+                    && node.label == "Test Partner"
+                    && node.detail == "partner"
             }));
-            assert!(!graph.nodes.iter().any(|node| node.id == "person:test_partner"));
+            assert!(!graph
+                .nodes
+                .iter()
+                .any(|node| node.id == "person:test_partner"));
         }
 
         #[test]
         fn test_social_graph_keeps_people_distinct_from_editable_profile_memories() {
             let mut wife = test_profile("wife", "Test Partner", "wife");
-            wife.recent_events = vec!["Upset about tracking 3 reminders with test data".to_string()];
+            wife.recent_events = vec!["Test fixture has a recent update".to_string()];
             let graph = build_social_graph(
                 "test-user".to_string(),
                 &[wife],
@@ -8998,7 +9529,8 @@ mod runtime {
                 user_id: "test-user".to_string(),
                 id: "test_call".to_string(),
                 title: "Test phone call".to_string(),
-                narrative: "A test participant reported a disagreement the user during a Test phone call.".to_string(),
+                narrative: "A test participant reported a disagreement during a phone call."
+                    .to_string(),
                 occurred_at: Some("Test date".to_string()),
                 session_id: None,
                 user_quotes: Vec::new(),
@@ -9097,7 +9629,7 @@ mod runtime {
                 id: "test_call".to_string(),
                 title: "Test phone call".to_string(),
                 narrative:
-                    "A test participant reported a disagreement the user during a Test phone call. The user felt small."
+                    "A test participant reported a disagreement during a phone call and felt unsettled."
                         .to_string(),
                 occurred_at: Some("Test date".to_string()),
                 session_id: None,
@@ -9173,7 +9705,8 @@ mod runtime {
                 user_id: "test-user".to_string(),
                 id: "test_call".to_string(),
                 title: "Test phone call".to_string(),
-                narrative: "A test participant reported a disagreement the user during a Test phone call.".to_string(),
+                narrative: "A test participant reported a disagreement during a phone call."
+                    .to_string(),
                 occurred_at: Some("Test date".to_string()),
                 session_id: None,
                 user_quotes: Vec::new(),
@@ -9212,7 +9745,7 @@ mod runtime {
             assert_eq!(payload["episodes"][0]["id"], "test_call");
             assert_eq!(
                 payload["episodes"][0]["narrative"],
-                "A test participant reported a disagreement the user during a Test phone call."
+                "A test participant reported a disagreement during a phone call."
             );
             assert!(payload["cross_edges"]
                 .as_array()
@@ -9241,7 +9774,7 @@ mod runtime {
                 user_id: "test-user".to_string(),
                 id: "birthday_conversation".to_string(),
                 title: "Birthday conversation".to_string(),
-                narrative: "Test Partner talked about tracking 3 reminders.".to_string(),
+                narrative: "Test Partner discussed a test scenario.".to_string(),
                 occurred_at: None,
                 session_id: None,
                 user_quotes: Vec::new(),

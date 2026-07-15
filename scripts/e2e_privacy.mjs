@@ -241,6 +241,7 @@ function startProvider() {
 
 const appEnv = {
   ...process.env,
+  BILLING_ENABLED: 'false',
   PORT: String(port),
   RP_ID: 'localhost',
   RP_ORIGIN: baseUrl,

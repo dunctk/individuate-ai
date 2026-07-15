@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "cargo test",
-    "test:e2e": "node scripts/e2e_privacy.mjs"
+    "test:e2e": "node scripts/e2e_privacy.mjs",
+    "test:e2e:paid-signup": "node scripts/e2e_paid_signup.mjs"
   },
   "keywords": [],
   "author": "",

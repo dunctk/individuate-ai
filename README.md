@@ -84,6 +84,60 @@ prompts retain the most recent 24 messages by default; use
 `MAX_AGENT_HISTORY_MESSAGES` to tune the bounded history window. Complete chat
 history remains encrypted in SQLite and available to focused recall.
 
+### Stripe subscriptions
+
+The app is paid-only. Stripe Checkout offers one complete plan at $24.99 USD
+monthly or $239 USD yearly, and €29.99 monthly or €289 yearly. The EUR prices
+are configured as tax-inclusive. Plan copy avoids fixed usage claims; the
+server applies private, environment-configurable capacity safeguards.
+
+Create or verify the product, four recurring prices, tax code, and customer
+portal configuration in each Stripe mode:
+
+```bash
+./scripts/setup_stripe_catalog.sh sandbox
+./scripts/setup_stripe_catalog.sh live
+```
+
+The script uses stable Stripe lookup keys, so it is safe to rerun and the app
+does not need price IDs in its environment. Configure these runtime variables:
+
+```text
+BILLING_ENABLED=true
+ADMIN_EMAIL=d@uncan.net
+STRIPE_MODE=live
+APP_BASE_URL=https://individuateai.com
+STRIPE_AUTOMATIC_TAX=true
+STRIPE_SANDBOX_SECRET_KEY=sk_test_...
+STRIPE_SANDBOX_PUBLISHABLE_KEY=pk_test_...
+STRIPE_SANDBOX_WEBHOOK_SECRET=whsec_... # optional only during local sandbox setup
+STRIPE_LIVE_SECRET_KEY=sk_live_...
+STRIPE_LIVE_PUBLISHABLE_KEY=pk_live_...
+STRIPE_LIVE_WEBHOOK_SECRET=whsec_...
+```
+
+`ADMIN_EMAIL` is matched case-insensitively against the signed-in account. That
+account bypasses billing and can open `/admin` to grant or revoke lifetime
+complimentary access for registered users. Grants are stored in SQLite with an
+append-only grant/revocation event log; they do not cancel an existing Stripe
+subscription.
+
+Create each webhook and immediately copy the one-time signing-secret output
+into the matching runtime variable:
+
+```bash
+./scripts/setup_stripe_webhook.sh sandbox https://individuateai.com
+./scripts/setup_stripe_webhook.sh live https://individuateai.com
+```
+
+The endpoint subscribes only to Checkout completion and subscription lifecycle
+events. Finish the applicable Stripe Tax registrations before enabling
+automatic tax in live mode.
+
+Internal safeguards can be adjusted with `MONTHLY_CHAT_SOFT_LIMIT`,
+`MONTHLY_VOICE_TOKEN_SOFT_LIMIT`, and `MONTHLY_TTS_CHARACTER_SOFT_LIMIT`.
+These are operational controls, not advertised plan quotas.
+
 ## Design System
 
 *   **Colors**: Deep Void Green, Parchment, Integral Turquoise, Systemic Yellow.

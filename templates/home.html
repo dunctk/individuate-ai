@@ -1615,6 +1615,17 @@ async function registerAdditionalPasskey() {
     }
 }
 
+async function openBillingPortal() {
+    try {
+        const response = await fetch('/api/billing/portal', { method: 'POST' });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.url) throw new Error(result.error || 'Could not open billing settings');
+        window.location.assign(result.url);
+    } catch (error) {
+        showToast(error.message || 'Could not open billing settings');
+    }
+}
+
 async function syncApplePasskey() {
     try {
         const resp = await fetch('/api/passkey/sync/start', { method: 'POST' });
@@ -1780,7 +1791,8 @@ document.addEventListener('DOMContentLoaded', () => {
     syncCopyThreadButton();
     if (target && target.children.length > 0) scheduleScrollChatToBottom();
     ensureMemoryStatusBaseline();
-    if (new URLSearchParams(window.location.search).get('setup_passkey_sync') === '1') {
+    if (new URLSearchParams(window.location.search).get('setup_passkey_sync') === '1' || localStorage.getItem('setup_passkey_sync') === '1') {
+        localStorage.removeItem('setup_passkey_sync');
         document.getElementById('passkey-sync-banner')?.classList.remove('hidden');
     }
 });

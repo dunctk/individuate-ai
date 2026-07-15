@@ -40,10 +40,12 @@
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
                 </button>
                 <div class="absolute bottom-full right-0 mb-1 w-40 bg-[#1A2B26] border border-sage-mist/20 rounded-lg shadow-lg py-1 hidden group-hover:block">
+                    {% if is_admin %}<a href="/admin" class="flex min-h-[44px] items-center px-3 py-1.5 text-xs text-systemic-yellow hover:bg-sage-mist/10">Access Admin</a>{% endif %}
+                    <button onclick="openBillingPortal()" class="w-full text-left px-3 py-1.5 text-xs text-parchment hover:bg-sage-mist/10">Manage Billing</button>
                     <button onclick="registerAdditionalPasskey()" class="w-full text-left px-3 py-1.5 text-xs text-parchment hover:bg-sage-mist/10">Register Passkey</button>
                     <button onclick="syncApplePasskey()" class="w-full text-left px-3 py-1.5 text-xs text-parchment hover:bg-sage-mist/10">Enable Apple Passkey Sync</button>
                     <button onclick="openRecoveryRotation()" class="w-full text-left px-3 py-1.5 text-xs text-parchment hover:bg-sage-mist/10">Create New Recovery Key</button>
-                    <a href="/logout" class="block px-3 py-1.5 text-xs text-red-400 hover:bg-sage-mist/10">Log Out</a>
+                    <a href="/api/logout" class="block px-3 py-1.5 text-xs text-red-400 hover:bg-sage-mist/10">Log Out</a>
                 </div>
             </div>
         </div>

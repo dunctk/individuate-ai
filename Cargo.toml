@@ -3,6 +3,7 @@ name = "individuateai"
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
+default-run = "individuateai"
 
 [dependencies]
 axum = "0.7"
@@ -37,3 +38,5 @@ base64 = "0.22"
 hkdf = "0.12"
 rand = "0.8"
 sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"

@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Choose your plan · IndividuateAI{% endblock %}
+{% block content %}
+<div class="min-h-screen px-4 py-10 sm:py-16">
+    <div class="max-w-4xl mx-auto">
+        <div class="text-center max-w-2xl mx-auto">
+            <a href="/" class="brand-mark text-xl no-underline">IndividuateAI</a>
+            <p class="landing-kicker justify-center mt-8 mb-4"><span></span> Step 2 of 2 · Choose your billing</p>
+            <h1 class="text-4xl sm:text-5xl text-parchment leading-tight">A space that remembers what matters.</h1>
+            <p class="mt-5 text-sage-light text-lg leading-relaxed">
+                Your subscription includes reflective AI conversations, encrypted history, editable memory maps, relationship insights, and voice.
+            </p>
+            <p class="mt-4 inline-flex min-h-[44px] items-center gap-2 rounded-full border border-integral-turquoise/30 bg-integral-turquoise/10 px-4 text-sm font-semibold text-integral-turquoise">
+                <span aria-hidden="true">✓</span> Account and passkey created
+            </p>
+        </div>
+
+        <div id="checkout-notice" class="hidden max-w-xl mx-auto mt-7 rounded-xl border border-systemic-yellow/35 bg-systemic-yellow/10 px-4 py-3 text-sm text-parchment" role="status"></div>
+        <div id="checkout-error" class="hidden max-w-xl mx-auto mt-7 rounded-xl border border-red-400/35 bg-red-400/10 px-4 py-3 text-sm text-red-200" role="alert"></div>
+
+        <div class="mx-auto mt-10 max-w-xl">
+            <section data-currency-panel="usd" class="glass-strong rounded-[1.75rem] p-6 sm:p-7 border border-integral-turquoise/25">
+                <div class="flex items-start justify-between gap-4">
+                    <div>
+                        <p class="role-label">USD</p>
+                        <h2 class="text-2xl text-parchment mt-2">United States</h2>
+                    </div>
+                    <button type="button" data-currency-switch="eur" aria-label="Show euro pricing"
+                        class="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-sage-mist/25 bg-void-green/40 px-3 text-xs font-semibold text-sage-light transition hover:border-integral-turquoise/60 hover:text-parchment">
+                        <span class="text-base" aria-hidden="true">🇪🇺</span> EU pricing
+                    </button>
+                </div>
+                <div class="mt-7 space-y-3">
+                    <button type="button" data-plan="usd_annual" class="checkout-plan landing-primary w-full min-h-[72px] rounded-2xl px-5 flex items-center justify-between gap-4 text-left">
+                        <span><strong class="block text-lg">$239 yearly</strong><small class="block opacity-75 mt-0.5">$19.92 per month</small></span>
+                        <span aria-hidden="true">&rarr;</span>
+                    </button>
+                    <button type="button" data-plan="usd_monthly" class="checkout-plan w-full min-h-[64px] rounded-2xl border border-sage-mist/30 px-5 flex items-center justify-between gap-4 text-left text-parchment hover:border-integral-turquoise/60 transition-colors">
+                        <span><strong class="block">$24.99 monthly</strong><small class="block text-sage-mist mt-0.5">Cancel through the billing portal</small></span>
+                        <span aria-hidden="true">&rarr;</span>
+                    </button>
+                </div>
+            </section>
+
+            <section data-currency-panel="eur" class="glass-strong hidden rounded-[1.75rem] p-6 sm:p-7 border border-integral-turquoise/25">
+                <div class="flex items-start justify-between gap-4">
+                    <div>
+                        <p class="role-label">EUR</p>
+                        <h2 class="text-2xl text-parchment mt-2">Eurozone</h2>
+                    </div>
+                    <button type="button" data-currency-switch="usd" aria-label="Show US dollar pricing"
+                        class="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-sage-mist/25 bg-void-green/40 px-3 text-xs font-semibold text-sage-light transition hover:border-integral-turquoise/60 hover:text-parchment">
+                        <span class="text-sm font-bold text-integral-turquoise" aria-hidden="true">$</span> USD pricing
+                    </button>
+                </div>
+                <div class="mt-7 space-y-3">
+                    <button type="button" data-plan="eur_annual" class="checkout-plan landing-primary w-full min-h-[72px] rounded-2xl px-5 flex items-center justify-between gap-4 text-left">
+                        <span><strong class="block text-lg">€289 yearly</strong><small class="block opacity-75 mt-0.5">€24.08 per month · VAT included</small></span>
+                        <span aria-hidden="true">&rarr;</span>
+                    </button>
+                    <button type="button" data-plan="eur_monthly" class="checkout-plan w-full min-h-[64px] rounded-2xl border border-sage-mist/30 px-5 flex items-center justify-between gap-4 text-left text-parchment hover:border-integral-turquoise/60 transition-colors">
+                        <span><strong class="block">€29.99 monthly</strong><small class="block text-sage-mist mt-0.5">VAT included · cancel through billing</small></span>
+                        <span aria-hidden="true">&rarr;</span>
+                    </button>
+                </div>
+            </section>
+        </div>
+
+        <div class="mt-8 grid sm:grid-cols-3 gap-3 text-sm text-sage-light">
+            <div class="rounded-xl border border-sage-mist/15 p-4"><strong class="text-parchment block mb-1">Private by design</strong>Passkey access and operator-unreadable encrypted memories.</div>
+            <div class="rounded-xl border border-sage-mist/15 p-4"><strong class="text-parchment block mb-1">Your context stays</strong>Chats become memory maps and relationship context you can inspect.</div>
+            <div class="rounded-xl border border-sage-mist/15 p-4"><strong class="text-parchment block mb-1">Secure payment</strong>Stripe handles payment details; IndividuateAI never receives your card number.</div>
+        </div>
+        <p class="mt-7 text-center text-xs text-sage-mist leading-relaxed">
+            IndividuateAI supports reflection and is not a substitute for a licensed mental health professional. Usage is subject to reasonable capacity and abuse safeguards.
+        </p>
+        <p class="mt-4 text-center"><a href="/api/logout" class="text-sm text-sage-light hover:text-parchment">Sign out</a></p>
+    </div>
+</div>
+<script>
+const checkoutError = document.getElementById('checkout-error');
+const checkoutNotice = document.getElementById('checkout-notice');
+const currencyPanels = [...document.querySelectorAll('[data-currency-panel]')];
+
+function showBillingCurrency(currency) {
+    const selected = currency === 'eur' ? 'eur' : 'usd';
+    currencyPanels.forEach(panel => panel.classList.toggle('hidden', panel.dataset.currencyPanel !== selected));
+    localStorage.setItem('billing_currency', selected);
+}
+
+document.querySelectorAll('[data-currency-switch]').forEach(button => {
+    button.addEventListener('click', () => showBillingCurrency(button.dataset.currencySwitch));
+});
+showBillingCurrency(localStorage.getItem('billing_currency') || 'usd');
+
+const checkoutState = new URLSearchParams(window.location.search).get('checkout');
+if (checkoutState === 'cancelled') {
+    checkoutNotice.textContent = 'Checkout was cancelled. Nothing was charged.';
+    checkoutNotice.classList.remove('hidden');
+} else if (checkoutState === 'pending') {
+    checkoutNotice.textContent = 'Stripe received the payment, but access is still being confirmed. Refresh in a moment or contact support if this persists.';
+    checkoutNotice.classList.remove('hidden');
+} else if (checkoutState === 'invalid') {
+    checkoutError.textContent = 'That checkout confirmation link is invalid.';
+    checkoutError.classList.remove('hidden');
+}
+
+document.querySelectorAll('.checkout-plan').forEach(button => {
+    button.addEventListener('click', async () => {
+        checkoutError.classList.add('hidden');
+        const original = button.innerHTML;
+        button.disabled = true;
+        button.textContent = 'Opening secure checkout…';
+        try {
+            const response = await fetch('/api/billing/checkout', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan: button.dataset.plan })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.url) throw new Error(result.error || 'Could not start checkout');
+            window.location.assign(result.url);
+        } catch (error) {
+            checkoutError.textContent = error.message || 'Could not start checkout';
+            checkoutError.classList.remove('hidden');
+            button.disabled = false;
+            button.innerHTML = original;
+        }
+    });
+});
+</script>
+{% endblock %}

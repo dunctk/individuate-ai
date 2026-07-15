@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+
+{% block title %}Access administration · IndividuateAI{% endblock %}
+
+{% block content %}
+<main class="min-h-screen bg-[#0F1C18] px-4 py-8 text-parchment sm:px-6 sm:py-12">
+    <div class="mx-auto max-w-5xl">
+        <nav class="mb-10 flex items-center justify-between gap-4">
+            <a href="/chat" class="inline-flex min-h-[44px] items-center gap-2 text-sm text-sage-mist transition-colors hover:text-parchment">
+                <span aria-hidden="true">←</span> Back to chat
+            </a>
+            <span class="max-w-[55vw] truncate text-xs text-sage-mist">{{ admin_email }}</span>
+        </nav>
+
+        <header class="mb-8 grid gap-5 border-b border-sage-mist/20 pb-8 md:grid-cols-[1fr_auto] md:items-end">
+            <div>
+                <p class="mb-3 text-xs font-semibold uppercase tracking-[0.22em] text-systemic-yellow">Operator access</p>
+                <h1 class="font-fraunces text-4xl font-semibold tracking-tight sm:text-5xl">Complimentary access</h1>
+                <p class="mt-4 max-w-2xl text-sm leading-6 text-sage-mist sm:text-base">
+                    Lifetime grants bypass Stripe until you revoke them. Granting access does not cancel an existing paid subscription.
+                </p>
+            </div>
+            <div class="rounded-full border border-integral-turquoise/30 bg-integral-turquoise/10 px-4 py-2 text-xs font-semibold text-integral-turquoise">
+                {{ users|length }} registered users
+            </div>
+        </header>
+
+        <div class="mb-5">
+            <label for="user-filter" class="sr-only">Search users</label>
+            <input id="user-filter" type="search" autocomplete="off" placeholder="Search by email…"
+                class="min-h-[44px] w-full rounded-xl border border-sage-mist/25 bg-[#162722] px-4 text-sm text-parchment outline-none transition placeholder:text-sage-mist/50 focus:border-integral-turquoise/70 md:max-w-md">
+        </div>
+
+        <div id="access-message" role="status" aria-live="polite" class="mb-4 hidden rounded-xl border px-4 py-3 text-sm"></div>
+
+        <section class="overflow-hidden rounded-2xl border border-sage-mist/20 bg-[#14231F] shadow-2xl shadow-black/20" aria-label="User access list">
+            <div class="hidden grid-cols-[minmax(0,1fr)_180px_180px] gap-4 border-b border-sage-mist/15 px-5 py-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-sage-mist md:grid">
+                <span>Account</span><span>Current access</span><span class="text-right">Action</span>
+            </div>
+            <div id="user-list" class="divide-y divide-sage-mist/15">
+                {% for user in users %}
+                <article class="user-row grid gap-4 px-4 py-5 md:grid-cols-[minmax(0,1fr)_180px_180px] md:items-center md:px-5" data-email="{{ user.username|lower }}">
+                    <div class="min-w-0">
+                        <p class="truncate text-sm font-semibold text-parchment">{{ user.username }}</p>
+                        {% if user.billing_status %}<p class="mt-1 text-xs text-sage-mist">Stripe: {{ user.billing_status|replace("_", " ") }}</p>{% endif %}
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        {% if user.is_admin %}
+                        <span class="rounded-full border border-systemic-yellow/35 bg-systemic-yellow/10 px-3 py-1 text-xs text-systemic-yellow">Environment admin</span>
+                        {% elif user.has_lifetime_access %}
+                        <span class="rounded-full border border-integral-turquoise/35 bg-integral-turquoise/10 px-3 py-1 text-xs text-integral-turquoise">Lifetime</span>
+                        {% elif user.has_paid_access %}
+                        <span class="rounded-full border border-sage-mist/35 bg-sage-mist/10 px-3 py-1 text-xs text-parchment">Paid</span>
+                        {% else %}
+                        <span class="rounded-full border border-sage-mist/20 px-3 py-1 text-xs text-sage-mist">No access</span>
+                        {% endif %}
+                    </div>
+                    <div class="md:text-right">
+                        {% if user.is_admin %}
+                        <span class="text-xs text-sage-mist">Set by environment</span>
+                        {% elif user.has_lifetime_access %}
+                        <button type="button" data-access-action="revoke" data-user-id="{{ user.id }}" data-email-label="{{ user.username }}"
+                            class="min-h-[44px] rounded-xl border border-red-400/35 px-4 text-sm font-semibold text-red-300 transition hover:bg-red-400/10 disabled:cursor-wait disabled:opacity-50">
+                            Revoke access
+                        </button>
+                        {% else %}
+                        <button type="button" data-access-action="grant" data-user-id="{{ user.id }}" data-email-label="{{ user.username }}"
+                            class="min-h-[44px] rounded-xl border border-integral-turquoise/35 bg-integral-turquoise/10 px-4 text-sm font-semibold text-integral-turquoise transition hover:bg-integral-turquoise/20 disabled:cursor-wait disabled:opacity-50">
+                            Grant lifetime
+                        </button>
+                        {% endif %}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            <p id="no-users" class="hidden px-5 py-10 text-center text-sm text-sage-mist">No matching users.</p>
+        </section>
+    </div>
+</main>
+
+<script>
+const filter = document.getElementById('user-filter');
+const rows = [...document.querySelectorAll('.user-row')];
+const noUsers = document.getElementById('no-users');
+const message = document.getElementById('access-message');
+
+filter.addEventListener('input', () => {
+    const query = filter.value.trim().toLowerCase();
+    let visible = 0;
+    rows.forEach(row => {
+        const show = row.dataset.email.includes(query);
+        row.classList.toggle('hidden', !show);
+        if (show) visible += 1;
+    });
+    noUsers.classList.toggle('hidden', visible !== 0);
+});
+
+document.querySelectorAll('[data-access-action]').forEach(button => {
+    button.addEventListener('click', async () => {
+        const action = button.dataset.accessAction;
+        const email = button.dataset.emailLabel;
+        if (action === 'revoke' && !window.confirm(`Revoke lifetime access for ${email}? They may lose access immediately.`)) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = action === 'grant' ? 'Granting…' : 'Revoking…';
+        message.classList.add('hidden');
+        try {
+            const response = await fetch(`/api/admin/users/${encodeURIComponent(button.dataset.userId)}/lifetime-access/${action}`, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' }
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error || 'Could not update access');
+            window.location.reload();
+        } catch (error) {
+            message.textContent = error.message || 'Could not update access';
+            message.className = 'mb-4 rounded-xl border border-red-400/35 bg-red-400/10 px-4 py-3 text-sm text-red-200';
+            button.disabled = false;
+            button.textContent = original;
+        }
+    });
+});
+</script>
+{% endblock %}

@@ -74,8 +74,9 @@ The production defaults use `z-ai/glm-5.2` for therapist and drafting replies,
 `openai/gpt-5.4-nano` for structured memory extraction,
 `openai/gpt-4o-mini` for lightweight session titles, and
 `text-embedding-3-small` for vector recall. Override them with
-`OPENROUTER_MODEL`, `GRAPH_EXTRACTOR_MODEL`, `RELATIONSHIP_PROFILE_MODEL`,
-`SOCIAL_RELATIONSHIP_MODEL`, `EPISODE_EXTRACTOR_MODEL`,
+`OPENROUTER_MODEL`, `GRAPH_EXTRACTOR_MODEL`, `GRAPH_EXTRACTOR_FALLBACK_MODEL`,
+`GRAPH_EXTRACTOR_MAX_ATTEMPTS`, `GRAPH_EXTRACTOR_TIMEOUT_SECONDS`,
+`RELATIONSHIP_PROFILE_MODEL`, `SOCIAL_RELATIONSHIP_MODEL`, `EPISODE_EXTRACTOR_MODEL`,
 `SESSION_SUMMARY_MODEL`, and `EMBEDDING_MODEL`.
 
 Session titles are refreshed after the first exchange and every four exchanges

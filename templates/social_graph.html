@@ -7,12 +7,11 @@
                 <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
             </a>
             <div class="min-w-0">
-                <p class="role-label">Relational field</p>
-                <h1 class="text-lg sm:text-xl font-fraunces font-bold text-parchment truncate">Social Graph</h1>
+                <p class="role-label">People, patterns &amp; memories</p>
+                <h1 class="text-lg sm:text-xl font-fraunces font-bold text-parchment truncate">Mind Map</h1>
             </div>
         </div>
         <div class="flex items-center gap-2 shrink-0">
-            <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
             <button onclick="reloadSocialGraph()" class="btn-primary text-xs">Refresh</button>
         </div>
     </header>
@@ -96,7 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function reloadSocialGraph() {
-    const resp = await fetch('/api/social-graph');
+    const resp = await fetch('/api/mind-map');
     if (!resp.ok) return false;
     socialGraphData = await resp.json();
     renderSocialGraph();

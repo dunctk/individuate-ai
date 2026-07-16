@@ -187,6 +187,7 @@ async fn main() {
             "/api/settings/voice",
             get(get_voice_setting).post(save_voice_setting),
         )
+        .route("/api/mind-map", get(get_social_graph))
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/memory-status", get(memory_status))
@@ -622,36 +623,19 @@ async fn mind_map_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         None => return Redirect::temporary("/login").into_response(),
     };
     let runtime = agent_runtime().await.unwrap();
-    let graph = match runtime.get_mind_map_payload(user.id.clone()).await {
+    let graph = match runtime.get_social_graph(user.id.clone()).await {
         Ok(graph) => graph,
         Err(error) => {
             tracing::error!("Could not load mind map: {error}");
-            serde_json::json!({
-                "nodes": [],
-                "edges": [],
-                "people": [],
-                "episodes": [],
-                "cross_edges": [],
-                "load_error": "The mind map could not load. Refresh to try again."
-            })
+            Default::default()
         }
     };
-    let html = templates::render_mind_map(&state.templates, &graph, &user.id);
+    let html = templates::render_social_graph(&state.templates, &graph, &user.id);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
-async fn social_graph_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let user = match get_authed_user(&headers, &state.key).await {
-        Some(u) => u,
-        None => return Redirect::temporary("/login").into_response(),
-    };
-    let runtime = agent_runtime().await.unwrap();
-    let graph = runtime
-        .get_social_graph(user.id.clone())
-        .await
-        .unwrap_or_default();
-    let html = templates::render_social_graph(&state.templates, &graph, &user.id);
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+async fn social_graph_page() -> Redirect {
+    Redirect::permanent("/mind-map")
 }
 
 // --- Fragment Handlers ---

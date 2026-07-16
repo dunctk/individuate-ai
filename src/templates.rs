@@ -82,8 +82,6 @@ pub fn create_env() -> Environment<'static> {
         include_str!("../templates/profile_drawer.html"),
     )
     .unwrap();
-    env.add_template("mind_map", include_str!("../templates/mind_map.html"))
-        .unwrap();
     env.add_template(
         "social_graph",
         include_str!("../templates/social_graph.html"),
@@ -271,17 +269,6 @@ pub fn render_profile_drawer(
         .unwrap()
 }
 
-pub fn render_mind_map(env: &Environment, graph: &serde_json::Value, user_id: &str) -> String {
-    let graph_json = graph.clone();
-    env.get_template("mind_map")
-        .unwrap()
-        .render(json!({
-            "graph_data": graph_json,
-            "user_id": user_id,
-        }))
-        .unwrap()
-}
-
 pub fn render_social_graph(env: &Environment, graph: &SocialGraph, user_id: &str) -> String {
     let graph_json = serde_json::to_value(graph).unwrap_or(json!({"nodes":[],"edges":[]}));
     env.get_template("social_graph")
@@ -311,12 +298,20 @@ mod tests {
             "sidebar",
             "chat_messages",
             "profile_drawer",
-            "mind_map",
             "social_graph",
             "privacy_security",
         ] {
             env.get_template(name).expect("template registered");
         }
+    }
+
+    #[test]
+    fn social_graph_projection_is_presented_as_the_mind_map() {
+        let html = render_social_graph(&create_env(), &SocialGraph::default(), "user-1");
+
+        assert!(html.contains(">Mind Map</h1>"));
+        assert!(!html.contains(">Social Graph</h1>"));
+        assert!(html.contains("fetch('/api/mind-map')"));
     }
 
     #[test]
@@ -493,6 +488,8 @@ mod tests {
         assert!(html.contains("--chat-viewport-offset-top"));
         assert!(html.contains("min-w-0 w-full items-end"));
         assert!(html.contains("brand-mark hidden sm:inline"));
+        assert!(html.contains("href=\"/mind-map\""));
+        assert!(!html.contains("href=\"/social-graph\""));
         assert!(html.contains("copy-thread-button"));
         assert!(html.contains("<span class=\"thread-copy-label\">Copy</span>"));
         assert!(!html.contains("thread-copy-label sr-only"));

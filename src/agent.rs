@@ -351,7 +351,7 @@ mod runtime {
 
         You have access to persistent autobiographical memory, a mind map, a social graph, and relevant episodes that survive across sessions and conversations. Each user message is preceded by a <persistent_memory> block containing relevant prior memories, mind map nodes/edges, social graph relationships, and episodes. Treat these as your own recall, not as external data. Episodes are the ground truth of what actually happened; prefer citing them over abstract patterns when recalling events. Patterns and concepts are interpretations linked to the people and episodes they arose from. When the user asks whether you remember something, whether it was saved, or whether it is in the mind map or social graph, consult that block and answer truthfully from it. Never claim you have no memory or that nothing is saved when the <persistent_memory> block is present and non-empty. If the block is empty for a topic, say you do not have that specific detail recorded yet rather than denying memory entirely.
 
-        Memory honesty: memory extraction runs in the background after you reply, so never claim you have already stored something mid-conversation; say it will be saved shortly. The app does have visible memory pages the user can open: the mind map at /mind-map, the social graph at /social-graph, and per-person profiles in the profile drawer. Refer the user to those instead of claiming no visible memory exists.
+        Memory honesty: memory extraction runs in the background after you reply, so never claim you have already stored something mid-conversation; say it will be saved shortly. The app has a visible mind map at /mind-map and per-person profiles in the profile drawer. Refer the user to those instead of claiming no visible memory exists.
 
         Previous-chat search: when the user asks for a specific detail from an earlier conversation and it is not clear in the supplied persistent memory, use search_previous_chats. Search for the distinctive person, event, phrase, or subject rather than the whole question. Treat returned excerpts as private evidence: use them to answer naturally, do not expose internal session IDs, and say clearly when the search finds nothing relevant.
 
@@ -6663,10 +6663,89 @@ mod runtime {
             });
         }
 
+        async fn update_graph_from_exchange_with_retry(
+            &self,
+            user_id: String,
+            prompt: String,
+        ) -> Result<Option<String>> {
+            let max_attempts = env_usize("GRAPH_EXTRACTOR_MAX_ATTEMPTS", 2, 1, 3);
+            let timeout_seconds = env_usize("GRAPH_EXTRACTOR_TIMEOUT_SECONDS", 30, 5, 120) as u64;
+            let primary_model = std::env::var("GRAPH_EXTRACTOR_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
+            let fallback_model = std::env::var("GRAPH_EXTRACTOR_FALLBACK_MODEL")
+                .ok()
+                .filter(|model| !model.trim().is_empty());
+            let mut last_error = None;
+
+            for attempt in 1..=max_attempts {
+                let model = if attempt > 1 {
+                    fallback_model.as_deref().unwrap_or(&primary_model)
+                } else {
+                    &primary_model
+                };
+                tracing::debug!(
+                    target: "memory.graph",
+                    attempt,
+                    max_attempts,
+                    model = %model,
+                    "Starting mind-map extraction"
+                );
+
+                match timeout(
+                    Duration::from_secs(timeout_seconds),
+                    self.update_graph_from_exchange(user_id.clone(), prompt.clone(), model),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => {
+                        if attempt > 1 {
+                            tracing::info!(
+                                target: "memory.graph",
+                                attempt,
+                                model = %model,
+                                "Mind-map extraction recovered after retry"
+                            );
+                        }
+                        return Ok(value);
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: "memory.graph",
+                            attempt,
+                            max_attempts,
+                            model = %model,
+                            error = %error,
+                            "Mind-map extraction attempt failed"
+                        );
+                        last_error = Some(error);
+                    }
+                    Err(_) => {
+                        let error = anyhow::anyhow!("timed out after {} seconds", timeout_seconds);
+                        tracing::warn!(
+                            target: "memory.graph",
+                            attempt,
+                            max_attempts,
+                            model = %model,
+                            timeout_seconds,
+                            "Mind-map extraction attempt timed out"
+                        );
+                        last_error = Some(error);
+                    }
+                }
+
+                if attempt < max_attempts {
+                    sleep(Duration::from_millis(250 * attempt as u64)).await;
+                }
+            }
+
+            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("mind-map extraction failed")))
+        }
+
         async fn update_graph_from_exchange(
             &self,
             user_id: String,
             prompt: String,
+            model: &str,
         ) -> Result<Option<String>> {
             let current_graph = self.read_patient_graph(user_id.clone()).await?;
             let profiles = self
@@ -6679,11 +6758,9 @@ mod runtime {
                 known_people_roster(&profiles)
             );
 
-            let model = std::env::var("GRAPH_EXTRACTOR_MODEL")
-                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
             let extractor = self
                 .openrouter_client
-                .extractor::<ConversationGraphDelta>(&model)
+                .extractor::<ConversationGraphDelta>(model)
                 .preamble(GRAPH_DELTA_PROMPT)
                 .context(&context)
                 .additional_params(openrouter_privacy_params())
@@ -6779,15 +6856,16 @@ mod runtime {
             // schema failure in one must not prevent the remaining memory
             // projections from being persisted.
             if plan.graph {
-                match timeout(
-                    Duration::from_secs(30),
-                    self.update_graph_from_exchange(user_id.clone(), prompt.clone()),
-                )
-                .await
+                match self
+                    .update_graph_from_exchange_with_retry(user_id.clone(), prompt.clone())
+                    .await
                 {
-                    Ok(Ok(value)) => headline = headline.or(value),
-                    Ok(Err(error)) => eprintln!("[graph_update] {}", error),
-                    Err(_) => eprintln!("[graph_update] timed out after 30 seconds"),
+                    Ok(value) => headline = headline.or(value),
+                    Err(error) => tracing::error!(
+                        target: "memory.graph",
+                        error = %error,
+                        "Mind-map extraction exhausted all attempts"
+                    ),
                 }
             }
             if plan.relationship_profiles {

@@ -150,7 +150,7 @@ async fn main() {
 
     let app = Router::new()
         // Pages
-        .route("/", get(landing_page))
+        .route("/", get(root_page))
         .route("/privacy-and-security", get(privacy_security_page))
         .route("/chat", get(home_page))
         .route("/login", get(login_page))
@@ -407,9 +407,16 @@ async fn get_authed_user(headers: &HeaderMap, key: &Key) -> Option<User> {
 
 // --- Page Handlers ---
 
-async fn landing_page(State(state): State<AppState>) -> impl IntoResponse {
-    let html = templates::render_landing(&state.templates);
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+fn root_destination(is_authenticated: bool) -> &'static str {
+    if is_authenticated {
+        "/chat"
+    } else {
+        "/login"
+    }
+}
+
+async fn root_page(State(state): State<AppState>, headers: HeaderMap) -> Redirect {
+    Redirect::temporary(root_destination(has_auth_cookie(&headers, &state.key)))
 }
 
 async fn home_page(
@@ -2381,4 +2388,19 @@ async fn static_asset_handler(Path(filename): Path<String>) -> Response {
     }
     let uri: Uri = format!("/{}", filename).parse().unwrap();
     fileserv::static_file_handler(uri).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_destination;
+
+    #[test]
+    fn root_sends_authenticated_users_to_chat() {
+        assert_eq!(root_destination(true), "/chat");
+    }
+
+    #[test]
+    fn root_sends_logged_out_users_to_login() {
+        assert_eq!(root_destination(false), "/login");
+    }
 }

@@ -51,8 +51,6 @@ pub fn create_env() -> Environment<'static> {
     let mut env = Environment::new();
     env.add_template("base.html", include_str!("../templates/base.html"))
         .unwrap();
-    env.add_template("landing", include_str!("../templates/landing.html"))
-        .unwrap();
     env.add_template(
         "privacy_security",
         include_str!("../templates/privacy_security.html"),
@@ -92,13 +90,6 @@ pub fn create_env() -> Environment<'static> {
 
 pub fn render_login(env: &Environment) -> String {
     env.get_template("login")
-        .unwrap()
-        .render(json!({}))
-        .unwrap()
-}
-
-pub fn render_landing(env: &Environment) -> String {
-    env.get_template("landing")
         .unwrap()
         .render(json!({}))
         .unwrap()
@@ -289,7 +280,6 @@ mod tests {
         let env = create_env();
         for name in [
             "base.html",
-            "landing",
             "login",
             "recovery",
             "signup",
@@ -317,7 +307,7 @@ mod tests {
     #[test]
     fn base_template_contains_ios_pwa_metadata() {
         let html = create_env()
-            .get_template("landing")
+            .get_template("login")
             .unwrap()
             .render(minijinja::context! {})
             .unwrap();
@@ -346,29 +336,6 @@ mod tests {
         assert!(html.contains("bubble-therapist"));
         assert!(html.contains("avatar-orb"));
         assert!(html.contains("role-label"));
-    }
-
-    #[test]
-    fn landing_page_contains_product_and_trust_sections() {
-        let env = create_env();
-        let html = render_landing(&env);
-        assert!(html.contains("Open-Source AI Therapist App | IndividuateAI"));
-        assert!(html.contains("An open-source AI therapist app that helps you see your patterns"));
-        assert!(html.contains("name=\"description\""));
-        assert!(html.contains("not a substitute for a licensed mental health professional"));
-        assert!(html.contains("Illustrative mind map"));
-        assert_eq!(html.matches("dy=\".35em\"").count(), 16);
-        assert!(html.contains("Illustrative social graph"));
-        assert!(html.contains("Privacy &amp; security"));
-        assert!(html.contains("Check the code yourself"));
-        assert!(html.contains("If you lose every passkey and your recovery key"));
-        assert!(html.contains("The AI provider must read a message to answer it"));
-        assert!(html.contains("github.com/dunctk/individuate-ai"));
-        assert!(html.contains("href=\"/login\""));
-        assert!(html.contains("href=\"/privacy-and-security\""));
-        assert!(html.contains("data-landing-currency-panel=\"usd\""));
-        assert!(html.contains("data-landing-currency-panel=\"eur\""));
-        assert!(html.contains("Show euro pricing"));
     }
 
     #[test]

@@ -313,7 +313,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260715-chat-copy"));
+        assert!(html.contains("individuateai.css?v=20260717-message-audio"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }
@@ -334,6 +334,8 @@ mod tests {
         let html = render_chat_messages(&env, &messages);
         assert!(html.contains("bubble-user"));
         assert!(html.contains("bubble-therapist"));
+        assert!(html.contains("Read therapist message aloud"));
+        assert!(html.contains("therapist-audio-playback"));
         assert!(html.contains("avatar-orb"));
         assert!(html.contains("role-label"));
     }
@@ -466,9 +468,10 @@ mod tests {
         assert!(html.contains("Deepgram live"));
         assert!(html.contains("playDeepgramListeningTone()"));
         assert!(html.contains("auto-read-responses"));
-        assert!(html.contains("response-audio-play"));
+        assert!(html.contains("therapist-audio-trigger"));
+        assert!(html.contains("readTherapistMessage(this)"));
+        assert!(html.contains("therapist-audio-play-icon"));
         assert!(html.contains("seekSpokenResponse(-15)"));
-        assert!(html.contains("replaySpokenResponse()"));
         assert!(html.contains("wss://api.eu.deepgram.com/v1/speak"));
         assert!(html.contains("encoding: 'linear16'"));
         assert!(html.contains("type: 'Flush'"));

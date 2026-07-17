@@ -109,6 +109,23 @@
                 <div class="flex flex-col items-start min-w-0 max-w-[78%]">
                     <span class="role-label mb-1">Therapist</span>
                     <div class="bubble bubble-therapist" data-chat-markdown="{{ message.content|e }}">{{ message.content_html|safe }}</div>
+                    <div class="therapist-audio" data-state="idle">
+                        <button type="button" class="therapist-audio-trigger" onclick="readTherapistMessage(this)" aria-label="Read therapist message aloud" title="Read aloud">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7l-4 3H5Z"/><path d="M15.5 9.5a4 4 0 0 1 0 5M18 7a7.5 7.5 0 0 1 0 10"/></svg>
+                        </button>
+                        <div class="therapist-audio-playback hidden" role="group" aria-label="Therapist message playback controls">
+                            <button type="button" class="therapist-audio-button" onclick="seekSpokenResponse(-15)" aria-label="Go back 15 seconds" title="Back 15 seconds">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5V3M5.4 7.1A8 8 0 1 1 4 14"/><text x="12" y="16">15</text></svg>
+                            </button>
+                            <button type="button" class="therapist-audio-button therapist-audio-primary" onclick="toggleSpokenResponse()" aria-label="Play therapist message" title="Play">
+                                <svg class="therapist-audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>
+                            </button>
+                            <button type="button" class="therapist-audio-button" onclick="seekSpokenResponse(15)" aria-label="Go forward 15 seconds" title="Forward 15 seconds">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4V3m-.4 4.1A8 8 0 1 0 20 14"/><text x="12" y="16">15</text></svg>
+                            </button>
+                            <span class="therapist-audio-status" role="status" aria-live="polite">Preparing…</span>
+                        </div>
+                    </div>
                 </div>
             </div>
             {% endif %}
@@ -155,23 +172,6 @@
                 </div>
             </div>
             <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
-                <div id="response-audio" class="response-audio hidden" role="region" aria-label="Spoken response controls">
-                    <span id="response-audio-status" class="response-audio-status" role="status" aria-live="polite">Ready to listen</span>
-                    <div class="response-audio-controls">
-                        <button type="button" class="response-audio-button" onclick="seekSpokenResponse(-15)" aria-label="Go back 15 seconds" title="Back 15 seconds">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5V3M5.4 7.1A8 8 0 1 1 4 14"/><text x="12" y="16">15</text></svg>
-                        </button>
-                        <button id="response-audio-play" type="button" class="response-audio-button response-audio-primary" onclick="toggleSpokenResponse()" aria-label="Play spoken response" title="Play">
-                            <svg id="response-audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>
-                        </button>
-                        <button type="button" class="response-audio-button" onclick="seekSpokenResponse(15)" aria-label="Go forward 15 seconds" title="Forward 15 seconds">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4V3m-.4 4.1A8 8 0 1 0 20 14"/><text x="12" y="16">15</text></svg>
-                        </button>
-                        <button type="button" class="response-audio-button" onclick="replaySpokenResponse()" aria-label="Replay spoken response" title="Replay">
-                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7H4V3m.6 4.2A9 9 0 1 1 3 14"/></svg>
-                        </button>
-                    </div>
-                </div>
                 <div id="voice-live" class="voice-live" data-state="idle" role="status" aria-live="polite">
                     <span class="voice-live-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
                     <span id="voice-live-label" class="voice-live-label">Deepgram live</span>
@@ -272,6 +272,7 @@ let speechPositionStartedAt = 0;
 let speechCurrentChunkEnd = 0;
 let speechUiFrame = null;
 let speechError = '';
+let speechActiveControls = null;
 const waitingMessages = [
     'Letting the symbol constellate...',
     'Listening for the pattern beneath the story...',
@@ -342,6 +343,27 @@ function renderBubble(role, content) {
         '<div class="flex flex-col ' + alignCls + ' min-w-0 max-w-[78%]">' +
           '<span class="role-label mb-1 ' + (isUser ? 'text-right' : '') + '">' + label + '</span>' +
           '<div class="bubble ' + bubbleCls + '">' + formatChatContent(content) + '</div>' +
+          (isUser ? '' : therapistAudioMarkup()) +
+        '</div>' +
+      '</div>';
+}
+
+function therapistAudioMarkup() {
+    return '<div class="therapist-audio" data-state="idle">' +
+        '<button type="button" class="therapist-audio-trigger" onclick="readTherapistMessage(this)" aria-label="Read therapist message aloud" title="Read aloud">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 3V7l-4 3H5Z"/><path d="M15.5 9.5a4 4 0 0 1 0 5M18 7a7.5 7.5 0 0 1 0 10"/></svg>' +
+        '</button>' +
+        '<div class="therapist-audio-playback hidden" role="group" aria-label="Therapist message playback controls">' +
+          '<button type="button" class="therapist-audio-button" onclick="seekSpokenResponse(-15)" aria-label="Go back 15 seconds" title="Back 15 seconds">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5V3M5.4 7.1A8 8 0 1 1 4 14"/><text x="12" y="16">15</text></svg>' +
+          '</button>' +
+          '<button type="button" class="therapist-audio-button therapist-audio-primary" onclick="toggleSpokenResponse()" aria-label="Play therapist message" title="Play">' +
+            '<svg class="therapist-audio-play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 8 5-8 5Z"/></svg>' +
+          '</button>' +
+          '<button type="button" class="therapist-audio-button" onclick="seekSpokenResponse(15)" aria-label="Go forward 15 seconds" title="Forward 15 seconds">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7h4V3m-.4 4.1A8 8 0 1 0 20 14"/><text x="12" y="16">15</text></svg>' +
+          '</button>' +
+          '<span class="therapist-audio-status" role="status" aria-live="polite">Preparing…</span>' +
         '</div>' +
       '</div>';
 }
@@ -523,10 +545,10 @@ function formatSpeechTime(seconds) {
 }
 
 function setSpeechPlayIcon(playing) {
-    const button = document.getElementById('response-audio-play');
-    const icon = document.getElementById('response-audio-play-icon');
+    const button = speechActiveControls?.querySelector('.therapist-audio-primary');
+    const icon = speechActiveControls?.querySelector('.therapist-audio-play-icon');
     if (!button || !icon) return;
-    button.setAttribute('aria-label', playing ? 'Pause spoken response' : 'Play spoken response');
+    button.setAttribute('aria-label', playing ? 'Pause therapist message' : 'Play therapist message');
     button.title = playing ? 'Pause' : 'Play';
     icon.innerHTML = playing
         ? '<path d="M9 7v10M15 7v10"/>'
@@ -534,18 +556,17 @@ function setSpeechPlayIcon(playing) {
 }
 
 function updateSpeechControls() {
-    const panel = document.getElementById('response-audio');
-    const status = document.getElementById('response-audio-status');
-    if (!panel || !status) return;
-    panel.classList.toggle('hidden', !speechFullText.trim());
+    const status = speechActiveControls?.querySelector('.therapist-audio-status');
+    if (!speechActiveControls || !status) return;
     const position = currentSpeechPosition();
     const loaded = speechLoadedDuration();
     const playing = speechWantsPlay && Boolean(speechSource);
+    speechActiveControls.dataset.state = speechError ? 'error' : playing ? 'playing' : 'paused';
     setSpeechPlayIcon(playing);
     if (speechError) status.textContent = speechError;
     else if (playing) status.textContent = 'Speaking · ' + formatSpeechTime(position);
     else if (speechGenerationActive && !speechChunks.length) status.textContent = 'Preparing voice…';
-    else if (speechWantsPlay && !speechAudioFinal) status.textContent = 'Deepgram live · buffering…';
+    else if (speechWantsPlay && !speechAudioFinal) status.textContent = 'Buffering…';
     else if (position > 0 && position < loaded - 0.05) status.textContent = 'Paused · ' + formatSpeechTime(position);
     else if (loaded > 0 && position >= loaded - 0.05 && speechAudioFinal) status.textContent = 'Finished · ' + formatSpeechTime(loaded);
     else status.textContent = 'Ready to listen';
@@ -947,7 +968,9 @@ function beginSpokenResponse() {
     speechFetchChain = Promise.resolve();
     speechSendChain = Promise.resolve();
     speechSocketClosing = false;
-    speechStreamingFailed = false;
+    // Use the authenticated server endpoint for reliable, containerized MP3.
+    // Browser-side WebSocket audio is raw PCM and is brittle on mobile Safari.
+    speechStreamingFailed = true;
     speechAudioFinal = false;
     speechPcmRemainder = new Uint8Array(0);
     speechStreamText = '';
@@ -959,6 +982,43 @@ function beginSpokenResponse() {
     speechPosition = 0;
     speechError = '';
     updateSpeechControls();
+}
+
+function activateSpeechControls(controls) {
+    if (!controls) return;
+    if (speechActiveControls && speechActiveControls !== controls) {
+        speechActiveControls.classList.remove('therapist-audio-active');
+        speechActiveControls.querySelector('.therapist-audio-playback')?.classList.add('hidden');
+        speechActiveControls.querySelector('.therapist-audio-trigger')?.classList.remove('hidden');
+        speechActiveControls.dataset.state = 'idle';
+    }
+    speechActiveControls = controls;
+    controls.classList.add('therapist-audio-active');
+    controls.querySelector('.therapist-audio-trigger')?.classList.add('hidden');
+    controls.querySelector('.therapist-audio-playback')?.classList.remove('hidden');
+    updateSpeechControls();
+}
+
+async function readTherapistMessage(button) {
+    const controls = button.closest('.therapist-audio');
+    const bubble = controls?.parentElement?.querySelector('.bubble-therapist');
+    const text = bubble?.dataset.chatMarkdown || bubble?.textContent || '';
+    if (!controls || !text.trim()) return;
+    try {
+        await unlockSpeechAudio();
+        beginSpokenResponse();
+        activateSpeechControls(controls);
+        speechGenerationActive = true;
+        speechWantsPlay = true;
+        speechFullText = text;
+        speechResponseFinal = true;
+        queueAvailableSpeech(true);
+        finishSpeechGeneration();
+        updateSpeechControls();
+    } catch (error) {
+        activateSpeechControls(controls);
+        handleSpeechError(error);
+    }
 }
 
 function updateSpokenResponse(text, final = false) {
@@ -1026,6 +1086,8 @@ function setAutoReadResponses(enabled) {
     speechAutoRead = Boolean(enabled);
     try { localStorage.setItem(SPEECH_AUTO_READ_KEY, speechAutoRead ? 'true' : 'false'); } catch (_) {}
     if (speechAutoRead && speechFullText.trim()) {
+        const latestControls = Array.from(document.querySelectorAll('.therapist-audio')).at(-1);
+        activateSpeechControls(latestControls);
         speechGenerationActive = true;
         speechWantsPlay = true;
         unlockSpeechAudio()
@@ -1041,6 +1103,7 @@ function setAutoReadResponses(enabled) {
 function streamAssistantResponse(prompt) {
     return new Promise((resolve, reject) => {
         const { message, bubble, avatar } = addStreamingAssistantMessage();
+        if (speechAutoRead) activateSpeechControls(message.querySelector('.therapist-audio'));
         const source = new EventSource(buildChatStreamUrl(prompt));
         let assembled = '';
         let settled = false;
@@ -1445,7 +1508,7 @@ async function submitChat() {
     beginSpokenResponse();
     if (speechAutoRead) {
         await unlockSpeechAudio().catch(handleSpeechError);
-        prepareSpeechStream().catch(() => {});
+        speechWantsPlay = speechAudioUnlocked;
     }
     const voiceLive = document.getElementById('voice-live');
     if (deepgramSocket) cancelDeepgramVoiceInput();

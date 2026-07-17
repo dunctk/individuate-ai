@@ -1,4 +1,4 @@
-const CACHE_NAME = 'individuate-public-shell-v3';
+const CACHE_NAME = 'individuate-public-shell-v4';
 const PUBLIC_ASSETS = [
   '/manifest.webmanifest',
   '/icons/icon.svg',
@@ -6,7 +6,7 @@ const PUBLIC_ASSETS = [
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/icon-maskable-512.png',
-  '/pkg/individuateai.css?v=20260717-cycle-context',
+  '/pkg/individuateai.css?v=20260717-body-onboarding',
   '/passkey.js?v=20260714-largeblob'
 ];
 

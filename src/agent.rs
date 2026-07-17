@@ -285,7 +285,9 @@ mod runtime {
         User,
     };
     use crate::{
-        cycle::{self, CycleDashboard, CycleEvent, CycleInsight, CycleProfile},
+        cycle::{
+            self, BodyOnboardingPreference, CycleDashboard, CycleEvent, CycleInsight, CycleProfile,
+        },
         security,
     };
     use std::{
@@ -1031,6 +1033,7 @@ mod runtime {
                 CREATE TABLE IF NOT EXISTS user_preferences (
                     user_id TEXT PRIMARY KEY,
                     tts_voice TEXT NOT NULL DEFAULT 'aura-2-thalia-en',
+                    onboarding_ciphertext BLOB,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
@@ -1282,6 +1285,7 @@ mod runtime {
                 .map_err(tokio_rusqlite::Error::Rusqlite)?;
 
             for (table, column, definition) in [
+                ("user_preferences", "onboarding_ciphertext", "BLOB"),
                 ("sessions", "title_ciphertext", "BLOB"),
                 ("sessions", "preview_ciphertext", "BLOB"),
                 ("messages", "content_ciphertext", "BLOB"),
@@ -8540,6 +8544,69 @@ mod runtime {
                 .context("Saving text-to-speech preference")
         }
 
+        pub async fn get_body_onboarding_preference(
+            &self,
+            user_id: String,
+        ) -> Result<BodyOnboardingPreference> {
+            let dek = self.active_dek(&user_id)?;
+            let uid = user_id.clone();
+            let encrypted: Option<Option<Vec<u8>>> = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT onboarding_ciphertext FROM user_preferences WHERE user_id = ?1",
+                        [uid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let Some(Some(encrypted)) = encrypted else {
+                return Ok(BodyOnboardingPreference::default());
+            };
+            let plaintext = security::decrypt(
+                &dek,
+                &encrypted,
+                format!("user_preferences:onboarding:{user_id}").as_bytes(),
+            )?;
+            serde_json::from_slice(&plaintext).context("Parsing encrypted onboarding preference")
+        }
+
+        pub async fn save_body_onboarding_preference(
+            &self,
+            user_id: String,
+            preference: BodyOnboardingPreference,
+        ) -> Result<BodyOnboardingPreference> {
+            preference.validate()?;
+            let dek = self.active_dek(&user_id)?;
+            let payload =
+                serde_json::to_vec(&preference).context("Serializing onboarding preference")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("user_preferences:onboarding:{user_id}").as_bytes(),
+            )?;
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO user_preferences (user_id, onboarding_ciphertext, updated_at)
+                        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            onboarding_ciphertext = excluded.onboarding_ciphertext,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![user_id, encrypted],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving encrypted onboarding preference")?;
+            Ok(preference)
+        }
+
         // Auth Helpers
         pub async fn get_user(&self, id: String) -> Result<User> {
             self.get_user_by_id(id).await
@@ -9209,6 +9276,35 @@ mod runtime {
                 .await
                 .unwrap();
             assert!(has_model);
+        }
+
+        #[tokio::test]
+        async fn ensure_schema_adds_encrypted_onboarding_to_existing_preferences() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    "CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL);
+                     CREATE TABLE user_preferences (
+                         user_id TEXT PRIMARY KEY,
+                         tts_voice TEXT NOT NULL DEFAULT 'aura-2-thalia-en',
+                         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                     );",
+                )?;
+                Ok::<_, tokio_rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+
+            ensure_schema(&conn).await.unwrap();
+
+            let has_onboarding = conn
+                .call(|conn| {
+                    table_has_column(conn, "user_preferences", "onboarding_ciphertext")
+                        .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .unwrap();
+            assert!(has_onboarding);
         }
 
         #[tokio::test]

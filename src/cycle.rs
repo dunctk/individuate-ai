@@ -6,6 +6,61 @@ use time::{macros::format_description, Date, Duration, OffsetDateTime};
 const ISO_DATE: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BodyOnboardingPreference {
+    pub completed: bool,
+    pub identity: Option<String>,
+    pub period_tracking_choice: Option<String>,
+}
+
+impl BodyOnboardingPreference {
+    pub fn validate(&self) -> Result<()> {
+        if self.identity.as_ref().is_some_and(|identity| {
+            !matches!(
+                identity.as_str(),
+                "male" | "female" | "other" | "prefer_not_to_say"
+            )
+        }) {
+            return Err(anyhow!("Unsupported identity choice"));
+        }
+        if self.period_tracking_choice.as_ref().is_some_and(|choice| {
+            !matches!(choice.as_str(), "accepted" | "declined" | "not_offered")
+        }) {
+            return Err(anyhow!("Unsupported period tracking choice"));
+        }
+        if self.completed && self.identity.is_none() {
+            return Err(anyhow!("Choose an option or prefer not to say"));
+        }
+        if self.completed
+            && matches!(self.identity.as_deref(), Some("female" | "other"))
+            && !matches!(
+                self.period_tracking_choice.as_deref(),
+                Some("accepted" | "declined")
+            )
+        {
+            return Err(anyhow!("Choose whether to set up period tracking"));
+        }
+        if self.completed
+            && matches!(self.identity.as_deref(), Some("male" | "prefer_not_to_say"))
+            && self.period_tracking_choice.as_deref() != Some("not_offered")
+        {
+            return Err(anyhow!("Period tracking was not offered for this choice"));
+        }
+        Ok(())
+    }
+
+    pub fn identity_label(&self) -> &'static str {
+        match self.identity.as_deref() {
+            Some("male") => "Male",
+            Some("female") => "Female",
+            Some("other") => "Other",
+            Some("prefer_not_to_say") => "Prefer not to say",
+            _ => "Not answered",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CycleProfile {
@@ -602,5 +657,37 @@ mod tests {
             Some("2026-07-16")
         );
         assert!(chat_period_start_suggestion("I feel tired", today_utc()).is_none());
+    }
+
+    #[test]
+    fn onboarding_requires_a_period_choice_only_when_it_is_offered() {
+        assert!(BodyOnboardingPreference {
+            completed: true,
+            identity: Some("male".to_string()),
+            period_tracking_choice: Some("not_offered".to_string()),
+        }
+        .validate()
+        .is_ok());
+        assert!(BodyOnboardingPreference {
+            completed: true,
+            identity: Some("male".to_string()),
+            period_tracking_choice: Some("accepted".to_string()),
+        }
+        .validate()
+        .is_err());
+        assert!(BodyOnboardingPreference {
+            completed: true,
+            identity: Some("other".to_string()),
+            period_tracking_choice: None,
+        }
+        .validate()
+        .is_err());
+        assert!(BodyOnboardingPreference {
+            completed: true,
+            identity: Some("female".to_string()),
+            period_tracking_choice: Some("accepted".to_string()),
+        }
+        .validate()
+        .is_ok());
     }
 }

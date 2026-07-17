@@ -363,11 +363,58 @@ async function registerPasskey() {
   await page.locator('#create-passkey-btn').click();
   await page.waitForURL((url) => ['/','/chat'].includes(new URL(url).pathname));
   await assertAuthenticated();
+}
+
+async function testBodyOnboarding() {
+  log('testing first-use body preferences and conditional period offer');
+  await page.setViewportSize({ width: 375, height: 667 });
+  const modal = page.locator('#body-onboarding-modal');
+  await modal.waitFor({ state: 'visible' });
+  assert.equal(await modal.getByText('This helps us decide whether to offer period tracking.').isVisible(), true);
+  await modal.getByRole('button', { name: 'Other', exact: true }).click();
+  await modal.getByRole('heading', { name: 'Would you like to track your periods?' }).waitFor();
+  assert.equal(await modal.getByText('Tracking is private and optional.').isVisible(), true);
+
+  const undersized = await modal.locator('button:visible').evaluateAll((buttons) => buttons
+    .filter((button) => {
+      const box = button.getBoundingClientRect();
+      return box.width < 44 || box.height < 44;
+    })
+    .map((button) => button.textContent.trim()));
+  assert.deepEqual(undersized, [], `onboarding controls below 44px: ${undersized.join(', ')}`);
+
+  await modal.getByRole('button', { name: 'Not now' }).click();
+  await modal.waitFor({ state: 'hidden' });
+  log('conditional period tracking offer passed');
+}
+
+async function syncPasskey() {
   const syncBanner = page.locator('#passkey-sync-banner');
   if (await syncBanner.isVisible()) {
     await syncBanner.getByRole('button', { name: 'Enable iCloud sync' }).click();
     await syncBanner.waitFor({ state: 'hidden' });
   }
+  await page.reload();
+  assert.equal(await page.locator('#body-onboarding-modal').isHidden(), true);
+
+  await page.getByRole('button', { name: 'Profiles' }).click();
+  const drawer = page.locator('#profile-drawer');
+  await drawer.getByText('About you').waitFor();
+  assert.equal(await drawer.getByText('Other', { exact: true }).isVisible(), true);
+  await drawer.getByRole('button', { name: 'Change' }).click();
+  const modal = page.locator('#body-onboarding-modal');
+  await modal.waitFor({ state: 'visible' });
+  await modal.getByRole('button', { name: 'Male', exact: true }).click();
+  await modal.waitFor({ state: 'hidden' });
+  assert.equal(await modal.getByRole('heading', { name: 'Would you like to track your periods?' }).isHidden(), true);
+  await page.reload();
+  assert.equal(await modal.isHidden(), true);
+
+  await page.evaluate(() => window.openBodyOnboarding());
+  await modal.getByRole('button', { name: 'Female', exact: true }).click();
+  await modal.getByRole('button', { name: 'Set up period tracking' }).click();
+  await page.waitForURL((url) => new URL(url).pathname === '/cycle');
+  await page.locator('#cycle-setup').waitFor({ state: 'visible' });
 }
 
 async function loginWithPasskey() {
@@ -497,6 +544,7 @@ async function inspectDatabase() {
   assert.ok(report.encrypted_episodes > 0);
   assert.ok(report.encrypted_cycle_profiles > 0);
   assert.ok(report.encrypted_cycle_events > 0);
+  assert.ok(report.encrypted_onboarding_preferences > 0);
 }
 
 function browserPath() {
@@ -548,6 +596,8 @@ async function main() {
   });
 
   await registerPasskey();
+  await testBodyOnboarding();
+  await syncPasskey();
   await testCycleTracking();
   const sessionId = await sendChat();
   log('passkey registration, chat, and encrypted memory write passed');

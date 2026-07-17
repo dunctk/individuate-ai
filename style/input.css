@@ -1997,3 +1997,22 @@
 .cycle-chat-suggestion-mark { width: 28px; height: 28px; border: 1px solid rgba(199,125,135,.55); border-radius: 50% 50% 50% 18%; background: rgba(199,125,135,.13); transform: rotate(45deg); }
 .cycle-chat-suggestion p { color: #DCE4DF; font-size: .76rem; font-weight: 780; line-height: 1.35; }.cycle-chat-suggestion span { display: block; margin-top: .18rem; color: #78938B; font-size: .64rem; line-height: 1.4; }.cycle-chat-suggestion-actions { display: flex; gap: .35rem; }.cycle-chat-suggestion-actions button, .cycle-chat-suggestion-actions a { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; padding: .45rem .7rem; border: 1px solid rgba(107,138,130,.3); border-radius: .75rem; color: #9DB3AC; font-size: .68rem; font-weight: 820; text-decoration: none; }.cycle-chat-suggestion-actions button[data-action="confirm"], .cycle-chat-suggestion-actions a { border-color: rgba(63,184,164,.42); color: #75D0BF; }.cycle-chat-suggestion[data-saved="true"] { border-color: rgba(63,184,164,.35); }
 @media (max-width: 520px) { .cycle-chat-suggestion { grid-template-columns: 28px minmax(0,1fr); }.cycle-chat-suggestion-actions { grid-column: 1 / -1; justify-content: flex-end; } }
+
+.body-onboarding-modal { overscroll-behavior: contain; }
+.body-onboarding-card { max-height: min(92dvh, 42rem); overflow-y: auto; }
+.body-onboarding-options { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: .5rem; }
+.body-onboarding-options button, .body-onboarding-primary, .body-onboarding-secondary { min-height: 48px; border-radius: .85rem; padding: .65rem .75rem; font-size: .78rem; font-weight: 800; transition: transform 100ms ease-out, border-color 140ms ease-out, background-color 140ms ease-out; }
+.body-onboarding-options button { border: 1px solid rgba(107,138,130,.34); background: rgba(8,19,14,.52); color: #D6DFDA; }
+.body-onboarding-options button:hover, .body-onboarding-options button:focus-visible { border-color: rgba(63,184,164,.65); background: rgba(42,157,143,.09); }
+.body-onboarding-options button[aria-pressed="true"] { border-color: #3FB8A4; background: rgba(42,157,143,.14); color: #8DE0D1; }
+.body-onboarding-options button:active, .body-onboarding-primary:active, .body-onboarding-secondary:active { transform: scale(.98); }
+.body-onboarding-skip, .body-onboarding-back { min-width: 44px; min-height: 44px; color: #8EA9A1; font-size: .75rem; font-weight: 720; }
+.body-onboarding-skip { width: 100%; border-radius: .75rem; }
+.body-onboarding-back { display: inline-flex; align-items: center; }
+.body-onboarding-primary { background: #3FB8A4; color: #08130E; }
+.body-onboarding-secondary { border: 1px solid rgba(107,138,130,.34); color: #B8CBC5; }
+.body-onboarding-options button:disabled, .body-onboarding-primary:disabled, .body-onboarding-secondary:disabled, .body-onboarding-skip:disabled, .body-onboarding-back:disabled { cursor: wait; opacity: .55; }
+@media (max-width: 350px) { .body-onboarding-options { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .body-onboarding-options button, .body-onboarding-primary, .body-onboarding-secondary { transition: none; }.body-onboarding-options button:active, .body-onboarding-primary:active, .body-onboarding-secondary:active { transform: none; } }
+@media (prefers-reduced-transparency: reduce) { .body-onboarding-modal { backdrop-filter: none; -webkit-backdrop-filter: none; }.body-onboarding-card { background: #10231C; } }
+@media (prefers-contrast: more) { .body-onboarding-card, .body-onboarding-options button, .body-onboarding-secondary { border-color: #AFC8C0; } }

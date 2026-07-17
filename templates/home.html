@@ -15,6 +15,44 @@
         </div>
     </div>
 
+    <div id="body-onboarding-modal"
+         class="body-onboarding-modal fixed inset-0 z-[80] {% if show_body_onboarding %}flex{% else %}hidden{% endif %} items-center justify-center bg-black/70 px-3 py-[max(1rem,env(safe-area-inset-top))] backdrop-blur-sm"
+         role="dialog" aria-modal="true" aria-labelledby="body-onboarding-title"
+         data-current-identity="{{ body_identity }}">
+        <div class="body-onboarding-card w-full max-w-md rounded-[1.75rem] border border-sage-mist/25 bg-[#10231C] p-5 shadow-2xl sm:p-6">
+            <div id="body-onboarding-identity-step">
+                <p class="role-label mb-2">Personalise your support</p>
+                <h2 id="body-onboarding-title" class="font-fraunces text-2xl leading-tight text-parchment">How do you describe yourself?</h2>
+                <p class="mt-3 text-sm leading-relaxed text-sage-light">This helps us decide whether to offer period tracking. It will not be used to make assumptions about you in chat.</p>
+                <div class="body-onboarding-options mt-5" role="group" aria-label="How you describe yourself">
+                    <button type="button" data-identity="male" onclick="chooseBodyIdentity('male')">Male</button>
+                    <button type="button" data-identity="female" onclick="chooseBodyIdentity('female')">Female</button>
+                    <button type="button" data-identity="other" onclick="chooseBodyIdentity('other')">Other</button>
+                </div>
+                <button type="button" class="body-onboarding-skip mt-3" onclick="chooseBodyIdentity('prefer_not_to_say')">Prefer not to say</button>
+                <p class="mt-4 flex items-start gap-2 text-[11px] leading-relaxed text-sage-mist">
+                    <svg class="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 3 5 6v5c0 4.6 2.8 8.4 7 10 4.2-1.6 7-5.4 7-10V6l-7-3Z"/><path stroke-linecap="round" stroke-width="1.8" d="M9.5 12 11 13.5l3.5-4"/></svg>
+                    <span>Your answer is encrypted with your private account data. You can change it later in settings.</span>
+                </p>
+            </div>
+
+            <div id="body-onboarding-cycle-step" class="hidden">
+                <button type="button" class="body-onboarding-back" onclick="showBodyIdentityStep()" aria-label="Back to identity choices">← Back</button>
+                <p class="role-label mb-2 mt-3">Optional body context</p>
+                <h2 id="body-onboarding-cycle-title" class="font-fraunces text-2xl leading-tight text-parchment">Would you like to track your periods?</h2>
+                <p class="mt-3 text-sm leading-relaxed text-sage-light">Changes across a menstrual cycle can affect mood, energy, sleep, sensitivity, and how situations feel. Tracking gives the AI optional context, while keeping your actual feelings—not a prediction—at the centre.</p>
+                <div class="mt-4 rounded-xl border border-sage-mist/20 bg-void-deep/50 p-3 text-xs leading-relaxed text-sage-light">
+                    Tracking is private and optional. Estimates are never treated as a diagnosis, a certainty, or the cause of how you feel.
+                </div>
+                <div class="mt-5 grid gap-2 sm:grid-cols-2">
+                    <button type="button" class="body-onboarding-secondary" onclick="finishBodyOnboarding('declined', false)">Not now</button>
+                    <button type="button" class="body-onboarding-primary" onclick="finishBodyOnboarding('accepted', true)">Set up period tracking</button>
+                </div>
+            </div>
+            <p id="body-onboarding-status" class="mt-3 min-h-4 text-xs text-red-300" role="status" aria-live="polite"></p>
+        </div>
+    </div>
+
     <div id="recovery-rotation-modal" class="hidden fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm px-4 py-6 items-center justify-center" role="dialog" aria-modal="true" aria-labelledby="recovery-rotation-title">
         <div class="glass-strong w-full max-w-md rounded-[1.75rem] border border-sage-mist/25 p-5 sm:p-6 shadow-2xl">
             <div id="recovery-rotation-intro">
@@ -1889,6 +1927,80 @@ async function confirmRecoveryRotation() {
     }
 }
 
+let pendingBodyIdentity = '';
+
+function openBodyOnboarding() {
+    const modal = document.getElementById('body-onboarding-modal');
+    if (!modal) return;
+    pendingBodyIdentity = modal.dataset.currentIdentity || '';
+    syncBodyIdentitySelection();
+    document.getElementById('body-onboarding-status').textContent = '';
+    showBodyIdentityStep();
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    requestAnimationFrame(() => modal.querySelector('[data-identity]')?.focus());
+}
+
+function syncBodyIdentitySelection() {
+    document.querySelectorAll('#body-onboarding-modal [data-identity]').forEach(button => {
+        button.setAttribute('aria-pressed', button.dataset.identity === pendingBodyIdentity ? 'true' : 'false');
+    });
+}
+
+function showBodyIdentityStep() {
+    document.getElementById('body-onboarding-identity-step')?.classList.remove('hidden');
+    document.getElementById('body-onboarding-cycle-step')?.classList.add('hidden');
+    document.getElementById('body-onboarding-status').textContent = '';
+    document.getElementById('body-onboarding-modal')?.setAttribute('aria-labelledby', 'body-onboarding-title');
+}
+
+async function chooseBodyIdentity(identity) {
+    pendingBodyIdentity = identity;
+    const modal = document.getElementById('body-onboarding-modal');
+    if (modal) modal.dataset.currentIdentity = identity;
+    syncBodyIdentitySelection();
+    if (identity === 'female' || identity === 'other') {
+        document.getElementById('body-onboarding-identity-step')?.classList.add('hidden');
+        const cycleStep = document.getElementById('body-onboarding-cycle-step');
+        cycleStep?.classList.remove('hidden');
+        modal?.setAttribute('aria-labelledby', 'body-onboarding-cycle-title');
+        requestAnimationFrame(() => cycleStep?.querySelector('.body-onboarding-primary')?.focus());
+        return;
+    }
+    await saveBodyOnboarding('not_offered', false);
+}
+
+async function finishBodyOnboarding(choice, openTracker) {
+    await saveBodyOnboarding(choice, openTracker);
+}
+
+async function saveBodyOnboarding(periodTrackingChoice, openTracker) {
+    const status = document.getElementById('body-onboarding-status');
+    const buttons = document.querySelectorAll('#body-onboarding-modal button');
+    status.textContent = 'Saving…';
+    buttons.forEach(button => { button.disabled = true; });
+    try {
+        const response = await fetch('/api/onboarding/body', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                completed: true,
+                identity: pendingBodyIdentity,
+                period_tracking_choice: periodTrackingChoice,
+            }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || 'Could not save your choice');
+        document.getElementById('body-onboarding-modal')?.classList.add('hidden');
+        status.textContent = '';
+        if (openTracker) window.location.assign('/cycle');
+    } catch (error) {
+        status.textContent = error.message || 'Could not save your choice';
+    } finally {
+        buttons.forEach(button => { button.disabled = false; });
+    }
+}
+
 // Keyboard submit on desktop (Enter to send, Shift+Enter newline)
 document.addEventListener('DOMContentLoaded', () => {
     const autoRead = document.getElementById('auto-read-responses');
@@ -1925,6 +2037,33 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.removeItem('setup_passkey_sync');
         document.getElementById('passkey-sync-banner')?.classList.remove('hidden');
     }
+    const bodyOnboarding = document.getElementById('body-onboarding-modal');
+    if (bodyOnboarding && !bodyOnboarding.classList.contains('hidden')) {
+        pendingBodyIdentity = bodyOnboarding.dataset.currentIdentity || '';
+        syncBodyIdentitySelection();
+        bodyOnboarding.classList.add('flex');
+        requestAnimationFrame(() => bodyOnboarding.querySelector('[data-identity]')?.focus());
+    }
+    bodyOnboarding?.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            bodyOnboarding.querySelector('.body-onboarding-skip')?.focus();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusable = [...bodyOnboarding.querySelectorAll('button:not([disabled]):not(.hidden)')]
+            .filter(element => !element.closest('.hidden'));
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    });
 });
 
 // After an htmx swap loads chat history, scroll to foot

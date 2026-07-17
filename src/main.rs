@@ -19,7 +19,7 @@ use individuateai::billing::{
     event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
     StripeSubscription,
 };
-use individuateai::cycle::{self, CycleEvent, CycleProfile};
+use individuateai::cycle::{self, BodyOnboardingPreference, CycleEvent, CycleProfile};
 use individuateai::fileserv;
 use individuateai::templates;
 use minijinja::Environment;
@@ -195,6 +195,7 @@ async fn main() {
             get(get_cycle_dashboard).delete(delete_cycle_data),
         )
         .route("/api/cycle/profile", post(save_cycle_profile))
+        .route("/api/onboarding/body", post(save_body_onboarding))
         .route("/api/cycle/events", post(save_cycle_event))
         .route(
             "/api/cycle/events/:id",
@@ -466,7 +467,18 @@ async fn home_page(
                 cycle::today_utc(),
             )
         });
-    let html = templates::render_home(&state.templates, &user, session_id, &messages, &cycle);
+    let body_onboarding = runtime
+        .get_body_onboarding_preference(user.id.clone())
+        .await
+        .unwrap_or_default();
+    let html = templates::render_home(
+        &state.templates,
+        &user,
+        session_id,
+        &messages,
+        &cycle,
+        &body_onboarding,
+    );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -768,12 +780,17 @@ async fn profile_drawer_fragment(
         .get_cycle_profile(user.id.clone())
         .await
         .unwrap_or_default();
+    let body_onboarding = runtime
+        .get_body_onboarding_preference(user.id.clone())
+        .await
+        .unwrap_or_default();
     let html = templates::render_profile_drawer(
         &state.templates,
         &profiles,
         selected_slug,
         &selected_voice,
         &cycle_profile,
+        &body_onboarding,
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -1264,6 +1281,44 @@ async fn save_cycle_profile(
         }
     };
     match runtime.save_cycle_profile(user.id, profile).await {
+        Ok(saved) => Json(saved).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_body_onboarding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(preference): Json<BodyOnboardingPreference>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Preferences are unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime
+        .save_body_onboarding_preference(user.id, preference)
+        .await
+    {
         Ok(saved) => Json(saved).into_response(),
         Err(error) => (
             StatusCode::BAD_REQUEST,

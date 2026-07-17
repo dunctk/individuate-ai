@@ -1,7 +1,7 @@
 use crate::agent::{
     AdminUserAccess, ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES,
 };
-use crate::cycle::{CycleDashboard, CycleProfile};
+use crate::cycle::{BodyOnboardingPreference, CycleDashboard, CycleProfile};
 use minijinja::Environment;
 use serde_json::json;
 
@@ -145,6 +145,7 @@ pub fn render_home(
     session_id: &str,
     messages: &[ChatLog],
     cycle: &CycleDashboard,
+    body_onboarding: &BodyOnboardingPreference,
 ) -> String {
     env.get_template("home")
         .unwrap()
@@ -156,6 +157,8 @@ pub fn render_home(
             "cycle_enabled": cycle.profile.enabled && !cycle.profile.paused,
             "cycle_show_in_chat": cycle.profile.show_in_chat,
             "cycle_day": cycle.prediction.cycle_day,
+            "show_body_onboarding": !body_onboarding.completed && !cycle.profile.enabled,
+            "body_identity": body_onboarding.identity.as_deref().unwrap_or(""),
         }))
         .unwrap()
 }
@@ -226,6 +229,7 @@ pub fn render_profile_drawer(
     slug: &str,
     selected_voice: &str,
     cycle_profile: &CycleProfile,
+    body_onboarding: &BodyOnboardingPreference,
 ) -> String {
     let selected = profiles.iter().find(|p| p.slug == slug);
     let profile_list: Vec<serde_json::Value> = profiles
@@ -267,6 +271,8 @@ pub fn render_profile_drawer(
             "cycle_enabled": cycle_profile.enabled,
             "cycle_paused": cycle_profile.paused,
             "cycle_ai_context_enabled": cycle_profile.ai_context_enabled,
+            "body_onboarding_completed": body_onboarding.completed,
+            "body_identity_label": body_onboarding.identity_label(),
         }))
         .unwrap()
 }
@@ -355,7 +361,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260717-cycle-context"));
+        assert!(html.contains("individuateai.css?v=20260717-body-onboarding"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }
@@ -500,6 +506,7 @@ mod tests {
                 Vec::new(),
                 crate::cycle::today_utc(),
             ),
+            &BodyOnboardingPreference::default(),
         );
         assert!(html.contains("app-shell"));
         assert!(html.contains("app-viewport"));
@@ -541,19 +548,29 @@ mod tests {
         assert!(html.contains("Create a new recovery key"));
         assert!(html.contains("Your current recovery key will keep working"));
         assert!(html.contains("I saved this recovery key somewhere safe"));
+        assert!(html.contains("How do you describe yourself?"));
+        assert!(html.contains("Would you like to track your periods?"));
+        assert!(html.contains("/api/onboarding/body"));
     }
 
     #[test]
     fn profile_drawer_renders_voice_settings_and_selected_voice() {
         let env = create_env();
-        let html =
-            render_profile_drawer(&env, &[], "", "aura-2-helena-en", &CycleProfile::default());
+        let html = render_profile_drawer(
+            &env,
+            &[],
+            "",
+            "aura-2-helena-en",
+            &CycleProfile::default(),
+            &BodyOnboardingPreference::default(),
+        );
         assert!(html.contains("Profiles &amp; settings"));
         assert!(html.contains("Response voice"));
         assert!(html.contains("data-voice=\"aura-2-helena-en\""));
         assert!(html.contains("data-selected=\"true\""));
         assert!(html.contains("Preview Helena"));
         assert!(html.contains("/api/settings/voice"));
+        assert!(html.contains("About you"));
     }
 
     #[test]

@@ -69,6 +69,11 @@
             <span class="brand-mark hidden sm:inline text-lg leading-none">IndividuateAI</span>
         </div>
         <div class="flex min-w-0 items-center gap-1">
+            {% if cycle_enabled and cycle_show_in_chat %}
+            <a href="/cycle" class="pill no-underline text-inherit" data-active="false" aria-label="Open cycle and body tracker{% if cycle_day %}, cycle day {{ cycle_day }}{% endif %}">
+                Cycle{% if cycle_day %} {{ cycle_day }}{% endif %}
+            </a>
+            {% endif %}
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Profiles</button>
             <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
         </div>
@@ -1501,6 +1506,68 @@ async function toggleVoiceInput() {
     await startRecordedVoiceInput();
 }
 
+function chatLocalIsoDate() {
+    const now = new Date();
+    return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+async function offerCycleLogFromChat(messageText) {
+    try {
+        const response = await fetch('/api/cycle/chat-suggestion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: messageText, local_date: chatLocalIsoDate() })
+        });
+        if (!response.ok) return;
+        const suggestion = await response.json();
+        if (!suggestion.local_date) return;
+        const region = document.getElementById('chat-messages');
+        const card = document.createElement('section');
+        card.className = 'cycle-chat-suggestion';
+        card.setAttribute('aria-label', 'Cycle tracking suggestion');
+        const readable = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'long' })
+            .format(new Date(suggestion.local_date + 'T12:00:00'));
+        card.innerHTML = `
+            <div class="cycle-chat-suggestion-mark" aria-hidden="true"></div>
+            <div class="min-w-0">
+                <p>Log ${readable} as the first day of your period?</p>
+                <span>Nothing is saved until you choose Log it.</span>
+            </div>
+            <div class="cycle-chat-suggestion-actions">
+                <button type="button" data-action="dismiss">Not now</button>
+                <button type="button" data-action="confirm">Log it</button>
+            </div>`;
+        card.querySelector('[data-action="dismiss"]').addEventListener('click', () => card.remove());
+        card.querySelector('[data-action="confirm"]').addEventListener('click', async event => {
+            const button = event.currentTarget;
+            button.disabled = true;
+            button.textContent = 'Saving…';
+            try {
+                const save = await fetch('/api/cycle/events', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: '', kind: 'bleeding_started', local_date: suggestion.local_date,
+                        source: 'chat_confirmed', flow: null, note: null, check_in: null
+                    })
+                });
+                const result = await save.json().catch(() => ({}));
+                if (!save.ok) throw new Error(result.error || 'Could not save');
+                card.dataset.saved = 'true';
+                card.querySelector('p').textContent = 'Period start recorded.';
+                card.querySelector('span').textContent = 'Your estimate will update from this observed date.';
+                card.querySelector('.cycle-chat-suggestion-actions').innerHTML = '<a href="/cycle">View timeline</a>';
+            } catch (error) {
+                button.disabled = false;
+                button.textContent = 'Log it';
+                showToast(error.message || 'Could not save cycle entry', 'error');
+            }
+        });
+        region.appendChild(card);
+        scheduleScrollChatToBottom();
+    } catch (_) {}
+}
+
 async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
@@ -1526,6 +1593,7 @@ async function submitChat() {
         if (response.text.trim() && !response.memoryUpdated) {
             watchMemoryWrite();
         }
+        offerCycleLogFromChat(text);
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
     } finally {

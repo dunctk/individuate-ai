@@ -109,7 +109,7 @@
                     </header>
                     <ol class="privacy-steps">
                         <li><span>1</span><div><p class="privacy-step-meta">Storage layer</p><h3>Database encryption</h3><p>SQLCipher encrypts the complete SQLite database on disk. The deployment key lives in the protected server environment, not in the repository.</p></div></li>
-                        <li><span>2</span><div><p class="privacy-step-meta">Account layer</p><h3>Per-user content encryption</h3><p>Messages, memory fragments, embeddings, episodes, relationship profiles, and graph labels are encrypted again with XChaCha20-Poly1305 under your account’s unique key.</p></div></li>
+                        <li><span>2</span><div><p class="privacy-step-meta">Account layer</p><h3>Per-user content encryption</h3><p>Messages, memory fragments, embeddings, episodes, relationship profiles, optional cycle and body records, and graph labels are encrypted again with XChaCha20-Poly1305 under your account’s unique key.</p></div></li>
                         <li><span>3</span><div><p class="privacy-step-meta">Recall layer</p><h3>Encrypted recall</h3><p>Embeddings are decrypted only in memory for your own searches. This avoids keeping a plaintext vector index that could reconstruct sensitive text.</p></div></li>
                     </ol>
                 </section>

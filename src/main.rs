@@ -19,6 +19,7 @@ use individuateai::billing::{
     event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
     StripeSubscription,
 };
+use individuateai::cycle::{self, CycleEvent, CycleProfile};
 use individuateai::fileserv;
 use individuateai::templates;
 use minijinja::Environment;
@@ -76,10 +77,7 @@ impl RateLimiter {
 
     fn check(&self, key: &str) -> bool {
         let now = Instant::now();
-        let mut entry = self
-            .attempts
-            .entry(key.to_string())
-            .or_insert_with(Vec::new);
+        let mut entry = self.attempts.entry(key.to_string()).or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
         if entry.len() >= self.max_attempts {
             return false;
@@ -161,6 +159,7 @@ async fn main() {
         .route("/admin", get(admin_page))
         .route("/mind-map", get(mind_map_page))
         .route("/social-graph", get(social_graph_page))
+        .route("/cycle", get(cycle_page))
         // Fragments
         .route("/fragments/sidebar", get(sidebar_fragment))
         .route("/fragments/chat/:session_id", get(chat_fragment))
@@ -191,6 +190,18 @@ async fn main() {
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/memory-status", get(memory_status))
+        .route(
+            "/api/cycle",
+            get(get_cycle_dashboard).delete(delete_cycle_data),
+        )
+        .route("/api/cycle/profile", post(save_cycle_profile))
+        .route("/api/cycle/events", post(save_cycle_event))
+        .route(
+            "/api/cycle/events/:id",
+            post(update_cycle_event).delete(delete_cycle_event),
+        )
+        .route("/api/cycle/insights/:id", post(save_cycle_insight_status))
+        .route("/api/cycle/chat-suggestion", post(cycle_chat_suggestion))
         .route(
             "/api/memories/:kind/:id",
             get(get_editable_memory).post(update_editable_memory),
@@ -444,8 +455,56 @@ async fn home_page(
     } else {
         ""
     };
-    let html = templates::render_home(&state.templates, &user, session_id, &messages);
+    let cycle = runtime
+        .get_cycle_dashboard(user.id.clone(), None)
+        .await
+        .unwrap_or_else(|_| {
+            cycle::build_dashboard(
+                CycleProfile::default(),
+                Vec::new(),
+                Vec::new(),
+                cycle::today_utc(),
+            )
+        });
+    let html = templates::render_home(&state.templates, &user, session_id, &messages, &cycle);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn cycle_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return Redirect::temporary("/login").into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Cycle tracking is unavailable",
+            )
+                .into_response()
+        }
+    };
+    let local_today = params.get("today").cloned();
+    match runtime.get_cycle_dashboard(user.id, local_today).await {
+        Ok(dashboard) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            templates::render_cycle(&state.templates, &dashboard),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "Could not render cycle tracking");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Cycle tracking could not be opened",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn login_page(State(state): State<AppState>) -> impl IntoResponse {
@@ -699,17 +758,22 @@ async fn profile_drawer_fragment(
         .or_else(|| profiles.first().map(|profile| profile.slug.as_str()))
         .unwrap_or("");
     let selected_voice = runtime
-        .get_tts_voice(user.id)
+        .get_tts_voice(user.id.clone())
         .await
         .ok()
         .flatten()
         .filter(|voice| is_supported_tts_voice(voice))
         .unwrap_or_else(configured_tts_voice);
+    let cycle_profile = runtime
+        .get_cycle_profile(user.id.clone())
+        .await
+        .unwrap_or_default();
     let html = templates::render_profile_drawer(
         &state.templates,
         &profiles,
         selected_slug,
         &selected_voice,
+        &cycle_profile,
     );
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
@@ -1134,6 +1198,325 @@ async fn list_profiles(State(state): State<AppState>, headers: HeaderMap) -> Res
         )
             .into_response(),
     }
+}
+
+async fn get_cycle_dashboard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime
+        .get_cycle_dashboard(user.id, params.get("today").cloned())
+        .await
+    {
+        Ok(dashboard) => Json(dashboard).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_cycle_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(profile): Json<CycleProfile>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.save_cycle_profile(user.id, profile).await {
+        Ok(saved) => Json(saved).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_cycle_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut event): Json<CycleEvent>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    event.id.clear();
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.save_cycle_event(user.id, event).await {
+        Ok(saved) => (StatusCode::CREATED, Json(saved)).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn update_cycle_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(mut event): Json<CycleEvent>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    event.id = id;
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.save_cycle_event(user.id, event).await {
+        Ok(saved) => Json(saved).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_cycle_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.delete_cycle_event(user.id, id).await {
+        Ok(true) => Json(serde_json::json!({"deleted": true})).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"Event not found"})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CycleInsightStatusPayload {
+    status: String,
+    local_date: Option<String>,
+}
+
+async fn save_cycle_insight_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<CycleInsightStatusPayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime
+        .set_cycle_insight_status(user.id, id, payload.status, payload.local_date)
+        .await
+    {
+        Ok(insight) => Json(insight).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_cycle_data(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.delete_all_cycle_data(user.id).await {
+        Ok(()) => Json(serde_json::json!({"deleted": true})).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CycleChatSuggestionPayload {
+    message: String,
+    local_date: String,
+}
+
+async fn cycle_chat_suggestion(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CycleChatSuggestionPayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    if payload.message.len() > 4_000 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"Message is too long"})),
+        )
+            .into_response();
+    }
+    let local_date = match cycle::parse_date(&payload.local_date) {
+        Ok(date) => date,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"Cycle tracking is unavailable"})),
+            )
+                .into_response()
+        }
+    };
+    let profile = runtime.get_cycle_profile(user.id).await.unwrap_or_default();
+    let suggestion = if profile.enabled && !profile.paused {
+        cycle::chat_period_start_suggestion(&payload.message, local_date)
+    } else {
+        None
+    };
+    Json(serde_json::json!({"local_date": suggestion})).into_response()
 }
 
 async fn get_social_graph(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -2035,22 +2418,18 @@ async fn passkey_register_complete(
 async fn passkey_login_start() -> Response {
     let runtime = agent_runtime().await.unwrap();
     match runtime.start_passkey_login().await {
-        Ok((req_id, challenge, prf_salts)) => {
+        Ok((req_id, challenge, _prf_salts)) => {
             let mut options = serde_json::to_value(&challenge).unwrap_or_default();
             // webauthn-rs uses this flow for conditional autofill. This login is
             // explicitly button-triggered, so request the normal account picker.
             if let Some(object) = options.as_object_mut() {
                 object.remove("mediation");
             }
-            let eval_by_credential: serde_json::Map<String, serde_json::Value> = prf_salts
-                .into_iter()
-                .map(|(credential_id, salt)| (
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
-                    serde_json::json!({"first": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(salt)}),
-                ))
-                .collect();
+            // Discoverable authentication has no allowCredentials list. Chromium
+            // rejects PRF evalByCredential in that shape, so read the synced DEK
+            // from WebAuthn largeBlob and retain PRF for credential-bound fallback
+            // flows such as passkey sync.
             options["publicKey"]["extensions"] = serde_json::json!({
-                "prf": { "evalByCredential": eval_by_credential },
                 "largeBlob": { "read": true }
             });
             Json(PasskeyStartResponse {
@@ -2128,20 +2507,14 @@ async fn passkey_login_complete(
                     .into_response()
             }
         };
-    let prf_output = match payload.prf_output.and_then(|value| {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(value)
-            .ok()
-    }) {
-        Some(value) => value,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing PRF output"})),
-            )
-                .into_response()
-        }
-    };
+    let prf_output = payload
+        .prf_output
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+        })
+        .unwrap_or_default();
     let large_blob = payload.large_blob.and_then(|value| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value)

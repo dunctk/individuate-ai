@@ -1,6 +1,7 @@
 use crate::agent::{
     AdminUserAccess, ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES,
 };
+use crate::cycle::{CycleDashboard, CycleProfile};
 use minijinja::Environment;
 use serde_json::json;
 
@@ -85,6 +86,8 @@ pub fn create_env() -> Environment<'static> {
         include_str!("../templates/social_graph.html"),
     )
     .unwrap();
+    env.add_template("cycle", include_str!("../templates/cycle.html"))
+        .unwrap();
     env
 }
 
@@ -141,6 +144,7 @@ pub fn render_home(
     user: &User,
     session_id: &str,
     messages: &[ChatLog],
+    cycle: &CycleDashboard,
 ) -> String {
     env.get_template("home")
         .unwrap()
@@ -149,6 +153,9 @@ pub fn render_home(
             "username": user.username,
             "session_id": session_id,
             "messages": chat_message_values(messages),
+            "cycle_enabled": cycle.profile.enabled && !cycle.profile.paused,
+            "cycle_show_in_chat": cycle.profile.show_in_chat,
+            "cycle_day": cycle.prediction.cycle_day,
         }))
         .unwrap()
 }
@@ -218,6 +225,7 @@ pub fn render_profile_drawer(
     profiles: &[RelationshipProfile],
     slug: &str,
     selected_voice: &str,
+    cycle_profile: &CycleProfile,
 ) -> String {
     let selected = profiles.iter().find(|p| p.slug == slug);
     let profile_list: Vec<serde_json::Value> = profiles
@@ -256,6 +264,39 @@ pub fn render_profile_drawer(
             "effective_tone": selected.map_or(&Vec::<String>::new(), |p| &p.effective_tone),
             "recent_events": selected.map_or(&Vec::<String>::new(), |p| &p.recent_events),
             "boundaries": selected.map_or(&Vec::<String>::new(), |p| &p.boundaries),
+            "cycle_enabled": cycle_profile.enabled,
+            "cycle_paused": cycle_profile.paused,
+            "cycle_ai_context_enabled": cycle_profile.ai_context_enabled,
+        }))
+        .unwrap()
+}
+
+pub fn render_cycle(env: &Environment, dashboard: &CycleDashboard) -> String {
+    let dashboard_json = serde_json::to_string(dashboard)
+        .unwrap_or_else(|_| "{}".to_string())
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
+    env.get_template("cycle")
+        .unwrap()
+        .render(json!({
+            "dashboard": dashboard,
+            "dashboard_json": dashboard_json,
+            "enabled": dashboard.profile.enabled,
+            "paused": dashboard.profile.paused,
+            "cycle_day": dashboard.prediction.cycle_day,
+            "state_label": dashboard.prediction.state_label,
+            "state_detail": dashboard.prediction.state_detail,
+            "confidence": dashboard.prediction.confidence,
+            "next_start": dashboard.prediction.next_start,
+            "next_start_earliest": dashboard.prediction.next_start_earliest,
+            "next_start_latest": dashboard.prediction.next_start_latest,
+            "tracking_mode": dashboard.profile.tracking_mode,
+            "typical_cycle_days": dashboard.profile.typical_cycle_days,
+            "ai_context_enabled": dashboard.profile.ai_context_enabled,
+            "show_in_chat": dashboard.profile.show_in_chat,
         }))
         .unwrap()
 }
@@ -290,6 +331,7 @@ mod tests {
             "profile_drawer",
             "social_graph",
             "privacy_security",
+            "cycle",
         ] {
             env.get_template(name).expect("template registered");
         }
@@ -313,7 +355,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260717-message-audio"));
+        assert!(html.contains("individuateai.css?v=20260717-cycle-context"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }
@@ -447,7 +489,18 @@ mod tests {
             id: "u1".into(),
             username: "Dunc".into(),
         };
-        let html = render_home(&env, &user, "", &[]);
+        let html = render_home(
+            &env,
+            &user,
+            "",
+            &[],
+            &crate::cycle::build_dashboard(
+                CycleProfile::default(),
+                Vec::new(),
+                Vec::new(),
+                crate::cycle::today_utc(),
+            ),
+        );
         assert!(html.contains("app-shell"));
         assert!(html.contains("app-viewport"));
         assert!(html.contains("chat-stage"));
@@ -493,12 +546,47 @@ mod tests {
     #[test]
     fn profile_drawer_renders_voice_settings_and_selected_voice() {
         let env = create_env();
-        let html = render_profile_drawer(&env, &[], "", "aura-2-helena-en");
+        let html =
+            render_profile_drawer(&env, &[], "", "aura-2-helena-en", &CycleProfile::default());
         assert!(html.contains("Profiles &amp; settings"));
         assert!(html.contains("Response voice"));
         assert!(html.contains("data-voice=\"aura-2-helena-en\""));
         assert!(html.contains("data-selected=\"true\""));
         assert!(html.contains("Preview Helena"));
         assert!(html.contains("/api/settings/voice"));
+    }
+
+    #[test]
+    fn cycle_page_renders_opt_in_and_tracking_states() {
+        let env = create_env();
+        let disabled = crate::cycle::build_dashboard(
+            CycleProfile::default(),
+            Vec::new(),
+            Vec::new(),
+            crate::cycle::parse_date("2026-07-17").unwrap(),
+        );
+        let setup_html = render_cycle(&env, &disabled);
+        assert!(setup_html.contains("Enable private tracking"));
+        assert!(setup_html.contains("not used for fertility"));
+
+        let enabled = crate::cycle::build_dashboard(
+            CycleProfile {
+                enabled: true,
+                ..CycleProfile::default()
+            },
+            vec![crate::cycle::CycleEvent {
+                id: "event-1".to_string(),
+                kind: "bleeding_started".to_string(),
+                local_date: "2026-07-17".to_string(),
+                source: "manual".to_string(),
+                ..crate::cycle::CycleEvent::default()
+            }],
+            Vec::new(),
+            crate::cycle::parse_date("2026-07-17").unwrap(),
+        );
+        let dashboard_html = render_cycle(&env, &enabled);
+        assert!(dashboard_html.contains("Recorded bleeding window"));
+        assert!(dashboard_html.contains("cycleDashboard"));
+        assert!(dashboard_html.contains("Delete all cycle data"));
     }
 }

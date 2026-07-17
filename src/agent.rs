@@ -284,7 +284,10 @@ mod runtime {
         RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode, UsageKind,
         User,
     };
-    use crate::security;
+    use crate::{
+        cycle::{self, CycleDashboard, CycleEvent, CycleInsight, CycleProfile},
+        security,
+    };
     use std::{
         collections::{hash_map::DefaultHasher, HashMap, HashSet},
         hash::{Hash, Hasher},
@@ -348,6 +351,11 @@ mod runtime {
         Perspective discipline:
         - Every person the user mentions has an inner world. Hold reported speech and complaints as that person's (or the user's) perspective, not established fact. Do not villainize absent parties; you may validate the user's feelings without prosecuting the other person.
         - Reflect the user's metaphors, but do not amplify them into escalation or build your case on them. Keep your own ground.
+
+        Body-context discipline:
+        - A <body_context> block may contain optional cycle/body tracking that the user explicitly enabled. Treat it as one possible influence, never as the explanation for a feeling, perception, conflict, or decision.
+        - Prefer what the user reports in the present. Never dismiss their perception as hormonal, claim ovulation from a calendar estimate, diagnose PMS/PMDD, or recommend changing medication.
+        - Do not mention cycle context merely because it is available. Mention it only when the user asks, when an accepted within-person pattern is clearly relevant, or when gently asking whether the context fits would help. State uncertainty plainly.
 
         You have access to persistent autobiographical memory, a mind map, a social graph, and relevant episodes that survive across sessions and conversations. Each user message is preceded by a <persistent_memory> block containing relevant prior memories, mind map nodes/edges, social graph relationships, and episodes. Treat these as your own recall, not as external data. Episodes are the ground truth of what actually happened; prefer citing them over abstract patterns when recalling events. Patterns and concepts are interpretations linked to the people and episodes they arose from. When the user asks whether you remember something, whether it was saved, or whether it is in the mind map or social graph, consult that block and answer truthfully from it. Never claim you have no memory or that nothing is saved when the <persistent_memory> block is present and non-empty. If the block is empty for a topic, say you do not have that specific detail recorded yet rather than denying memory entirely.
 
@@ -730,6 +738,7 @@ mod runtime {
     struct TherapistContext {
         response_preferences: String,
         persistent_memory: String,
+        body_context: String,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -1037,6 +1046,35 @@ mod runtime {
                 );
                 CREATE INDEX IF NOT EXISTS idx_meta_memories_user_id
                     ON meta_memories(user_id);
+                CREATE TABLE IF NOT EXISTS cycle_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    payload_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS cycle_events (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    payload_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_cycle_events_user_id
+                    ON cycle_events(user_id, created_at);
+                CREATE TABLE IF NOT EXISTS cycle_insights (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    payload_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_cycle_insights_user_id
+                    ON cycle_insights(user_id);
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -2055,19 +2093,24 @@ mod runtime {
             .collect();
         let mut seen = HashSet::new();
         let mut corrections = Vec::new();
-        for window in tokens.windows(3) {
-            let corrected = window[0];
-            let separator = window[1];
-            let obsolete = window[2];
-            if separator.eq_ignore_ascii_case("not")
-                && corrected
-                    .chars()
-                    .all(|character| character.is_ascii_digit())
-                && obsolete.chars().all(|character| character.is_ascii_digit())
-                && corrected != obsolete
-                && seen.insert((obsolete.to_string(), corrected.to_string()))
-            {
-                corrections.push((obsolete.to_string(), corrected.to_string()));
+        for (separator_index, separator) in tokens.iter().enumerate() {
+            if !separator.eq_ignore_ascii_case("not") {
+                continue;
+            }
+            let corrected = tokens[separator_index.saturating_sub(3)..separator_index]
+                .iter()
+                .rev()
+                .find(|token| token.chars().all(|character| character.is_ascii_digit()));
+            let obsolete = tokens[separator_index + 1..]
+                .iter()
+                .take(3)
+                .find(|token| token.chars().all(|character| character.is_ascii_digit()));
+            if let (Some(corrected), Some(obsolete)) = (corrected, obsolete) {
+                if corrected != obsolete
+                    && seen.insert(((*obsolete).to_string(), (*corrected).to_string()))
+                {
+                    corrections.push(((*obsolete).to_string(), (*corrected).to_string()));
+                }
             }
         }
         corrections
@@ -2124,6 +2167,11 @@ mod runtime {
         let corrected_existing: Vec<String> = existing
             .iter()
             .filter(|value| !obsolete.contains(&value.trim().to_lowercase()))
+            .filter(|value| {
+                !corrections.iter().any(|(obsolete, corrected)| {
+                    replace_standalone_token(value, obsolete, corrected) != **value
+                })
+            })
             .map(|value| apply_explicit_corrections(value, corrections))
             .collect();
         merge_unique_strings(&corrected_existing, incoming, limit)
@@ -3900,8 +3948,12 @@ mod runtime {
         format!("{THERAPIST_SYSTEM_PROMPT}\n\n{response_preferences}")
     }
 
-    fn therapist_user_prompt(persistent_memory: &str, prompt: &str) -> String {
-        format!("{persistent_memory}\n\n{prompt}")
+    fn therapist_user_prompt(persistent_memory: &str, body_context: &str, prompt: &str) -> String {
+        if body_context.trim().is_empty() {
+            format!("{persistent_memory}\n\n{prompt}")
+        } else {
+            format!("{persistent_memory}\n\n{body_context}\n\n{prompt}")
+        }
     }
 
     impl Tool for CurrentDateTimeTool {
@@ -4501,7 +4553,7 @@ mod runtime {
                     user_id: user.id,
                     state,
                     dek,
-                    prf_salt: prf_salt.clone(),
+                    prf_salt,
                     recovery_key: recovery_key.clone(),
                 },
             );
@@ -4716,12 +4768,6 @@ mod runtime {
                 .finish_discoverable_authentication(&response, state, &[discoverable_key])
                 .map_err(|e| anyhow::anyhow!("WebAuthn login verification failed: {}", e))?;
 
-            if prf_output.len() != security::DEK_LEN {
-                return Err(anyhow::anyhow!(
-                    "This authenticator did not return the required PRF output"
-                ));
-            }
-
             let cred_id_blob = auth_result.cred_id().as_ref().to_vec();
             let new_counter = auth_result.counter();
             let cred_id_for_counter = cred_id_blob.clone();
@@ -4867,17 +4913,19 @@ mod runtime {
                     .as_slice()
                     .try_into()
                     .map_err(|_| anyhow::anyhow!(super::SYNCED_PASSKEY_RECOVERY_REQUIRED))?;
-                let wrapped_dek = security::seal(&recovered_dek, &prf_output, aad.as_bytes())?;
-                let credential_id_for_insert = cred_id_blob.clone();
-                self.conn
-                    .call(move |conn| {
-                        conn.execute(
-                            "INSERT OR IGNORE INTO passkey_wrap_variants (credential_id, wrapped_dek) VALUES (?1, ?2)",
-                            rusqlite::params![credential_id_for_insert, wrapped_dek],
-                        )
-                        .map_err(tokio_rusqlite::Error::Rusqlite)
-                    })
-                    .await?;
+                if prf_output.len() == security::DEK_LEN {
+                    let wrapped_dek = security::seal(&recovered_dek, &prf_output, aad.as_bytes())?;
+                    let credential_id_for_insert = cred_id_blob.clone();
+                    self.conn
+                        .call(move |conn| {
+                            conn.execute(
+                                "INSERT OR IGNORE INTO passkey_wrap_variants (credential_id, wrapped_dek) VALUES (?1, ?2)",
+                                rusqlite::params![credential_id_for_insert, wrapped_dek],
+                            )
+                            .map_err(tokio_rusqlite::Error::Rusqlite)
+                        })
+                        .await?;
+                }
                 recovered_dek
             } else {
                 return Err(anyhow::anyhow!(super::SYNCED_PASSKEY_RECOVERY_REQUIRED));
@@ -6621,6 +6669,12 @@ mod runtime {
                 .collect();
             let episode_hits = relevant_episode_lines(&episodes, &walk_episode_scores, 4);
 
+            let body_context = self
+                .get_cycle_dashboard(user_id, None)
+                .await
+                .map(|dashboard| cycle::format_body_context(&dashboard))
+                .unwrap_or_default();
+
             Ok(TherapistContext {
                 response_preferences: format_response_preferences_block(&meta_memories),
                 persistent_memory: format_persistent_memory_block(
@@ -6629,6 +6683,7 @@ mod runtime {
                     &social_hits,
                     &episode_hits,
                 ),
+                body_context,
             })
         }
 
@@ -6981,8 +7036,11 @@ mod runtime {
                 .unwrap_or_default();
             let therapist_agent =
                 self.therapist_agent_for_response(&therapist_context.response_preferences);
-            let enriched_prompt =
-                therapist_user_prompt(&therapist_context.persistent_memory, &prompt);
+            let enriched_prompt = therapist_user_prompt(
+                &therapist_context.persistent_memory,
+                &therapist_context.body_context,
+                &prompt,
+            );
 
             let mut history_clone = history.clone();
             let reply = AUTHENTICATED_TOOL_USER_ID
@@ -7032,6 +7090,7 @@ mod runtime {
             Ok(reply)
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub async fn draft_message(
             self: &Arc<Self>,
             user_id: &str,
@@ -7151,6 +7210,7 @@ mod runtime {
             Ok(reply)
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub async fn draft_stream(
             self: &Arc<Self>,
             user_id: String,
@@ -7427,8 +7487,11 @@ mod runtime {
                 .unwrap_or_default();
             let therapist_agent =
                 self.therapist_agent_for_response(&therapist_context.response_preferences);
-            let enriched_prompt =
-                therapist_user_prompt(&therapist_context.persistent_memory, &prompt);
+            let enriched_prompt = therapist_user_prompt(
+                &therapist_context.persistent_memory,
+                &therapist_context.body_context,
+                &prompt,
+            );
 
             let mut stream = AUTHENTICATED_TOOL_USER_ID
                 .scope(user_id.clone(), async {
@@ -8167,6 +8230,279 @@ mod runtime {
 
         pub async fn save_relationship_profile(&self, profile: RelationshipProfile) -> Result<()> {
             self.upsert_relationship_profile(profile).await
+        }
+
+        async fn read_cycle_profile(&self, user_id: &str) -> Result<CycleProfile> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            let encrypted: Option<Vec<u8>> = self
+                .conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT payload_ciphertext FROM cycle_profiles WHERE user_id = ?1",
+                        [uid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await?;
+            let Some(encrypted) = encrypted else {
+                return Ok(CycleProfile::default());
+            };
+            let plaintext = security::decrypt(
+                &dek,
+                &encrypted,
+                format!("cycle_profiles:{user_id}").as_bytes(),
+            )?;
+            serde_json::from_slice(&plaintext).context("Parsing encrypted cycle profile")
+        }
+
+        pub async fn get_cycle_profile(&self, user_id: String) -> Result<CycleProfile> {
+            self.read_cycle_profile(&user_id).await
+        }
+
+        pub async fn save_cycle_profile(
+            &self,
+            user_id: String,
+            profile: CycleProfile,
+        ) -> Result<CycleProfile> {
+            profile.validate()?;
+            let dek = self.active_dek(&user_id)?;
+            let payload = serde_json::to_vec(&profile).context("Serializing cycle profile")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("cycle_profiles:{user_id}").as_bytes(),
+            )?;
+            let uid = user_id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO cycle_profiles (user_id, payload_ciphertext, updated_at)
+                        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            payload_ciphertext = excluded.payload_ciphertext,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![uid, encrypted],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving encrypted cycle profile")?;
+            Ok(profile)
+        }
+
+        async fn list_cycle_events(&self, user_id: &str) -> Result<Vec<CycleEvent>> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            self.conn
+                .call(move |conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT id, payload_ciphertext, created_at FROM cycle_events WHERE user_id = ?1 ORDER BY created_at ASC",
+                    )?;
+                    let rows = statement.query_map([uid.clone()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?;
+                    let mut events = Vec::new();
+                    for row in rows {
+                        let (id, encrypted, created_at) = row?;
+                        let plaintext = security::decrypt(
+                            &dek,
+                            &encrypted,
+                            format!("cycle_events:{uid}:{id}").as_bytes(),
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let mut event: CycleEvent = serde_json::from_slice(&plaintext)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        event.id = id;
+                        event.created_at = Some(created_at);
+                        events.push(event);
+                    }
+                    Ok(events)
+                })
+                .await
+                .context("Reading encrypted cycle events")
+        }
+
+        async fn list_cycle_insights(&self, user_id: &str) -> Result<Vec<CycleInsight>> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            self.conn
+                .call(move |conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT id, payload_ciphertext FROM cycle_insights WHERE user_id = ?1",
+                    )?;
+                    let rows = statement.query_map([uid.clone()], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })?;
+                    let mut insights = Vec::new();
+                    for row in rows {
+                        let (id, encrypted) = row?;
+                        let plaintext = security::decrypt(
+                            &dek,
+                            &encrypted,
+                            format!("cycle_insights:{uid}:{id}").as_bytes(),
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let mut insight: CycleInsight = serde_json::from_slice(&plaintext)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        insight.id = id;
+                        insights.push(insight);
+                    }
+                    Ok(insights)
+                })
+                .await
+                .context("Reading encrypted cycle insights")
+        }
+
+        pub async fn get_cycle_dashboard(
+            &self,
+            user_id: String,
+            local_today: Option<String>,
+        ) -> Result<CycleDashboard> {
+            let profile = self.read_cycle_profile(&user_id).await?;
+            let today = local_today
+                .as_deref()
+                .map(cycle::parse_date)
+                .transpose()?
+                .unwrap_or_else(|| cycle::today_for_profile(&profile));
+            let events = self.list_cycle_events(&user_id).await?;
+            let insights = self.list_cycle_insights(&user_id).await?;
+            Ok(cycle::build_dashboard(profile, events, insights, today))
+        }
+
+        pub async fn save_cycle_event(
+            &self,
+            user_id: String,
+            mut event: CycleEvent,
+        ) -> Result<CycleEvent> {
+            event.validate()?;
+            let existing = self.list_cycle_events(&user_id).await?;
+            if let Some(duplicate) = existing.iter().find(|candidate| {
+                candidate.kind == event.kind && candidate.local_date == event.local_date
+            }) {
+                event.id = duplicate.id.clone();
+            }
+            if event.id.trim().is_empty() {
+                event.id = Uuid::new_v4().to_string();
+            }
+            let dek = self.active_dek(&user_id)?;
+            let payload = serde_json::to_vec(&event).context("Serializing cycle event")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("cycle_events:{user_id}:{}", event.id).as_bytes(),
+            )?;
+            let uid = user_id;
+            let id = event.id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO cycle_events (user_id, id, payload_ciphertext, updated_at)
+                        VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id, id) DO UPDATE SET
+                            payload_ciphertext = excluded.payload_ciphertext,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![uid, id, encrypted],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving encrypted cycle event")?;
+            Ok(event)
+        }
+
+        pub async fn delete_cycle_event(&self, user_id: String, id: String) -> Result<bool> {
+            if id.trim().is_empty() || id.len() > 100 {
+                anyhow::bail!("Invalid event id");
+            }
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "DELETE FROM cycle_events WHERE user_id = ?1 AND id = ?2",
+                        rusqlite::params![user_id, id],
+                    )
+                    .map(|changed| changed > 0)
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Deleting cycle event")
+        }
+
+        pub async fn set_cycle_insight_status(
+            &self,
+            user_id: String,
+            id: String,
+            status: String,
+            local_today: Option<String>,
+        ) -> Result<CycleInsight> {
+            if !matches!(status.as_str(), "accepted" | "rejected" | "proposed") {
+                anyhow::bail!("Invalid insight status");
+            }
+            let dashboard = self
+                .get_cycle_dashboard(user_id.clone(), local_today)
+                .await?;
+            let mut insight = dashboard
+                .insights
+                .into_iter()
+                .find(|candidate| candidate.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Insight is no longer available"))?;
+            insight.status = status;
+            let dek = self.active_dek(&user_id)?;
+            let payload = serde_json::to_vec(&insight).context("Serializing cycle insight")?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("cycle_insights:{user_id}:{}", insight.id).as_bytes(),
+            )?;
+            let uid = user_id;
+            let row_id = insight.id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO cycle_insights (user_id, id, payload_ciphertext, updated_at)
+                        VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id, id) DO UPDATE SET
+                            payload_ciphertext = excluded.payload_ciphertext,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![uid, row_id, encrypted],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving encrypted cycle insight")?;
+            Ok(insight)
+        }
+
+        pub async fn delete_all_cycle_data(&self, user_id: String) -> Result<()> {
+            self.conn
+                .call(move |conn| {
+                    let transaction = conn.transaction()?;
+                    transaction
+                        .execute("DELETE FROM cycle_insights WHERE user_id = ?1", [&user_id])?;
+                    transaction
+                        .execute("DELETE FROM cycle_events WHERE user_id = ?1", [&user_id])?;
+                    transaction
+                        .execute("DELETE FROM cycle_profiles WHERE user_id = ?1", [&user_id])?;
+                    transaction.commit()?;
+                    Ok(())
+                })
+                .await
+                .context("Deleting cycle data")
         }
 
         pub async fn get_tts_voice(&self, user_id: String) -> Result<Option<String>> {
@@ -9175,7 +9511,8 @@ mod runtime {
             let user_input = "What might the dream mean?";
 
             let preamble = therapist_preamble(&response_preferences);
-            let user_prompt = therapist_user_prompt(&persistent_memory, user_input);
+            let body_context = "<body_context>Estimated context.</body_context>";
+            let user_prompt = therapist_user_prompt(&persistent_memory, body_context, user_input);
 
             assert_eq!(
                 preamble,
@@ -9186,8 +9523,12 @@ mod runtime {
             assert!(!preamble.contains("The user described a recurring dream."));
             assert!(!preamble.contains(user_input));
 
-            assert_eq!(user_prompt, format!("{persistent_memory}\n\n{user_input}"));
+            assert_eq!(
+                user_prompt,
+                format!("{persistent_memory}\n\n{body_context}\n\n{user_input}")
+            );
             assert!(user_prompt.contains("<persistent_memory>"));
+            assert!(user_prompt.contains("<body_context>"));
             assert!(!user_prompt.contains("<response_preferences>"));
             assert!(!user_prompt.contains("Give me more in-depth Jungian analysis."));
             assert!(!user_prompt.contains(THERAPIST_SYSTEM_PROMPT));

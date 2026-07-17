@@ -16,6 +16,8 @@ struct Report {
     encrypted_episodes: i64,
     encrypted_patient_graphs: i64,
     encrypted_social_graphs: i64,
+    encrypted_cycle_profiles: i64,
+    encrypted_cycle_events: i64,
     key_wraps: i64,
     plaintext_messages: i64,
     plaintext_sessions: i64,
@@ -77,6 +79,14 @@ fn main() -> anyhow::Result<()> {
             &conn,
             "SELECT count(*) FROM social_graphs WHERE length(graph_ciphertext) > 0",
         )?,
+        encrypted_cycle_profiles: count(
+            &conn,
+            "SELECT count(*) FROM cycle_profiles WHERE length(payload_ciphertext) > 0",
+        )?,
+        encrypted_cycle_events: count(
+            &conn,
+            "SELECT count(*) FROM cycle_events WHERE length(payload_ciphertext) > 0",
+        )?,
         key_wraps: count(&conn, "SELECT count(*) FROM key_wraps")?,
         plaintext_messages: count(&conn, "SELECT count(*) FROM messages WHERE length(content) > 0")?,
         plaintext_sessions: count(
@@ -100,6 +110,8 @@ fn main() -> anyhow::Result<()> {
         || report.encrypted_messages == 0
         || report.encrypted_memory_rows == 0
         || report.encrypted_episodes == 0
+        || report.encrypted_cycle_profiles == 0
+        || report.encrypted_cycle_events == 0
         || report.key_wraps == 0
         || report.plaintext_messages != 0
         || report.plaintext_sessions != 0

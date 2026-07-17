@@ -38,6 +38,7 @@ let browser;
 let context;
 let page;
 let provider;
+let recoveryKey = '';
 const providerRequests = { chat: 0, embeddings: 0 };
 const appOutput = [];
 const providerShapes = [];
@@ -213,6 +214,7 @@ function startProvider() {
       path: request.url,
       stream: Boolean(body.stream),
       tools: (body.tools || []).map((tool) => tool?.function?.name || tool?.name || 'unknown'),
+      hasBodyContext: JSON.stringify(body.messages || []).includes('<body_context>'),
     });
     if (request.url?.endsWith('/embeddings')) {
       providerRequests.embeddings += 1;
@@ -357,16 +359,36 @@ async function registerPasskey() {
   log('registering a passkey in Chromium virtual authenticator');
   await page.goto(`${baseUrl}/signup`);
   await page.locator('#signup-email').fill(email);
+  await page.locator('#recovery-warning-ack').check();
   await page.locator('#create-passkey-btn').click();
-  await page.waitForURL((url) => new URL(url).pathname === '/');
+  await page.waitForURL((url) => ['/','/chat'].includes(new URL(url).pathname));
   await assertAuthenticated();
+  const syncBanner = page.locator('#passkey-sync-banner');
+  if (await syncBanner.isVisible()) {
+    await syncBanner.getByRole('button', { name: 'Enable iCloud sync' }).click();
+    await syncBanner.waitFor({ state: 'hidden' });
+  }
 }
 
 async function loginWithPasskey() {
   await page.goto(`${baseUrl}/login`);
-  await page.locator('#passkey-email').fill(email);
   await page.locator('#passkey-login-btn').click();
-  await page.waitForURL((url) => new URL(url).pathname === '/');
+  await Promise.race([
+    page.waitForURL((url) => ['/','/chat','/recovery'].includes(new URL(url).pathname), { timeout: 12000 }),
+    page.locator('#passkey-login-error:not(.hidden)').waitFor({ state: 'visible', timeout: 12000 }),
+  ]);
+  if (new URL(page.url()).pathname === '/login') {
+    throw new Error(`passkey login failed: ${await page.locator('#passkey-login-error').textContent()}`);
+  }
+  if (new URL(page.url()).pathname === '/recovery') {
+    assert.ok(recoveryKey, 'recovery key was not captured at registration');
+    await page.locator('#email').fill(email);
+    await page.locator('#recovery-key').fill(recoveryKey);
+    await page.locator('#recovery-submit').click();
+    await page.waitForURL((url) => new URL(url).pathname === '/login');
+    await page.locator('#passkey-login-btn').click();
+    await page.waitForURL((url) => ['/','/chat'].includes(new URL(url).pathname));
+  }
   await assertAuthenticated();
 }
 
@@ -383,6 +405,68 @@ async function sendChat() {
   await assertHistoryContains(sessionId);
   await waitForMemoryWrite();
   return sessionId;
+}
+
+async function testCycleTracking() {
+  log('testing optional cycle tracking at iPhone SE size');
+  await page.setViewportSize({ width: 375, height: 667 });
+  await page.goto(`${baseUrl}/cycle`);
+  await page.locator('#cycle-setup').waitFor({ state: 'visible' });
+  const startDate = await page.evaluate(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 28);
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  });
+  await page.locator('#setup-last-start').fill(startDate);
+  await page.locator('#setup-cycle-days').fill('28');
+  await page.getByRole('button', { name: 'Enable private tracking' }).click();
+  await page.waitForURL((url) => new URL(url).pathname === '/cycle');
+  await page.locator('#cycle-dashboard').waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+
+  await page.getByRole('button', { name: 'Period started', exact: true }).click();
+  await page.getByText('Period start recorded.').waitFor();
+  await page.getByRole('heading', { name: 'Recorded bleeding window' }).waitFor();
+
+  await page.getByRole('button', { name: 'Daily check-in' }).click();
+  await page.locator('input[name="mood"][value="2"] + span').click();
+  await page.locator('input[name="sensitivity"][value="4"] + span').click();
+  await page.locator('input[name="sleep"][value="2"] + span').click();
+  await page.getByRole('button', { name: 'Save check-in' }).click();
+  await page.getByText('Check-in saved.').waitFor();
+  await page.locator('#cycle-observations').getByText('Sensitivity').waitFor();
+
+  const api = await page.evaluate(async () => {
+    const response = await fetch(`/api/cycle?today=${new Date().toISOString().slice(0, 10)}`);
+    return { status: response.status, body: await response.json() };
+  });
+  assert.equal(api.status, 200);
+  assert.equal(api.body.profile.enabled, true);
+  assert.ok(api.body.events.length >= 2);
+
+  const undersizedControls = await page.locator('#cycle-dashboard button:visible, #cycle-dashboard a:visible')
+    .evaluateAll((controls) => controls
+      .filter((control) => {
+        const box = control.getBoundingClientRect();
+        return box.width < 44 || box.height < 44;
+      })
+      .map((control) => control.textContent.trim() || control.getAttribute('aria-label') || control.tagName));
+  assert.deepEqual(undersizedControls, [], `cycle controls below 44px: ${undersizedControls.join(', ')}`);
+
+  await page.setViewportSize({ width: 667, height: 375 });
+  await page.reload();
+  await page.locator('#cycle-dashboard').waitFor({ state: 'visible' });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.setViewportSize({ width: 375, height: 667 });
+
+  await page.goto(`${baseUrl}/chat`);
+  await page.locator('#chat-input').fill('My period started yesterday.');
+  await page.locator('#seed-send').click();
+  await page.locator('.cycle-chat-suggestion').waitFor({ state: 'visible', timeout: 15000 });
+  assert.equal(await page.getByText('Nothing is saved until you choose Log it.').isVisible(), true);
+  await page.locator('.cycle-chat-suggestion [data-action="dismiss"]').click();
+  assert.ok(providerShapes.some((shape) => shape.hasBodyContext), 'therapist request did not contain body context');
+  log('cycle UI, explicit chat confirmation, and AI body context passed');
 }
 
 async function logout() {
@@ -411,6 +495,8 @@ async function inspectDatabase() {
   assert.ok(report.encrypted_messages > 0);
   assert.ok(report.encrypted_memory_rows > 0);
   assert.ok(report.encrypted_episodes > 0);
+  assert.ok(report.encrypted_cycle_profiles > 0);
+  assert.ok(report.encrypted_cycle_events > 0);
 }
 
 function browserPath() {
@@ -439,22 +525,30 @@ async function main() {
   });
   context = await browser.newContext();
   page = await context.newPage();
-  page.on('dialog', (dialog) => dialog.accept());
+  page.on('dialog', (dialog) => {
+    if (dialog.type() === 'prompt' && dialog.message().includes('recovery key')) {
+      recoveryKey = dialog.message().split('\n\n').at(-1).trim();
+    }
+    dialog.accept();
+  });
   page.on('pageerror', (error) => log(`page error: ${error.message}`));
   const cdp = await context.newCDPSession(page);
   await cdp.send('WebAuthn.enable');
   await cdp.send('WebAuthn.addVirtualAuthenticator', {
     options: {
       protocol: 'ctap2',
+      ctap2Version: 'ctap2_1',
       transport: 'internal',
       hasResidentKey: true,
       hasUserVerification: true,
       isUserVerified: true,
       hasPrf: true,
+      hasLargeBlob: true,
     },
   });
 
   await registerPasskey();
+  await testCycleTracking();
   const sessionId = await sendChat();
   log('passkey registration, chat, and encrypted memory write passed');
   await logout();

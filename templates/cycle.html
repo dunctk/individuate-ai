@@ -1,0 +1,507 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="cycle-shell min-h-screen">
+    <header class="cycle-topbar">
+        <a href="/chat" class="cycle-back" aria-label="Back to chat">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+            <span>Chat</span>
+        </a>
+        <div class="min-w-0 text-center">
+            <p class="role-label">Private body context</p>
+            <h1 class="cycle-title">Cycle &amp; body</h1>
+        </div>
+        <button type="button" class="cycle-icon-button" onclick="openCycleSettings()" aria-label="Cycle settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.12.38.35.72.66.97.3.25.68.4 1.08.43H21v4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+        </button>
+    </header>
+
+    <main class="cycle-main">
+        <section id="cycle-setup" class="cycle-setup {% if enabled %}hidden{% endif %}" aria-labelledby="cycle-setup-title">
+            <div class="cycle-setup-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+            <p class="role-label">Entirely optional</p>
+            <h2 id="cycle-setup-title">Notice your own rhythm</h2>
+            <p>Track dates and brief body check-ins so your therapist can hold this as possible context—never as an explanation imposed on you.</p>
+            <form id="cycle-setup-form" class="cycle-setup-form">
+                <label>
+                    <span>How should tracking behave?</span>
+                    <select id="setup-tracking-mode" class="field">
+                        <option value="natural">Natural cycle estimates</option>
+                        <option value="hormonal">Hormonal contraception</option>
+                        <option value="irregular">Irregular cycles</option>
+                        <option value="postpartum">Postpartum</option>
+                        <option value="perimenopause">Perimenopause</option>
+                        <option value="pregnant">Pregnant / tracking paused</option>
+                        <option value="unknown">I’m not sure</option>
+                    </select>
+                </label>
+                <label>
+                    <span>Most recent period start <small>(optional)</small></span>
+                    <input id="setup-last-start" class="field" type="date">
+                </label>
+                <label>
+                    <span>Typical cycle length <small>(optional)</small></span>
+                    <input id="setup-cycle-days" class="field" type="number" inputmode="numeric" min="15" max="90" placeholder="e.g. 28">
+                </label>
+                <label class="cycle-consent-row">
+                    <input id="setup-ai-context" type="checkbox" checked>
+                    <span><strong>Allow optional AI context</strong><small>The AI will see estimates and accepted patterns, with instructions not to assume causation.</small></span>
+                </label>
+                <button type="submit" class="cycle-primary-action">Enable private tracking</button>
+                <p id="cycle-setup-status" class="cycle-inline-status" role="status" aria-live="polite"></p>
+            </form>
+            <p class="cycle-privacy-note">Cycle data is encrypted with your account key. It is not used for fertility or contraception advice.</p>
+        </section>
+
+        <div id="cycle-dashboard" class="{% if not enabled %}hidden{% endif %}">
+            <section id="cycle-paused-banner" class="cycle-paused-banner {% if not paused %}hidden{% endif %}" role="status">
+                <span>Tracking is paused. Your history remains private; predictions and AI context are off.</span>
+                <button type="button" onclick="resumeCycleTracking()">Resume</button>
+            </section>
+
+            <section class="cycle-hero" aria-labelledby="cycle-current-state">
+                <div class="cycle-hero-copy">
+                    <p id="cycle-day-kicker" class="role-label">{% if cycle_day %}Cycle day {{ cycle_day }}{% else %}Building your timeline{% endif %}</p>
+                    <h2 id="cycle-current-state">{{ state_label }}</h2>
+                    <p id="cycle-state-detail">{{ state_detail }}</p>
+                </div>
+                <div class="cycle-confidence" data-confidence="{{ confidence }}">
+                    <span class="cycle-confidence-dot" aria-hidden="true"></span>
+                    <span id="cycle-confidence-label">{{ confidence|capitalize }} confidence</span>
+                </div>
+
+                <div class="cycle-timeline-wrap" aria-label="Observed and estimated cycle timeline">
+                    <div id="cycle-timeline" class="cycle-timeline" role="img"></div>
+                    <div class="cycle-timeline-legend">
+                        <span><i class="observed"></i>Observed</span>
+                        <span><i class="estimated"></i>Estimated</span>
+                        <span><i class="today"></i>Today</span>
+                    </div>
+                </div>
+
+                <div class="cycle-next-window">
+                    <span>Possible next period</span>
+                    <strong id="cycle-next-window">{% if next_start_earliest and next_start_latest %}{{ next_start_earliest }}–{{ next_start_latest }}{% else %}Add another start date{% endif %}</strong>
+                </div>
+
+                <div class="cycle-quick-actions">
+                    <button type="button" class="cycle-primary-action" onclick="logPeriodStartToday(this)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3s6 6.2 6 11a6 6 0 0 1-12 0c0-4.8 6-11 6-11Z"/></svg>
+                        Period started
+                    </button>
+                    <button type="button" class="cycle-secondary-action" onclick="openCheckIn()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 12h3l2-5 4 10 2-5h5"/></svg>
+                        Daily check-in
+                    </button>
+                </div>
+                <div id="cycle-undo" class="cycle-undo hidden" role="status" aria-live="polite">
+                    <span id="cycle-undo-copy">Saved.</span>
+                    <button type="button" onclick="undoLastCycleEvent()">Undo</button>
+                </div>
+            </section>
+
+            <div class="cycle-grid">
+                <section class="cycle-panel" aria-labelledby="cycle-calendar-title">
+                    <div class="cycle-panel-heading">
+                        <div><p class="role-label">Observed &amp; estimated</p><h2 id="cycle-calendar-title">Month</h2></div>
+                        <div class="cycle-month-controls">
+                            <button type="button" onclick="shiftCycleMonth(-1)" aria-label="Previous month">‹</button>
+                            <button type="button" onclick="shiftCycleMonth(1)" aria-label="Next month">›</button>
+                        </div>
+                    </div>
+                    <p id="cycle-calendar-month" class="cycle-calendar-month"></p>
+                    <div class="cycle-weekdays" aria-hidden="true"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
+                    <div id="cycle-calendar" class="cycle-calendar" role="grid" aria-label="Cycle calendar"></div>
+                </section>
+
+                <section class="cycle-panel" aria-labelledby="cycle-observations-title">
+                    <div class="cycle-panel-heading">
+                        <div><p class="role-label">Most recent</p><h2 id="cycle-observations-title">Body check-in</h2></div>
+                    </div>
+                    <div id="cycle-observations" class="cycle-observations"></div>
+                </section>
+            </div>
+
+            <section class="cycle-panel cycle-insights-panel" aria-labelledby="cycle-insights-title">
+                <div class="cycle-panel-heading">
+                    <div><p class="role-label">Within-person patterns</p><h2 id="cycle-insights-title">Your patterns</h2></div>
+                    <span class="cycle-private-badge">Private</span>
+                </div>
+                <div id="cycle-insights" class="cycle-insights"></div>
+            </section>
+
+            <section class="cycle-panel" aria-labelledby="cycle-history-title">
+                <div class="cycle-panel-heading">
+                    <div><p class="role-label">Correctable source data</p><h2 id="cycle-history-title">Recent entries</h2></div>
+                    <button type="button" class="cycle-text-button" onclick="openEventEditor()">Add entry</button>
+                </div>
+                <div id="cycle-history" class="cycle-history"></div>
+            </section>
+
+            <p class="cycle-medical-note">This tracker supports reflection, not diagnosis, contraception, or fertility decisions. Severe or disruptive cyclical symptoms deserve support from a qualified clinician.</p>
+        </div>
+    </main>
+</div>
+
+<dialog id="cycle-checkin-dialog" class="cycle-dialog">
+    <form id="cycle-checkin-form" method="dialog" class="cycle-dialog-card">
+        <div class="cycle-dialog-heading"><div><p class="role-label">A small pause</p><h2>How is today?</h2></div><button type="button" onclick="closeCycleDialog('cycle-checkin-dialog')" aria-label="Close">×</button></div>
+        <p class="cycle-dialog-intro">Use only what feels useful. One means low or mild; five means high or strong.</p>
+        <label class="cycle-date-field"><span>Date</span><input id="checkin-date" class="field" type="date" required></label>
+        <div id="cycle-checkin-fields" class="cycle-checkin-fields"></div>
+        <label><span class="cycle-field-label">Optional note</span><textarea id="checkin-note" class="field" maxlength="500" rows="2" placeholder="Anything worth remembering about today"></textarea></label>
+        <p id="checkin-status" class="cycle-inline-status" role="status"></p>
+        <div class="cycle-dialog-actions"><button type="button" class="cycle-secondary-action" onclick="closeCycleDialog('cycle-checkin-dialog')">Cancel</button><button type="submit" class="cycle-primary-action">Save check-in</button></div>
+    </form>
+</dialog>
+
+<dialog id="cycle-event-dialog" class="cycle-dialog">
+    <form id="cycle-event-form" method="dialog" class="cycle-dialog-card">
+        <div class="cycle-dialog-heading"><div><p class="role-label">Source data</p><h2 id="cycle-event-title">Add an entry</h2></div><button type="button" onclick="closeCycleDialog('cycle-event-dialog')" aria-label="Close">×</button></div>
+        <input id="cycle-event-id" type="hidden">
+        <label><span class="cycle-field-label">Entry</span><select id="cycle-event-kind" class="field"><option value="bleeding_started">Period started</option><option value="bleeding_ended">Period ended</option><option value="ovulation_test">Ovulation test observation</option></select></label>
+        <label><span class="cycle-field-label">Date</span><input id="cycle-event-date" class="field" type="date" required></label>
+        <label><span class="cycle-field-label">Optional note</span><textarea id="cycle-event-note" class="field" maxlength="500" rows="2"></textarea></label>
+        <p id="cycle-event-status" class="cycle-inline-status" role="status"></p>
+        <div class="cycle-dialog-actions"><button type="button" class="cycle-secondary-action" onclick="closeCycleDialog('cycle-event-dialog')">Cancel</button><button type="submit" class="cycle-primary-action">Save entry</button></div>
+    </form>
+</dialog>
+
+<dialog id="cycle-settings-dialog" class="cycle-dialog">
+    <form id="cycle-settings-form" method="dialog" class="cycle-dialog-card">
+        <div class="cycle-dialog-heading"><div><p class="role-label">Your agency</p><h2>Cycle settings</h2></div><button type="button" onclick="closeCycleDialog('cycle-settings-dialog')" aria-label="Close">×</button></div>
+        <label><span class="cycle-field-label">Tracking mode</span><select id="settings-tracking-mode" class="field"><option value="natural">Natural cycle estimates</option><option value="hormonal">Hormonal contraception</option><option value="irregular">Irregular cycles</option><option value="postpartum">Postpartum</option><option value="perimenopause">Perimenopause</option><option value="pregnant">Pregnant</option><option value="unknown">Unknown</option></select></label>
+        <label><span class="cycle-field-label">Typical length <small>(optional)</small></span><input id="settings-cycle-days" class="field" type="number" min="15" max="90"></label>
+        <label class="cycle-consent-row"><input id="settings-ai-context" type="checkbox"><span><strong>Use as optional AI context</strong><small>Never treated as a cause or diagnosis.</small></span></label>
+        <label class="cycle-consent-row"><input id="settings-show-chat" type="checkbox"><span><strong>Show cycle shortcut in chat</strong><small>Turn this off for more visual privacy.</small></span></label>
+        <label class="cycle-consent-row"><input id="settings-paused" type="checkbox"><span><strong>Pause tracking</strong><small>Retains history; disables predictions and AI use.</small></span></label>
+        <p id="cycle-settings-status" class="cycle-inline-status" role="status"></p>
+        <div class="cycle-dialog-actions"><button type="button" class="cycle-secondary-action" onclick="exportCycleData()">Export</button><button type="submit" class="cycle-primary-action">Save settings</button></div>
+        <button type="button" class="cycle-delete-data" onclick="deleteCycleData()">Delete all cycle data</button>
+    </form>
+</dialog>
+
+<script>
+let cycleDashboard = {{ dashboard_json|safe }};
+let cycleCalendarCursor = new Date();
+let lastCycleEventId = null;
+
+function localIsoDate(date = new Date()) {
+    const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return shifted.toISOString().slice(0, 10);
+}
+
+function displayCycleDate(value, options = {}) {
+    if (!value) return '';
+    const date = new Date(value + 'T12:00:00');
+    return new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', ...options }).format(date);
+}
+
+function escapeCycleHtml(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+}
+
+async function cycleFetch(url, options = {}) {
+    const response = await fetch(url, options);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || 'Could not save cycle data');
+    return payload;
+}
+
+async function refreshCycleDashboard() {
+    cycleDashboard = await cycleFetch('/api/cycle?today=' + encodeURIComponent(localIsoDate()), { cache: 'no-store' });
+    renderCycleDashboard();
+}
+
+function renderCycleDashboard() {
+    const dashboard = cycleDashboard;
+    const prediction = dashboard.prediction;
+    document.getElementById('cycle-day-kicker').textContent = prediction.cycle_day ? `Cycle day ${prediction.cycle_day}` : 'Building your timeline';
+    document.getElementById('cycle-current-state').textContent = prediction.state_label;
+    document.getElementById('cycle-state-detail').textContent = prediction.state_detail;
+    document.getElementById('cycle-confidence-label').textContent = prediction.confidence === 'none' ? 'No phase estimate' : `${prediction.confidence[0].toUpperCase() + prediction.confidence.slice(1)} confidence`;
+    document.querySelector('.cycle-confidence').dataset.confidence = prediction.confidence;
+    document.getElementById('cycle-next-window').textContent = prediction.next_start_earliest && prediction.next_start_latest ? `${displayCycleDate(prediction.next_start_earliest)}–${displayCycleDate(prediction.next_start_latest)}` : 'Add another start date';
+    document.getElementById('cycle-paused-banner').classList.toggle('hidden', !dashboard.profile.paused);
+    renderCycleTimeline();
+    renderCycleCalendar();
+    renderCycleObservations();
+    renderCycleInsights();
+    renderCycleHistory();
+}
+
+function renderCycleTimeline() {
+    const timeline = document.getElementById('cycle-timeline');
+    const prediction = cycleDashboard.prediction;
+    timeline.replaceChildren();
+    const total = prediction.timeline_days || 28;
+    const current = Math.max(1, Math.min(total, prediction.cycle_day || 1));
+    for (let day = 1; day <= total; day++) {
+        const node = document.createElement('span');
+        node.className = 'cycle-timeline-day ' + (day <= (prediction.observed_bleeding_days || 0) ? 'is-observed-kind' : 'is-estimated');
+        if (day === current) node.classList.add('is-today');
+        node.setAttribute('aria-hidden', 'true');
+        timeline.appendChild(node);
+    }
+    timeline.setAttribute('aria-label', prediction.cycle_day ? `Today is cycle day ${prediction.cycle_day}. Days after observed bleeding are estimates.` : 'Add period start dates to build a timeline.');
+}
+
+function renderCycleCalendar() {
+    const calendar = document.getElementById('cycle-calendar');
+    calendar.replaceChildren();
+    const year = cycleCalendarCursor.getFullYear();
+    const month = cycleCalendarCursor.getMonth();
+    document.getElementById('cycle-calendar-month').textContent = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' }).format(cycleCalendarCursor);
+    const first = new Date(year, month, 1);
+    const leading = (first.getDay() + 6) % 7;
+    const days = new Date(year, month + 1, 0).getDate();
+    const starts = new Set(cycleDashboard.prediction.observed_start_dates || []);
+    const earliest = cycleDashboard.prediction.next_start_earliest;
+    const latest = cycleDashboard.prediction.next_start_latest;
+    for (let index = 0; index < leading; index++) calendar.appendChild(document.createElement('span'));
+    for (let day = 1; day <= days; day++) {
+        const date = localIsoDate(new Date(year, month, day, 12));
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = day;
+        button.dataset.date = date;
+        button.setAttribute('role', 'gridcell');
+        button.setAttribute('aria-label', new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(new Date(date + 'T12:00:00')));
+        if (starts.has(date)) { button.classList.add('has-observed-start'); button.setAttribute('aria-label', button.getAttribute('aria-label') + ', recorded period start'); }
+        if (earliest && latest && date >= earliest && date <= latest) { button.classList.add('is-predicted-window'); button.setAttribute('aria-label', button.getAttribute('aria-label') + ', estimated period window'); }
+        if (date === localIsoDate()) button.classList.add('is-calendar-today');
+        button.addEventListener('click', () => openEventEditor(null, date));
+        calendar.appendChild(button);
+    }
+}
+
+function shiftCycleMonth(delta) {
+    cycleCalendarCursor = new Date(cycleCalendarCursor.getFullYear(), cycleCalendarCursor.getMonth() + delta, 1);
+    renderCycleCalendar();
+}
+
+const checkInMetrics = [
+    ['mood', 'Mood'], ['energy', 'Energy'], ['sensitivity', 'Sensitivity'],
+    ['anxiety', 'Anxiety'], ['sleep', 'Sleep quality'], ['pain', 'Physical discomfort']
+];
+
+function buildCheckInFields() {
+    const region = document.getElementById('cycle-checkin-fields');
+    region.innerHTML = checkInMetrics.map(([key, label]) => `<fieldset><legend>${label}</legend><div class="cycle-rating" role="radiogroup" aria-label="${label}">${[1,2,3,4,5].map(value => `<label><input type="radio" name="${key}" value="${value}"><span>${value}</span></label>`).join('')}</div></fieldset>`).join('');
+}
+
+function renderCycleObservations() {
+    const region = document.getElementById('cycle-observations');
+    const event = cycleDashboard.recent_check_in;
+    if (!event?.check_in) {
+        region.innerHTML = '<p class="cycle-empty-copy">No check-ins yet. A few seconds is enough when you want one.</p><button type="button" class="cycle-text-button" onclick="openCheckIn()">Make a check-in</button>';
+        return;
+    }
+    const values = checkInMetrics.filter(([key]) => event.check_in[key]).map(([key, label]) => `<div><span>${label}</span><strong>${event.check_in[key]}<small>/5</small></strong><i style="--value:${event.check_in[key]}"><b></b></i></div>`).join('');
+    region.innerHTML = `<p class="cycle-observation-date">${displayCycleDate(event.local_date, { year: 'numeric' })}</p>${values}`;
+}
+
+function renderCycleInsights() {
+    const region = document.getElementById('cycle-insights');
+    const insights = cycleDashboard.insights || [];
+    if (!insights.length) {
+        region.innerHTML = `<div class="cycle-empty-pattern"><span aria-hidden="true">○ ○ ○</span><p>Patterns appear only after at least three cycles with enough check-ins. Until then, the AI receives current context without claiming a personal pattern.</p></div>`;
+        return;
+    }
+    region.innerHTML = insights.map(insight => `<article class="cycle-insight" data-status="${escapeCycleHtml(insight.status)}"><p>${escapeCycleHtml(insight.text)}</p><span>Based on ${insight.evidence_cycles} cycles</span><div><button type="button" onclick="setInsightStatus('${encodeURIComponent(insight.id)}','accepted')" aria-pressed="${insight.status === 'accepted'}">Use in chat</button><button type="button" onclick="setInsightStatus('${encodeURIComponent(insight.id)}','rejected')">Not useful</button></div></article>`).join('');
+}
+
+async function setInsightStatus(encodedId, status) {
+    try {
+        await cycleFetch('/api/cycle/insights/' + encodedId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ status, local_date: localIsoDate() }) });
+        await refreshCycleDashboard();
+    } catch (error) { showCycleNotice(error.message, true); }
+}
+
+function eventLabel(kind) {
+    return ({ bleeding_started:'Period started', bleeding_ended:'Period ended', check_in:'Daily check-in', ovulation_test:'Ovulation test observation' })[kind] || 'Entry';
+}
+
+function renderCycleHistory() {
+    const region = document.getElementById('cycle-history');
+    const events = [...(cycleDashboard.events || [])].sort((a,b) => b.local_date.localeCompare(a.local_date)).slice(0, 12);
+    if (!events.length) { region.innerHTML = '<p class="cycle-empty-copy">No entries yet.</p>'; return; }
+    region.innerHTML = events.map(event => `<div class="cycle-history-row"><button type="button" class="cycle-history-edit" onclick="editCycleEvent('${encodeURIComponent(event.id)}')"><span>${escapeCycleHtml(eventLabel(event.kind))}</span><strong>${displayCycleDate(event.local_date, { year:'numeric' })}</strong></button><button type="button" class="cycle-history-delete" onclick="removeCycleEvent('${encodeURIComponent(event.id)}')" aria-label="Delete ${escapeCycleHtml(eventLabel(event.kind))} on ${escapeCycleHtml(event.local_date)}">×</button></div>`).join('');
+}
+
+function openCheckIn() {
+    document.getElementById('checkin-date').value = localIsoDate();
+    document.getElementById('checkin-note').value = '';
+    document.getElementById('cycle-checkin-form').reset();
+    document.getElementById('checkin-date').value = localIsoDate();
+    openCycleDialog('cycle-checkin-dialog');
+}
+
+function openCycleDialog(id) {
+    const dialog = document.getElementById(id);
+    if (!dialog.open) dialog.showModal();
+}
+
+function closeCycleDialog(id) { document.getElementById(id).close(); }
+
+function openEventEditor(event = null, date = localIsoDate()) {
+    document.getElementById('cycle-event-form').reset();
+    document.getElementById('cycle-event-id').value = event?.id || '';
+    document.getElementById('cycle-event-kind').value = event?.kind || 'bleeding_started';
+    document.getElementById('cycle-event-date').value = event?.local_date || date;
+    document.getElementById('cycle-event-note').value = event?.note || '';
+    document.getElementById('cycle-event-title').textContent = event ? 'Correct entry' : 'Add an entry';
+    openCycleDialog('cycle-event-dialog');
+}
+
+function editCycleEvent(encodedId) {
+    const id = decodeURIComponent(encodedId);
+    const event = cycleDashboard.events.find(item => item.id === id);
+    if (event) openEventEditor(event);
+}
+
+async function saveCycleEventPayload(event, id = '') {
+    return cycleFetch(id ? '/api/cycle/events/' + encodeURIComponent(id) : '/api/cycle/events', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(event)
+    });
+}
+
+async function logPeriodStartToday(button) {
+    button.disabled = true;
+    try {
+        const saved = await saveCycleEventPayload({ kind:'bleeding_started', local_date:localIsoDate(), source:'manual', flow:null, note:null, check_in:null });
+        lastCycleEventId = saved.id;
+        showCycleUndo('Period start recorded.');
+        await refreshCycleDashboard();
+    } catch (error) { showCycleNotice(error.message, true); }
+    finally { button.disabled = false; }
+}
+
+function showCycleUndo(message) {
+    document.getElementById('cycle-undo-copy').textContent = message;
+    document.getElementById('cycle-undo').classList.remove('hidden');
+}
+
+async function undoLastCycleEvent() {
+    if (!lastCycleEventId) return;
+    await removeCycleEvent(encodeURIComponent(lastCycleEventId), true);
+    lastCycleEventId = null;
+    document.getElementById('cycle-undo').classList.add('hidden');
+}
+
+async function removeCycleEvent(encodedId, quiet = false) {
+    try {
+        await cycleFetch('/api/cycle/events/' + encodedId, { method:'DELETE' });
+        await refreshCycleDashboard();
+        if (!quiet) showCycleNotice('Entry removed.');
+    } catch (error) { showCycleNotice(error.message, true); }
+}
+
+function openCycleSettings() {
+    const profile = cycleDashboard.profile || {};
+    document.getElementById('settings-tracking-mode').value = profile.tracking_mode || 'natural';
+    document.getElementById('settings-cycle-days').value = profile.typical_cycle_days || '';
+    document.getElementById('settings-ai-context').checked = !!profile.ai_context_enabled;
+    document.getElementById('settings-show-chat').checked = !!profile.show_in_chat;
+    document.getElementById('settings-paused').checked = !!profile.paused;
+    openCycleDialog('cycle-settings-dialog');
+}
+
+async function saveProfile(profile) {
+    return cycleFetch('/api/cycle/profile', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(profile) });
+}
+
+async function resumeCycleTracking() {
+    await saveProfile({ ...cycleDashboard.profile, paused:false });
+    await refreshCycleDashboard();
+}
+
+function showCycleNotice(message, error = false) {
+    const status = document.getElementById('cycle-undo');
+    document.getElementById('cycle-undo-copy').textContent = message;
+    status.dataset.error = error ? 'true' : 'false';
+    status.classList.remove('hidden');
+}
+
+function exportCycleData() {
+    const blob = new Blob([JSON.stringify(cycleDashboard, null, 2)], { type:'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'individuate-cycle-data-' + localIsoDate() + '.json';
+    link.click();
+    URL.revokeObjectURL(link.href);
+}
+
+async function deleteCycleData() {
+    if (!confirm('Delete every cycle event, check-in, prediction and accepted pattern? This cannot be undone.')) return;
+    try {
+        await cycleFetch('/api/cycle', { method:'DELETE' });
+        location.reload();
+    } catch (error) { document.getElementById('cycle-settings-status').textContent = error.message; }
+}
+
+document.getElementById('cycle-setup-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const status = document.getElementById('cycle-setup-status');
+    status.textContent = 'Enabling securely…';
+    try {
+        const profile = {
+            enabled:true, ai_context_enabled:document.getElementById('setup-ai-context').checked,
+            show_in_chat:true, tracking_mode:document.getElementById('setup-tracking-mode').value,
+            timezone:Intl.DateTimeFormat().resolvedOptions().timeZone || 'local',
+            utc_offset_minutes:-new Date().getTimezoneOffset(),
+            typical_cycle_days:Number(document.getElementById('setup-cycle-days').value) || null, paused:false
+        };
+        await saveProfile(profile);
+        const start = document.getElementById('setup-last-start').value;
+        if (start) await saveCycleEventPayload({ kind:'bleeding_started', local_date:start, source:'manual', flow:null, note:null, check_in:null });
+        location.href = '/cycle?today=' + localIsoDate();
+    } catch (error) { status.textContent = error.message; }
+});
+
+document.getElementById('cycle-checkin-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const check_in = {};
+    checkInMetrics.forEach(([key]) => {
+        const selected = event.target.querySelector(`input[name="${key}"]:checked`);
+        check_in[key] = selected ? Number(selected.value) : null;
+    });
+    if (!Object.values(check_in).some(Boolean)) { document.getElementById('checkin-status').textContent = 'Choose at least one rating.'; return; }
+    try {
+        const saved = await saveCycleEventPayload({ kind:'check_in', local_date:document.getElementById('checkin-date').value, source:'manual', flow:null, note:document.getElementById('checkin-note').value || null, check_in });
+        lastCycleEventId = saved.id;
+        closeCycleDialog('cycle-checkin-dialog');
+        showCycleUndo('Check-in saved.');
+        await refreshCycleDashboard();
+    } catch (error) { document.getElementById('checkin-status').textContent = error.message; }
+});
+
+document.getElementById('cycle-event-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const id = document.getElementById('cycle-event-id').value;
+    try {
+        const saved = await saveCycleEventPayload({ id, kind:document.getElementById('cycle-event-kind').value, local_date:document.getElementById('cycle-event-date').value, source:'manual', flow:null, note:document.getElementById('cycle-event-note').value || null, check_in:null }, id);
+        lastCycleEventId = id ? null : saved.id;
+        closeCycleDialog('cycle-event-dialog');
+        if (!id) showCycleUndo('Entry saved.');
+        await refreshCycleDashboard();
+    } catch (error) { document.getElementById('cycle-event-status').textContent = error.message; }
+});
+
+document.getElementById('cycle-settings-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const profile = { ...cycleDashboard.profile,
+        tracking_mode:document.getElementById('settings-tracking-mode').value,
+        typical_cycle_days:Number(document.getElementById('settings-cycle-days').value) || null,
+        ai_context_enabled:document.getElementById('settings-ai-context').checked,
+        show_in_chat:document.getElementById('settings-show-chat').checked,
+        paused:document.getElementById('settings-paused').checked
+    };
+    try { await saveProfile(profile); closeCycleDialog('cycle-settings-dialog'); await refreshCycleDashboard(); }
+    catch (error) { document.getElementById('cycle-settings-status').textContent = error.message; }
+});
+
+document.querySelectorAll('.cycle-dialog').forEach(dialog => dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); }));
+buildCheckInFields();
+if (cycleDashboard.profile.enabled) renderCycleDashboard();
+</script>
+{% endblock %}

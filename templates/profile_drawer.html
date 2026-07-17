@@ -44,6 +44,23 @@
         <p id="voice-setting-status" class="mt-2 min-h-[1rem] text-[11px] text-sage-light" role="status" aria-live="polite"></p>
     </section>
 
+    <section aria-labelledby="cycle-settings-title" class="rounded-2xl border border-sage-mist/20 bg-void-deep/45 p-3.5">
+        <div class="flex items-start justify-between gap-3">
+            <div>
+                <p class="role-label mb-1">Optional body context</p>
+                <h3 id="cycle-settings-title" class="text-base text-parchment">Cycle &amp; body</h3>
+            </div>
+            {% if cycle_enabled and not cycle_paused %}<span class="rounded-full border border-integral-turquoise/35 bg-integral-turquoise/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-integral-turquoise">On</span>{% elif cycle_paused %}<span class="rounded-full border border-systemic-yellow-soft/30 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-systemic-yellow-soft">Paused</span>{% endif %}
+        </div>
+        {% if cycle_enabled %}
+        <p class="mt-2 text-xs leading-relaxed text-sage-light">Private tracking is enabled. AI context is {% if cycle_ai_context_enabled and not cycle_paused %}available when relevant{% else %}currently off{% endif %}.</p>
+        <a href="/cycle" class="mt-3 flex min-h-11 items-center justify-center rounded-xl border border-sage-mist/30 px-4 text-sm font-bold text-parchment no-underline">Open cycle tracker</a>
+        {% else %}
+        <p class="mt-2 text-xs leading-relaxed text-sage-light">Track dates and check-ins without assuming they explain how you feel.</p>
+        <a href="/cycle" class="mt-3 flex min-h-11 items-center justify-center rounded-xl bg-integral-turquoise px-4 text-sm font-bold text-void-green no-underline">Set up tracking</a>
+        {% endif %}
+    </section>
+
     <div class="flex items-center gap-3 pt-1">
         <span class="h-px flex-1 bg-sage-mist/20"></span>
         <h3 class="role-label">Relationship profiles</h3>

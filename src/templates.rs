@@ -88,6 +88,8 @@ pub fn create_env() -> Environment<'static> {
     .unwrap();
     env.add_template("timeline", include_str!("../templates/timeline.html"))
         .unwrap();
+    env.add_template("import", include_str!("../templates/import.html"))
+        .unwrap();
     env.add_template("cycle", include_str!("../templates/cycle.html"))
         .unwrap();
     env
@@ -327,6 +329,13 @@ pub fn render_timeline(env: &Environment) -> String {
         .unwrap()
 }
 
+pub fn render_import(env: &Environment) -> String {
+    env.get_template("import")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +355,7 @@ mod tests {
             "profile_drawer",
             "social_graph",
             "timeline",
+            "import",
             "privacy_security",
             "cycle",
         ] {
@@ -368,6 +378,13 @@ mod tests {
         assert!(html.contains("/api/timeline"));
         assert!(html.contains("Why is this here?"));
         assert!(html.contains("Pin event"));
+    }
+
+    #[test]
+    fn import_page_explains_user_only_memory_extraction() {
+        let html = render_import(&create_env());
+        assert!(html.contains("only your own messages are sent to memory extraction"));
+        assert!(html.contains("/api/import/gemini"));
     }
 
     #[test]

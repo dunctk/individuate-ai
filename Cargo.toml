@@ -6,7 +6,7 @@ license = "AGPL-3.0-or-later"
 default-run = "individuateai"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["multipart"] }
 axum-extra = { version = "0.12.3", features = ["cookie", "cookie-signed", "cookie-private"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
@@ -38,5 +38,6 @@ base64 = "0.22"
 hkdf = "0.12"
 rand = "0.8"
 sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 hmac = "0.12"
 hex = "0.4"

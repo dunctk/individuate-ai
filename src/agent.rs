@@ -113,6 +113,14 @@ pub struct ChatLog {
     pub content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportSummary {
+    pub conversations: usize,
+    pub messages: usize,
+    pub user_messages_sent_to_memory: usize,
+    pub sessions: Vec<Session>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PatientGraph {
     pub user_id: String,
@@ -461,19 +469,42 @@ fn timeline_sort_key(card: &TimelineCard) -> String {
         .unwrap_or_default()
 }
 
+fn import_memory_chunks(user_turns: &[String], max_chars: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for turn in user_turns.iter().filter(|turn| !turn.trim().is_empty()) {
+        let entry = if current.is_empty() {
+            turn.trim().to_string()
+        } else {
+            format!("{}\n--- imported user turn ---\n{}", current, turn.trim())
+        };
+        if !current.is_empty() && entry.len() > max_chars {
+            chunks.push(std::mem::take(&mut current));
+            current = turn.trim().to_string();
+        } else {
+            current = entry;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 mod runtime {
     use super::{
-        infer_date_precision, promotion_reasons, timeline_group_label, timeline_signals,
-        timeline_sort_key, AdminUserAccess, BillingAccount, ChatLog, EditableMemory, Episode,
-        EpisodeTimelineMetadata, EpisodeWithLinks, GraphEdge, GraphNode, MemoryEdit, MemoryLink,
-        MemoryStatus, PatientGraph, RelationshipProfile, Session, SocialGraph, SocialGraphEdge,
-        SocialGraphNode, TimelineCard, TimelineGroup, TimelinePatch, TimelineResponse, UsageKind,
-        User,
+        import_memory_chunks, infer_date_precision, promotion_reasons, timeline_group_label,
+        timeline_signals, timeline_sort_key, AdminUserAccess, BillingAccount, ChatLog,
+        EditableMemory, Episode, EpisodeTimelineMetadata, EpisodeWithLinks, GraphEdge, GraphNode,
+        ImportSummary, MemoryEdit, MemoryLink, MemoryStatus, PatientGraph, RelationshipProfile,
+        Session, SocialGraph, SocialGraphEdge, SocialGraphNode, TimelineCard, TimelineGroup,
+        TimelinePatch, TimelineResponse, UsageKind, User,
     };
     use crate::{
         cycle::{
             self, BodyOnboardingPreference, CycleDashboard, CycleEvent, CycleInsight, CycleProfile,
         },
+        import::ImportedConversation,
         security,
     };
     use std::{
@@ -8121,6 +8152,67 @@ mod runtime {
 
         pub async fn create_new_session(&self, user_id: String, title: String) -> Result<Session> {
             self.create_session(user_id, title).await
+        }
+
+        /// Import history into encrypted sessions. Assistant turns are kept so
+        /// the imported conversation remains readable, but only user turns are
+        /// ever passed to the memory extractors.
+        pub async fn import_gemini_conversations(
+            &self,
+            user_id: String,
+            conversations: Vec<ImportedConversation>,
+        ) -> Result<ImportSummary> {
+            if conversations.len() > 500 {
+                anyhow::bail!("The import contains too many conversations (maximum 500)");
+            }
+            let mut summary = ImportSummary {
+                conversations: 0,
+                messages: 0,
+                user_messages_sent_to_memory: 0,
+                sessions: Vec::new(),
+            };
+            for conversation in conversations {
+                if conversation.messages.is_empty() {
+                    continue;
+                }
+                let title = if conversation.title.starts_with("Gemini:") {
+                    conversation.title
+                } else {
+                    format!("Gemini: {}", conversation.title)
+                };
+                let session = self.create_session(user_id.clone(), title).await?;
+                let mut user_turns = Vec::new();
+                for message in &conversation.messages {
+                    if message.role == "user" {
+                        user_turns.push(message.content.clone());
+                    }
+                    self.save_message(
+                        session.id.clone(),
+                        message.role.clone(),
+                        message.content.clone(),
+                    )
+                    .await?;
+                    summary.messages += 1;
+                }
+                // Keep the import faithful to the user's export. In
+                // particular, do not call sync_session_summary here: that
+                // would ask a model to summarize assistant text as well.
+                for chunk in import_memory_chunks(&user_turns, 12_000) {
+                    if !chunk.trim().is_empty() {
+                        summary.user_messages_sent_to_memory = user_turns.len();
+                        self.update_memory_from_exchange(
+                            user_id.clone(),
+                            Some(session.id.clone()),
+                            chunk,
+                            String::new(),
+                        )
+                        .await?;
+                    }
+                }
+                summary.conversations += 1;
+                summary.sessions.push(session);
+            }
+            Ok(summary)
         }
 
         pub async fn get_session_history(

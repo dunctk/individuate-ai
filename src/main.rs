@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
@@ -21,6 +21,7 @@ use individuateai::billing::{
 };
 use individuateai::cycle::{self, BodyOnboardingPreference, CycleEvent, CycleProfile};
 use individuateai::fileserv;
+use individuateai::import::parse_gemini_takeout;
 use individuateai::templates;
 use minijinja::Environment;
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,7 @@ async fn main() {
         .route("/admin", get(admin_page))
         .route("/mind-map", get(mind_map_page))
         .route("/timeline", get(timeline_page))
+        .route("/import", get(import_page))
         .route("/social-graph", get(social_graph_page))
         .route("/cycle", get(cycle_page))
         // Fragments
@@ -191,6 +193,10 @@ async fn main() {
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/timeline", get(get_timeline))
+        .route(
+            "/api/import/gemini",
+            post(import_gemini).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
+        )
         .route("/api/timeline/:episode_id", patch(update_timeline))
         .route(
             "/api/timeline/:episode_id/separate",
@@ -270,6 +276,7 @@ async fn auth_guard(
         || path == "/admin"
         || path == "/mind-map"
         || path == "/timeline"
+        || path == "/import"
         || path == "/social-graph"
         || path.starts_with("/fragments")
         || path.starts_with("/api/sessions")
@@ -726,6 +733,14 @@ async fn timeline_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         return Redirect::temporary("/login").into_response();
     }
     let html = templates::render_timeline(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn import_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if get_authed_user(&headers, &state.key).await.is_none() {
+        return Redirect::temporary("/login").into_response();
+    }
+    let html = templates::render_import(&state.templates);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -1658,6 +1673,87 @@ async fn get_timeline(State(state): State<AppState>, headers: HeaderMap) -> Resp
     };
     match runtime.get_timeline(user.id).await {
         Ok(timeline) => Json(timeline).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn import_gemini(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let mut filename = "gemini-takeout.json".to_string();
+    let mut bytes = None;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Could not read upload: {error}")})),
+                )
+                    .into_response()
+            }
+        };
+        if field.name() != Some("file") {
+            continue;
+        }
+        if let Some(name) = field.file_name() {
+            filename = name.to_string();
+        }
+        match field.bytes().await {
+            Ok(value) => bytes = Some(value),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Could not read upload: {error}")})),
+                )
+                    .into_response()
+            }
+        }
+        break;
+    }
+    let Some(bytes) = bytes else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Choose a Gemini Takeout JSON or ZIP file."})),
+        )
+            .into_response();
+    };
+    let conversations = match parse_gemini_takeout(&filename, &bytes) {
+        Ok(conversations) => conversations,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match runtime
+        .import_gemini_conversations(user.id, conversations)
+        .await
+    {
+        Ok(summary) => Json(summary).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": error.to_string()})),

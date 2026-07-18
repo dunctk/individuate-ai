@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="min-h-screen bg-[#0F1C18] text-parchment">
+    <header class="glass flex items-center gap-3 px-4 py-3 border-b border-sage-mist/20 sticky top-0 z-20">
+        <a href="/chat" class="icon-btn" aria-label="Back to chat">←</a>
+        <div><p class="role-label">Bring your history with you</p><h1 class="text-lg sm:text-xl font-fraunces font-bold">Import Gemini chats</h1></div>
+    </header>
+    <main class="max-w-xl mx-auto px-4 py-10 sm:py-16">
+        <section class="glass rounded-pebble-xs p-5 sm:p-7">
+            <p class="text-sm leading-6 text-sage-light">Upload a Google Takeout ZIP or Gemini JSON export. Each conversation becomes an encrypted chat-history session.</p>
+            <div class="mt-5 rounded-2xl border border-integral-turquoise/25 bg-void-deep/40 p-4 text-sm leading-6 text-sage-light">
+                <strong class="text-parchment">Memory safety:</strong> imported assistant replies stay visible in history, but only your own messages are sent to memory extraction. Gemini’s interpretations are never treated as facts.
+            </div>
+            <form id="gemini-import-form" class="mt-6 space-y-4">
+                <label for="gemini-file" class="block text-sm font-semibold text-parchment">Takeout file</label>
+                <input id="gemini-file" name="file" type="file" accept=".json,.zip,application/json,application/zip" required class="field w-full min-h-12 file:mr-3 file:rounded-lg file:border-0 file:bg-integral-turquoise/15 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-integral-turquoise">
+                <p class="text-xs text-sage-mist">Maximum size: 25 MB.</p>
+                <button id="gemini-import-submit" type="submit" class="btn-primary min-h-11 w-full">Import conversations</button>
+            </form>
+            <p id="gemini-import-status" class="mt-4 text-sm text-sage-light" role="status" aria-live="polite"></p>
+            <a id="gemini-import-chat-link" href="/chat" class="hidden mt-4 text-sm text-integral-turquoise underline">Open chat history</a>
+        </section>
+    </main>
+</div>
+<script>
+const importForm = document.getElementById('gemini-import-form');
+const importStatus = document.getElementById('gemini-import-status');
+const importSubmit = document.getElementById('gemini-import-submit');
+const importChatLink = document.getElementById('gemini-import-chat-link');
+importForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const file = document.getElementById('gemini-file').files[0];
+    if (!file) return;
+    importSubmit.disabled = true;
+    importStatus.textContent = 'Importing history and extracting memories from your messages…';
+    try {
+        const response = await fetch('/api/import/gemini', {method: 'POST', body: new FormData(importForm)});
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Import failed');
+        importStatus.textContent = `Imported ${data.conversations} conversation${data.conversations === 1 ? '' : 's'} and ${data.messages} messages. Memory extraction used ${data.user_messages_sent_to_memory} user message${data.user_messages_sent_to_memory === 1 ? '' : 's'} only.`;
+        importChatLink.classList.remove('hidden');
+    } catch (error) {
+        importStatus.textContent = error.message;
+    } finally {
+        importSubmit.disabled = false;
+    }
+});
+</script>
+{% endblock %}

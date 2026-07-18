@@ -600,7 +600,9 @@ mod tests {
             &CycleProfile::default(),
             &BodyOnboardingPreference::default(),
         );
-        assert!(html.contains("Profiles &amp; settings"));
+        assert!(html.contains(">Settings</h2>"));
+        assert!(html.contains("Import Gemini chats"));
+        assert!(!html.contains("Relationship profiles"));
         assert!(html.contains("Response voice"));
         assert!(html.contains("data-voice=\"aura-2-helena-en\""));
         assert!(html.contains("data-selected=\"true\""));

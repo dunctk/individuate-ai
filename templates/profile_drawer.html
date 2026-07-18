@@ -2,7 +2,7 @@
     <div class="flex items-center justify-between">
         <div>
             <p class="role-label mb-1">Personalise your space</p>
-            <h2 class="text-lg font-fraunces font-semibold text-parchment">Profiles &amp; settings</h2>
+            <h2 class="text-lg font-fraunces font-semibold text-parchment">Settings</h2>
         </div>
         <button onclick="closeProfileDrawer()" class="icon-btn" aria-label="Close profiles and settings">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -75,85 +75,6 @@
         <a href="/import" onclick="closeProfileDrawer()" class="mt-3 flex min-h-11 items-center justify-center rounded-xl border border-integral-turquoise/35 px-4 text-sm font-bold text-integral-turquoise no-underline">Import Gemini chats</a>
     </section>
 
-    <div class="flex items-center gap-3 pt-1">
-        <span class="h-px flex-1 bg-sage-mist/20"></span>
-        <h3 class="role-label">Relationship profiles</h3>
-        <span class="h-px flex-1 bg-sage-mist/20"></span>
-    </div>
-
-    <div>
-        <label class="block text-xs text-sage-mist mb-1">Profile</label>
-        <select id="profile-select" onchange="loadProfile(this.value)"
-            class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">
-            <option value="">Select a profile...</option>
-            {% for profile in profiles %}
-            <option value="{{ profile.slug }}" {% if profile.slug == selected_slug %}selected{% endif %}>
-                {{ profile.display_name }}
-            </option>
-            {% endfor %}
-        </select>
-    </div>
-
-    <form id="profile-form" onsubmit="saveProfile(event)">
-        <input type="hidden" name="slug" id="field-slug" value="{{ selected_slug }}">
-        <div class="space-y-3">
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Display Name</label>
-                <input type="text" name="display_name" id="field-display_name" value="{{ display_name }}"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Relationship Type</label>
-                <input type="text" name="relationship_type" id="field-relationship_type" value="{{ relationship_type }}"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Background</label>
-                <textarea name="background" id="field-background" rows="3"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{{ background }}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Goals (one per line)</label>
-                <textarea name="goals" id="field-goals" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for g in goals %}{{ g }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Triggers (one per line)</label>
-                <textarea name="triggers" id="field-triggers" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for t in triggers %}{{ t }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Do Not Say (one per line)</label>
-                <textarea name="do_not_say" id="field-do_not_say" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for d in do_not_say %}{{ d }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Effective Tone (one per line)</label>
-                <textarea name="effective_tone" id="field-effective_tone" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for e in effective_tone %}{{ e }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Recent Events (one per line)</label>
-                <textarea name="recent_events" id="field-recent_events" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for r in recent_events %}{{ r }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <div>
-                <label class="block text-xs text-sage-mist mb-1">Boundaries (one per line)</label>
-                <textarea name="boundaries" id="field-boundaries" rows="2"
-                    class="w-full bg-[#1A2B26] border border-sage-mist rounded-lg px-3 py-2 text-sm text-parchment focus:outline-none focus:border-integral-turquoise">{% for b in boundaries %}{{ b }}{% if not loop.last %}
-{% endif %}{% endfor %}</textarea>
-            </div>
-            <button type="submit"
-                class="w-full bg-integral-turquoise text-void-green font-semibold rounded-lg px-4 py-2 text-sm hover:bg-integral-turquoise/90 transition-colors">
-                Save Profile
-            </button>
-        </div>
-    </form>
 </div>
 <script>
 function setVoicePreviewButton(button, state) {
@@ -230,39 +151,4 @@ async function selectTtsVoice(button) {
     }
 }
 
-function loadProfile(slug) {
-    if (!slug) return;
-    const form = document.getElementById('profile-form');
-    htmx.ajax('GET', '/fragments/profile-drawer?slug=' + slug, { target: '#profile-drawer' });
-}
-async function saveProfile(event) {
-    event.preventDefault();
-    const form = event.target;
-    const data = new FormData(form);
-    const slug = data.get('slug');
-    if (!slug) return;
-    const payload = {
-        slug,
-        display_name: data.get('display_name'),
-        relationship_type: data.get('relationship_type'),
-        background: data.get('background'),
-        goals: data.get('goals') ? data.get('goals').split('\n').filter(Boolean) : [],
-        triggers: data.get('triggers') ? data.get('triggers').split('\n').filter(Boolean) : [],
-        do_not_say: data.get('do_not_say') ? data.get('do_not_say').split('\n').filter(Boolean) : [],
-        effective_tone: data.get('effective_tone') ? data.get('effective_tone').split('\n').filter(Boolean) : [],
-        recent_events: data.get('recent_events') ? data.get('recent_events').split('\n').filter(Boolean) : [],
-        boundaries: data.get('boundaries') ? data.get('boundaries').split('\n').filter(Boolean) : []
-    };
-    try {
-        const resp = await fetch('/api/profiles/' + slug, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        if (!resp.ok) throw new Error('Save failed');
-        showToast('Profile saved');
-    } catch (e) {
-        showToast('Error: ' + e.message, 'error');
-    }
-}
 </script>

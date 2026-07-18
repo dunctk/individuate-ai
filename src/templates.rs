@@ -370,6 +370,10 @@ mod tests {
         assert!(html.contains(">Mind Map</h1>"));
         assert!(!html.contains(">Social Graph</h1>"));
         assert!(html.contains("fetch('/api/mind-map')"));
+        assert!(html.contains("Find a person or memory"));
+        assert!(html.contains("href=\"/timeline\""));
+        assert!(html.contains("expandedSocialGroups"));
+        assert!(html.contains("mind-map-inspector"));
     }
 
     #[test]
@@ -396,7 +400,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260717-body-onboarding"));
+        assert!(html.contains("individuateai.css?v=20260718-mind-map"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }

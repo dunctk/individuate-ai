@@ -1,234 +1,134 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="h-screen flex flex-col">
-    <header class="glass flex items-center justify-between gap-3 px-4 py-3 border-b border-sage-mist/20 shrink-0 z-20">
+<div class="mind-map-page">
+    <header class="mind-map-header glass">
         <div class="flex items-center gap-3 min-w-0">
             <a href="/chat" class="icon-btn shrink-0" aria-label="Back to chat">
-                <svg class="w-5 h-5 inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0 7-7m-7 7h18"/></svg>
             </a>
             <div class="min-w-0">
-                <p class="role-label">People, patterns &amp; memories</p>
+                <p class="role-label">Your inner landscape</p>
                 <h1 class="text-lg sm:text-xl font-fraunces font-bold text-parchment truncate">Mind Map</h1>
             </div>
         </div>
-        <div class="flex items-center gap-2 shrink-0">
-            <button onclick="reloadSocialGraph()" class="btn-primary text-xs">Refresh</button>
-        </div>
+        <nav class="mind-map-view-switch" aria-label="Memory view">
+            <a href="/mind-map" aria-current="page">Map</a>
+            <a href="/timeline">Timeline</a>
+        </nav>
+        <button type="button" onclick="reloadSocialGraph()" class="mind-map-refresh" aria-label="Refresh mind map">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5m-5 4a8.1 8.1 0 0 0 15.5 2m.5 5v-5h-5"/></svg>
+        </button>
     </header>
 
-    <main class="flex-1 relative overflow-hidden">
-        <div id="social-graph-canvas" class="w-full h-full"></div>
+    <main class="mind-map-main">
+        <section class="mind-map-controls" aria-label="Mind map filters">
+            <label class="mind-map-search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <span class="sr-only">Search memories</span>
+                <input id="social-search" type="search" placeholder="Find a person or memory" autocomplete="off" oninput="applySocialFilters()">
+                <kbd>⌘ K</kbd>
+            </label>
+            <div id="mind-map-kind-filters" class="mind-map-filter-strip" aria-label="Filter by memory type"></div>
+        </section>
 
-        {% if graph_data.nodes|length == 0 %}
-        <div id="empty-social-graph" class="absolute inset-0 flex items-center justify-center px-6 text-center">
-            <div>
-                <p class="text-sage-mist text-sm mb-2">No relationships mapped yet</p>
-                <p class="text-sage-mist/60 text-xs">Mention someone important in chat and the graph will grow from profile memory.</p>
-            </div>
-        </div>
-        {% endif %}
+        <div id="social-graph-canvas" class="mind-map-canvas" role="application" aria-label="Interactive memory map"></div>
 
-        <div class="fixed right-3 top-[76px] z-10 flex items-center gap-2">
-            <input id="social-search" type="search" class="field !py-2 !text-xs !w-[150px] sm:!w-[190px]" placeholder="Search people or signals" oninput="applySocialFilters()">
-            <select id="social-kind-filter" class="field !py-2 !px-2 !w-[110px] !text-xs" onchange="applySocialFilters()">
-                <option value="">All</option>
-                <option value="person">People</option>
-                <option value="event">Events</option>
-                <option value="episode">Episodes</option>
-                <option value="trigger">Triggers</option>
-                <option value="goal">Goals</option>
-                <option value="boundary">Boundaries</option>
-                <option value="pattern">Patterns</option>
-                <option value="need">Needs</option>
-            </select>
+        <div id="empty-social-graph" class="mind-map-empty {% if graph_data.nodes|length != 0 %}hidden{% endif %}">
+            <span class="mind-map-empty-orbit" aria-hidden="true"></span>
+            <h2>Nothing mapped yet</h2>
+            <p>Mention someone or something important in chat. Your map will quietly take shape here.</p>
+            <a href="/chat" class="btn-primary no-underline">Return to chat</a>
         </div>
 
-        <aside id="social-inspector"
-               class="hidden fixed right-3 top-[124px] bottom-[64px] w-[300px] max-w-[calc(100vw-24px)] glass-strong rounded-pebble-xs z-10 flex flex-col">
-            <div class="flex items-start justify-between gap-2 p-3 border-b border-sage-mist/20">
+        <div id="mind-map-status" class="mind-map-status" aria-live="polite"></div>
+        <button id="mind-map-reset" type="button" class="mind-map-reset hidden" onclick="resetMindMapView()">Show overview</button>
+        <div id="mind-map-tooltip" class="mind-map-tooltip hidden" role="tooltip"></div>
+
+        <aside id="social-inspector" class="mind-map-inspector" aria-hidden="true">
+            <div class="mind-map-inspector-handle" aria-hidden="true"></div>
+            <div class="mind-map-inspector-head">
                 <div class="min-w-0">
                     <p class="role-label flex items-center gap-1.5">
                         <span id="social-inspector-dot" class="w-2.5 h-2.5 rounded-full inline-block"></span>
                         <span id="social-inspector-kind"></span>
                     </p>
-                    <h3 id="social-inspector-title" class="font-fraunces text-lg text-parchment leading-tight mt-0.5 text-balance"></h3>
-                    <p id="social-inspector-detail" class="text-xs text-sage-mist mt-0.5"></p>
+                    <h2 id="social-inspector-title"></h2>
+                    <p id="social-inspector-detail"></p>
                 </div>
                 <button class="icon-btn shrink-0" onclick="closeSocialInspector()" aria-label="Close details">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
             </div>
-            <div id="social-inspector-body" class="p-3 overflow-y-auto text-sm space-y-3"></div>
+            <div id="social-inspector-body" class="mind-map-inspector-body"></div>
         </aside>
-
-        <div id="social-legend" class="fixed bottom-4 right-4 glass-strong rounded-pebble-xs px-3 py-2 space-y-1 z-10">
-            <div class="text-xs text-sage-mist font-medium mb-1">People &amp; memories</div>
-            {% for kind, color in [("self", "#F2D88A"), ("person", "#2A9D8F"), ("episode", "#D98C6A"), ("event", "#E9C46A"), ("trigger", "#C46A57"), ("goal", "#9BCF8A"), ("boundary", "#E6A1B0"), ("pattern", "#F2F0E9"), ("need", "#83B7D8")] %}
-            <button class="flex items-center gap-2 text-xs text-parchment/80 transition-colors hover:text-parchment" onclick="setSocialKind('{{ kind }}')">
-                <span class="{% if kind == 'person' or kind == 'self' %}graph-legend-person{% elif kind == 'episode' %}graph-legend-episode{% else %}graph-legend-memory{% endif %}" style="--legend-color: {{ color }}"></span>
-                {{ kind }}
-            </button>
-            {% endfor %}
-        </div>
     </main>
 </div>
 
 <script>
 let socialGraphData = {{ graph_data|safe }};
-let socialSimulation = null;
 let socialResizeObserver = null;
+let socialZoom = null;
+let selectedSocialNodeId = null;
+const expandedSocialGroups = new Set();
+const activeSocialKinds = new Set();
+const SOCIAL_VISIBLE_PEOPLE = 8;
+const SOCIAL_VISIBLE_LEAVES = 7;
+const SOCIAL_KIND_ORDER = ['episode', 'event', 'trigger', 'goal', 'boundary', 'pattern', 'need', 'belief', 'emotion', 'somatic', 'resource', 'other'];
+const SOCIAL_KIND_LABELS = {
+    episode: 'Moments', event: 'Events', trigger: 'Triggers', goal: 'Goals', boundary: 'Boundaries',
+    pattern: 'Patterns', need: 'Needs', belief: 'Beliefs', emotion: 'Emotions', somatic: 'Body',
+    resource: 'Resources', other: 'Other'
+};
 const SOCIAL_COLORS = {
-    self: '#F2D88A',
-    person: '#2A9D8F',
-    episode: '#D98C6A',
-    event: '#E9C46A',
-    trigger: '#C46A57',
-    goal: '#9BCF8A',
-    boundary: '#E6A1B0',
-    pattern: '#F2F0E9',
-    need: '#83B7D8',
-    other: '#7B8F88'
+    self: '#F2D88A', person: '#2A9D8F', episode: '#D98C6A', event: '#E9C46A',
+    trigger: '#C46A57', goal: '#9BCF8A', boundary: '#E6A1B0', pattern: '#C9B8F0',
+    need: '#83B7D8', belief: '#67C7B8', emotion: '#E091B9', somatic: '#9CDCB0',
+    resource: '#F2F0E9', other: '#7B8F88'
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+    buildSocialKindFilters();
     renderSocialGraph();
+    document.addEventListener('keydown', (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+            event.preventDefault();
+            document.getElementById('social-search')?.focus();
+        }
+        if (event.key === 'Escape') {
+            closeSocialInspector();
+            hideSocialTooltip();
+        }
+    });
 });
 
 async function reloadSocialGraph() {
-    const resp = await fetch('/api/mind-map');
-    if (!resp.ok) return false;
-    socialGraphData = await resp.json();
-    renderSocialGraph();
-    return true;
+    const button = document.querySelector('.mind-map-refresh');
+    button?.classList.add('is-loading');
+    try {
+        const resp = await fetch('/api/mind-map');
+        if (!resp.ok) return false;
+        socialGraphData = await resp.json();
+        expandedSocialGroups.clear();
+        selectedSocialNodeId = null;
+        buildSocialKindFilters();
+        renderSocialGraph();
+        return true;
+    } finally {
+        button?.classList.remove('is-loading');
+    }
 }
 
-function renderSocialGraph() {
-    const container = document.getElementById('social-graph-canvas');
-    if (!container || typeof d3 === 'undefined') return;
-    socialResizeObserver?.disconnect();
-    container.innerHTML = '';
-    let width = container.clientWidth || 900;
-    let height = container.clientHeight || 640;
-    const nodes = (socialGraphData.nodes || []).map((node) => ({ ...node }));
-    const links = (socialGraphData.edges || []).map((edge) => ({ ...edge, source: edge.from, target: edge.to }));
-    if (nodes.length === 0) return;
-
-    const svg = d3.select(container).append('svg')
-        .attr('width', '100%')
-        .attr('height', '100%')
-        .attr('viewBox', [0, 0, width, height])
-        .style('background', '#0F1C18');
-    const g = svg.append('g');
-    svg.call(d3.zoom().scaleExtent([0.35, 3.5]).on('zoom', (event) => g.attr('transform', event.transform)));
-
-    const link = g.append('g')
-        .selectAll('line')
-        .data(links)
-        .join('line')
-        .attr('stroke', '#4A635D')
-        .attr('stroke-width', (d) => Math.max(1.4, Math.min(4, d.weight || 1)))
-        .attr('opacity', 0.62);
-
-    const linkLabel = g.append('g')
-        .selectAll('text')
-        .data(links)
-        .join('text')
-        .text((d) => d.relation)
-        .attr('font-size', '10px')
-        .attr('fill', '#B8C9C1')
-        .attr('text-anchor', 'middle')
-        .attr('opacity', 0.84);
-
-    const socialSymbol = d3.symbol();
-    const nodePath = d => {
-        if (d.kind === 'person' || d.kind === 'self') return 'M-36,-19H36A19,19 0 0 1 36,19H-36A19,19 0 0 1-36,-19Z';
-        if (d.kind === 'episode') return socialSymbol.type(d3.symbolSquare).size(270)();
-        return socialSymbol.type(d3.symbolCircle).size(Math.min(230, 110 + ((d.weight || 1) * 20)))();
-    };
-    const node = g.append('g')
-        .selectAll('path')
-        .data(nodes)
-        .join('path')
-        .attr('class', 'social-node')
-        .attr('data-kind', d => d.kind)
-        .attr('d', nodePath)
-        .attr('fill', d => d.kind === 'person' || d.kind === 'self' ? '#163B34' : SOCIAL_COLORS[d.kind] || SOCIAL_COLORS.other)
-        .attr('stroke', d => d.kind === 'self' ? '#F2D88A' : d.kind === 'person' ? '#3FB8A4' : d.kind === 'episode' ? '#D98C6A' : '#F2F0E9')
-        .attr('stroke-opacity', d => d.kind === 'person' || d.kind === 'self' ? 1 : d.kind === 'episode' ? 0.9 : 0.2)
-        .attr('stroke-width', d => d.kind === 'person' || d.kind === 'self' ? 3 : 1.5)
-        .style('cursor', 'pointer')
-        .on('click', (_, d) => selectSocialNode(d))
-        .call(d3.drag()
-            .on('start', (event) => {
-                if (!event.active) socialSimulation.alphaTarget(0.25).restart();
-                event.subject.fx = event.subject.x;
-                event.subject.fy = event.subject.y;
-            })
-            .on('drag', (event) => {
-                event.subject.fx = event.x;
-                event.subject.fy = event.y;
-            })
-            .on('end', (event) => {
-                if (!event.active) socialSimulation.alphaTarget(0);
-                event.subject.fx = null;
-                event.subject.fy = null;
-            }));
-
-    const label = g.append('g')
-        .selectAll('text')
-        .data(nodes)
-        .join('text')
-        .text((d) => d.label)
-        .attr('font-family', 'Urbanist, sans-serif')
-        .attr('font-size', (d) => d.kind === 'person' || d.kind === 'self' ? '14px' : '12px')
-        .attr('font-weight', (d) => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode' ? '700' : '500')
-        .attr('fill', '#F2F0E9')
-        .attr('text-anchor', d => d.kind === 'person' || d.kind === 'self' ? 'middle' : 'start')
-        .style('text-shadow', '0 2px 6px #0F1C18');
-
-    const kindBadge = g.append('g')
-        .selectAll('text')
-        .data(nodes.filter(d => d.kind === 'person' || d.kind === 'self' || d.kind === 'episode'))
-        .join('text')
-        .text(d => d.kind === 'self' ? 'YOU' : d.kind === 'person' ? 'PERSON' : 'MEMORY')
-        .attr('font-family', 'Urbanist, sans-serif')
-        .attr('font-size', '8px')
-        .attr('font-weight', '800')
-        .attr('letter-spacing', '0.13em')
-        .attr('text-anchor', 'middle')
-        .attr('fill', d => d.kind === 'self' ? '#F2D88A' : d.kind === 'person' ? '#8DE0D1' : '#F3B091');
-
-    socialSimulation = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id((d) => d.id).distance((d) => d.relation === 'pattern' ? 190 : 132).strength(0.72))
-        .force('charge', d3.forceManyBody().strength(-520))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide().radius((d) => d.kind === 'person' || d.kind === 'self' ? 74 : d.kind === 'episode' ? 52 : 42));
-
-    socialSimulation.on('tick', () => {
-        link.attr('x1', (d) => d.source.x).attr('y1', (d) => d.source.y).attr('x2', (d) => d.target.x).attr('y2', (d) => d.target.y);
-        linkLabel.attr('x', (d) => (d.source.x + d.target.x) / 2).attr('y', (d) => (d.source.y + d.target.y) / 2);
-        node.attr('transform', d => `translate(${d.x},${d.y})`);
-        label
-            .attr('text-anchor', d => d.kind === 'person' || d.kind === 'self' ? 'middle' : d.x > width * 0.62 ? 'end' : 'start')
-            .attr('x', d => d.kind === 'person' || d.kind === 'self' ? d.x : d.x > width * 0.62 ? d.x - 17 : d.x + 17)
-            .attr('y', d => d.y + 5);
-        kindBadge.attr('x', d => d.x).attr('y', d => d.y - (d.kind === 'person' || d.kind === 'self' ? 25 : 19));
-    });
-    socialResizeObserver = new ResizeObserver(entries => {
-        const bounds = entries[0]?.contentRect;
-        if (!bounds || bounds.width < 1 || bounds.height < 1) return;
-        if (Math.abs(bounds.width - width) < 1 && Math.abs(bounds.height - height) < 1) return;
-        width = bounds.width;
-        height = bounds.height;
-        svg.attr('viewBox', [0, 0, width, height]);
-        socialSimulation.force('center', d3.forceCenter(width / 2, height / 2));
-        socialSimulation.alpha(0.28).restart();
-    });
-    socialResizeObserver.observe(container);
+function normalizeSocialKind(kind) {
+    const value = String(kind || 'other').trim().toLowerCase();
+    return SOCIAL_KIND_LABELS[value] ? value : 'other';
 }
 
 function socialNodeById(id) {
     return (socialGraphData.nodes || []).find((node) => node.id === id);
+}
+
+function socialIsPerson(node) {
+    return node?.kind === 'person' || node?.kind === 'self';
 }
 
 function socialConnectionsFor(nodeId) {
@@ -245,115 +145,372 @@ function socialConnectionsFor(nodeId) {
     return rows;
 }
 
-function socialInspectorRow(connection) {
-    const color = SOCIAL_COLORS[connection.other.kind] || SOCIAL_COLORS.other;
-    const arrow = connection.direction === 'out' ? '&rarr;' : '&larr;';
-    const relation = (connection.relation || '').replace(/_/g, ' ');
-    return `<button class="w-full text-left flex items-center gap-2 py-1 group" onclick="selectSocialNodeById('${connection.other.id.replace(/'/g, "\\'")}')">
-        <span class="w-2 h-2 rounded-full shrink-0" style="background-color: ${color}"></span>
-        <span class="text-sage-mist text-xs shrink-0">${arrow} ${relation}</span>
-        <span class="text-parchment/90 truncate group-hover:text-parchment">${escapeSocialHtml(connection.other.label)}</span>
-    </button>`;
+function socialPeopleFor(nodeId) {
+    return socialConnectionsFor(nodeId).map(row => row.other).filter(socialIsPerson);
 }
 
-function escapeSocialHtml(value) {
-    return String(value || '').replace(/[&<>'"]/g, character => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-    })[character]);
+function socialItemsForPerson(personId) {
+    return socialConnectionsFor(personId)
+        .map(row => row.other)
+        .filter(node => !socialIsPerson(node));
 }
 
-window.selectSocialNodeById = function(id) {
+function socialDegree(nodeId) {
+    return (socialGraphData.edges || []).reduce((count, edge) => count + (edge.from === nodeId || edge.to === nodeId ? 1 : 0), 0);
+}
+
+function availableSocialKinds() {
+    const present = new Set((socialGraphData.nodes || []).filter(node => !socialIsPerson(node)).map(node => normalizeSocialKind(node.kind)));
+    return SOCIAL_KIND_ORDER.filter(kind => present.has(kind));
+}
+
+function buildSocialKindFilters() {
+    const strip = document.getElementById('mind-map-kind-filters');
+    if (!strip) return;
+    const kinds = availableSocialKinds();
+    for (const selected of [...activeSocialKinds]) if (!kinds.includes(selected)) activeSocialKinds.delete(selected);
+    strip.innerHTML = `<button type="button" class="mind-map-filter" data-kind="" aria-pressed="${activeSocialKinds.size === 0}" onclick="setSocialKind('')">All</button>` +
+        kinds.map(kind => `<button type="button" class="mind-map-filter" data-kind="${kind}" aria-pressed="${activeSocialKinds.has(kind)}" onclick="setSocialKind('${kind}')"><i style="--kind-color:${SOCIAL_COLORS[kind]}"></i>${escapeSocialHtml(SOCIAL_KIND_LABELS[kind])}</button>`).join('');
+}
+
+function setSocialKind(kind) {
+    if (!kind) activeSocialKinds.clear();
+    else if (activeSocialKinds.has(kind)) activeSocialKinds.delete(kind);
+    else activeSocialKinds.add(kind);
+    expandedSocialGroups.clear();
+    buildSocialKindFilters();
+    renderSocialGraph();
+}
+
+function applySocialFilters() {
+    expandedSocialGroups.clear();
+    renderSocialGraph();
+}
+
+function resetMindMapView() {
+    const search = document.getElementById('social-search');
+    if (search) search.value = '';
+    activeSocialKinds.clear();
+    expandedSocialGroups.clear();
+    selectedSocialNodeId = null;
+    buildSocialKindFilters();
+    closeSocialInspector();
+    renderSocialGraph();
+}
+
+function socialGraphViewModel(width, height) {
+    const allNodes = socialGraphData.nodes || [];
+    const mobile = width < 640;
+    const visiblePeopleLimit = mobile ? 3 : SOCIAL_VISIBLE_PEOPLE;
+    const query = (document.getElementById('social-search')?.value || '').trim().toLowerCase();
+    const kindAllowed = node => activeSocialKinds.size === 0 || activeSocialKinds.has(normalizeSocialKind(node.kind));
+    const itemMatches = node => kindAllowed(node) && (!query || `${node.label || ''} ${node.detail || ''} ${node.kind || ''}`.toLowerCase().includes(query));
+    const people = allNodes.filter(socialIsPerson).sort((left, right) => {
+        if (left.kind === 'self') return -1;
+        if (right.kind === 'self') return 1;
+        return socialDegree(right.id) - socialDegree(left.id) || left.label.localeCompare(right.label);
+    });
+    let visiblePeople = people.filter(person => {
+        if (!query) return true;
+        if (`${person.label} ${person.detail || ''}`.toLowerCase().includes(query)) return true;
+        return socialItemsForPerson(person.id).some(itemMatches);
+    });
+    const hiddenPeople = Math.max(0, visiblePeople.length - visiblePeopleLimit);
+    if (!query) visiblePeople = visiblePeople.slice(0, visiblePeopleLimit);
+
+    const clusterSpacing = mobile ? 195 : 250;
+    const orbitRadius = mobile ? 74 : 88;
+    const worldWidth = mobile ? Math.max(430, width) : Math.max(760, width);
+    const rows = Math.ceil(visiblePeople.length / (mobile ? 1 : Math.max(2, Math.min(3, Math.floor(worldWidth / 310)))));
+    const contentHeight = mobile ? 250 + Math.max(0, rows - 1) * clusterSpacing : 170 + rows * clusterSpacing;
+    const worldHeight = Math.max(mobile ? 0 : height, contentHeight);
+    const columns = mobile ? 1 : Math.max(2, Math.min(3, Math.floor(worldWidth / 310)));
+    const visualNodes = [];
+    const visualLinks = [];
+
+    visiblePeople.forEach((person, index) => {
+        const column = mobile ? 0 : index % columns;
+        const row = mobile ? index : Math.floor(index / columns);
+        const cellWidth = worldWidth / columns;
+        const cx = mobile ? worldWidth / 2 : cellWidth * (column + 0.5);
+        const cy = mobile ? 120 + index * clusterSpacing : 125 + row * clusterSpacing;
+        const personItems = socialItemsForPerson(person.id).filter(kindAllowed);
+        const grouped = d3.group(personItems, node => normalizeSocialKind(node.kind));
+        const kinds = SOCIAL_KIND_ORDER.filter(kind => grouped.has(kind));
+        visualNodes.push({ ...person, visualKind: 'person', x: cx, y: cy, itemCount: personItems.length });
+
+        kinds.forEach((kind, kindIndex) => {
+            const items = grouped.get(kind).filter(item => !query || itemMatches(item));
+            if (query && items.length === 0) return;
+            const groupKey = `${person.id}::${kind}`;
+            const angle = kinds.length === 1 ? 0 : (-Math.PI * 0.82) + (Math.PI * 1.64 * kindIndex / Math.max(1, kinds.length - 1));
+            const gx = cx + Math.cos(angle) * orbitRadius;
+            const gy = cy + Math.sin(angle) * orbitRadius;
+            const groupNode = {
+                id: `group:${groupKey}`, label: SOCIAL_KIND_LABELS[kind], kind, visualKind: 'group',
+                personId: person.id, groupKey, items, count: items.length, x: gx, y: gy
+            };
+            visualNodes.push(groupNode);
+            visualLinks.push({ source: person.id, target: groupNode.id, kind, relation: SOCIAL_KIND_LABELS[kind] });
+
+            if (expandedSocialGroups.has(groupKey) || query) {
+                const shown = items.slice(0, query ? 12 : SOCIAL_VISIBLE_LEAVES);
+                const leafRadius = mobile ? 62 : 70;
+                shown.forEach((item, itemIndex) => {
+                    const leafAngle = (Math.PI * 2 * itemIndex / Math.max(1, shown.length)) - Math.PI / 2;
+                    const leafId = `leaf:${person.id}:${item.id}`;
+                    visualNodes.push({ ...item, id: leafId, sourceId: item.id, visualKind: 'leaf', personId: person.id, x: gx + Math.cos(leafAngle) * leafRadius, y: gy + Math.sin(leafAngle) * leafRadius });
+                    visualLinks.push({ source: groupNode.id, target: leafId, kind, relation: item.label });
+                });
+                if (items.length > shown.length) groupNode.moreCount = items.length - shown.length;
+            }
+        });
+    });
+    return { visualNodes, visualLinks, worldWidth, worldHeight, visiblePeople, hiddenPeople, query };
+}
+
+function renderSocialGraph() {
+    const container = document.getElementById('social-graph-canvas');
+    if (!container || typeof d3 === 'undefined') return;
+    socialResizeObserver?.disconnect();
+    container.innerHTML = '';
+    const width = container.clientWidth || 900;
+    const height = container.clientHeight || 640;
+    const model = socialGraphViewModel(width, height);
+    const empty = document.getElementById('empty-social-graph');
+    empty?.classList.toggle('hidden', (socialGraphData.nodes || []).length > 0);
+    if (!model.visualNodes.length) {
+        updateSocialStatus(model, 0);
+        return;
+    }
+
+    const svg = d3.select(container).append('svg')
+        .attr('width', '100%').attr('height', '100%')
+        .attr('viewBox', [0, 0, width, height])
+        .attr('aria-label', 'People connected to grouped memories');
+    const defs = svg.append('defs');
+    const glow = defs.append('filter').attr('id', 'mind-map-glow').attr('x', '-60%').attr('y', '-60%').attr('width', '220%').attr('height', '220%');
+    glow.append('feGaussianBlur').attr('stdDeviation', 5).attr('result', 'blur');
+    const merge = glow.append('feMerge'); merge.append('feMergeNode').attr('in', 'blur'); merge.append('feMergeNode').attr('in', 'SourceGraphic');
+    const g = svg.append('g');
+    socialZoom = d3.zoom().scaleExtent([0.55, 2.4]).on('zoom', event => g.attr('transform', event.transform));
+    svg.call(socialZoom).on('dblclick.zoom', null);
+
+    g.append('g').attr('class', 'mind-map-links').selectAll('path').data(model.visualLinks).join('path')
+        .attr('d', edge => {
+            const source = model.visualNodes.find(node => node.id === edge.source);
+            const target = model.visualNodes.find(node => node.id === edge.target);
+            if (!source || !target) return '';
+            const midX = (source.x + target.x) / 2;
+            return `M${source.x},${source.y} C${midX},${source.y} ${midX},${target.y} ${target.x},${target.y}`;
+        })
+        .attr('stroke', edge => SOCIAL_COLORS[edge.kind] || SOCIAL_COLORS.other)
+        .attr('data-relation', edge => edge.relation)
+        .on('pointerenter', (event, edge) => showSocialTooltip(event, edge.relation))
+        .on('pointerleave', hideSocialTooltip);
+
+    const node = g.append('g').attr('class', 'mind-map-nodes').selectAll('g').data(model.visualNodes).join('g')
+        .attr('class', node => `mind-map-node mind-map-node-${node.visualKind}${selectedSocialNodeId === (node.sourceId || node.id) ? ' is-selected' : ''}`)
+        .attr('transform', node => `translate(${node.x},${node.y})`)
+        .attr('role', 'button').attr('tabindex', 0)
+        .attr('aria-label', node => socialNodeAriaLabel(node))
+        .on('click', (event, node) => { event.stopPropagation(); activateSocialVisualNode(node); })
+        .on('keydown', (event, node) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activateSocialVisualNode(node); } })
+        .on('pointerenter', (event, node) => showSocialTooltip(event, socialNodeTooltip(node)))
+        .on('pointerleave', hideSocialTooltip);
+
+    node.filter(node => node.visualKind === 'person').append('rect')
+        .attr('x', -54).attr('y', -25).attr('width', 108).attr('height', 50).attr('rx', 25)
+        .attr('fill', '#14352E').attr('stroke', node => SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.person);
+    node.filter(node => node.visualKind === 'person').append('text').attr('class', 'mind-map-person-label').attr('y', 3).text(node => truncateSocialWords(node.label, 3));
+    node.filter(node => node.visualKind === 'person').append('text').attr('class', 'mind-map-person-count').attr('y', 42).text(node => `${node.itemCount} ${node.itemCount === 1 ? 'memory' : 'memories'}`);
+
+    node.filter(node => node.visualKind === 'group').append('rect')
+        .attr('x', -47).attr('y', -22).attr('width', 94).attr('height', 44).attr('rx', 22)
+        .attr('fill', node => d3.color(SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.other).copy({opacity: 0.15}))
+        .attr('stroke', node => SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.other);
+    node.filter(node => node.visualKind === 'group').append('circle').attr('cx', -31).attr('r', 4).attr('fill', node => SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.other);
+    node.filter(node => node.visualKind === 'group').append('text').attr('class', 'mind-map-group-label').attr('x', -21).attr('y', -3).text(node => node.label);
+    node.filter(node => node.visualKind === 'group').append('text').attr('class', 'mind-map-group-count').attr('x', -21).attr('y', 12).text(node => node.moreCount ? `${node.count} · +${node.moreCount} hidden` : `${node.count} saved`);
+
+    node.filter(node => node.visualKind === 'leaf').append('circle').attr('class', 'mind-map-leaf-hit').attr('r', 22);
+    node.filter(node => node.visualKind === 'leaf').append('circle').attr('class', 'mind-map-leaf-dot').attr('r', 7).attr('fill', node => SOCIAL_COLORS[normalizeSocialKind(node.kind)] || SOCIAL_COLORS.other);
+    node.filter(node => node.visualKind === 'leaf').append('text').attr('class', 'mind-map-leaf-label').attr('y', 25).text(node => truncateSocialWords(node.label, 4));
+
+    svg.on('click', () => { hideSocialTooltip(); });
+    updateSocialStatus(model, model.visualNodes.filter(node => node.visualKind === 'leaf').length);
+    requestAnimationFrame(() => fitSocialGraph(svg, model, width, height));
+
+    socialResizeObserver = new ResizeObserver(entries => {
+        const bounds = entries[0]?.contentRect;
+        if (!bounds || bounds.width < 1 || bounds.height < 1) return;
+        if (Math.abs(bounds.width - width) > 2 || Math.abs(bounds.height - height) > 2) renderSocialGraph();
+    });
+    socialResizeObserver.observe(container);
+}
+
+function fitSocialGraph(svg, model, width, height) {
+    if (!socialZoom) return;
+    const mobile = width < 640;
+    const sidePadding = mobile ? 18 : 64;
+    const topPadding = mobile ? 116 : 70;
+    const bottomPadding = mobile ? 48 : 54;
+    const availableHeight = Math.max(180, height - topPadding - bottomPadding);
+    const scale = Math.min(1, (width - sidePadding * 2) / model.worldWidth, availableHeight / model.worldHeight);
+    const fittedScale = Math.max(0.48, scale);
+    const x = (width - model.worldWidth * fittedScale) / 2;
+    const y = topPadding + (availableHeight - model.worldHeight * fittedScale) / 2;
+    svg.call(socialZoom.transform, d3.zoomIdentity.translate(x, y).scale(fittedScale));
+}
+
+function updateSocialStatus(model, leafCount) {
+    const status = document.getElementById('mind-map-status');
+    if (!status) return;
+    const totalMemories = (socialGraphData.nodes || []).filter(node => !socialIsPerson(node)).length;
+    const personCount = model.visiblePeople.length;
+    if (model.query) status.textContent = `${leafCount} matches across ${personCount} ${personCount === 1 ? 'person' : 'people'}`;
+    else status.textContent = `${personCount} ${personCount === 1 ? 'person' : 'people'} · ${totalMemories} memories${model.hiddenPeople ? ` · ${model.hiddenPeople} people hidden` : ''}`;
+    document.getElementById('mind-map-reset')?.classList.toggle('hidden', !model.query && activeSocialKinds.size === 0 && expandedSocialGroups.size === 0);
+}
+
+function activateSocialVisualNode(node) {
+    if (node.visualKind === 'group') {
+        if (expandedSocialGroups.has(node.groupKey)) expandedSocialGroups.delete(node.groupKey);
+        else expandedSocialGroups.add(node.groupKey);
+        selectSocialGroup(node);
+        renderSocialGraph();
+        return;
+    }
+    const sourceNode = node.visualKind === 'leaf' ? socialNodeById(node.sourceId) : socialNodeById(node.id);
+    if (sourceNode) selectSocialNode(sourceNode);
+}
+
+function selectSocialGroup(group) {
+    selectedSocialNodeId = null;
+    setSocialInspectorHeader(group.kind, `${group.label} with ${socialNodeById(group.personId)?.label || 'this person'}`, `${group.count} saved ${group.count === 1 ? 'memory' : 'memories'}`);
+    const items = group.items || [];
+    document.getElementById('social-inspector-body').innerHTML = `<div class="mind-map-memory-list">${items.map(item => socialInspectorMemoryRow(item)).join('')}</div>`;
+    openSocialInspector();
+}
+
+function selectSocialNode(node) {
+    selectedSocialNodeId = node.id;
+    setSocialInspectorHeader(node.kind, node.label, node.detail || (socialIsPerson(node) ? `${socialItemsForPerson(node.id).length} connected memories` : 'Saved memory'));
+    const connections = socialConnectionsFor(node.id);
+    const sections = [];
+    if (node.memory_kind && node.memory_id) {
+        sections.push(`<button type="button" class="memory-edit-trigger" onclick="editCurrentSocialMemory()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m4 20 4.2-1 10.5-10.5a2.1 2.1 0 0 0-3-3L5.2 16 4 20Z"/><path d="m14.5 6.5 3 3"/></svg>Edit this memory</button>`);
+    }
+    if (socialIsPerson(node)) {
+        const grouped = d3.group(socialItemsForPerson(node.id), item => normalizeSocialKind(item.kind));
+        for (const kind of SOCIAL_KIND_ORDER) {
+            const items = grouped.get(kind);
+            if (!items?.length) continue;
+            sections.push(`<section><button class="mind-map-inspector-section" onclick="openSocialGroup('${encodeURIComponent(node.id)}','${kind}')"><span><i style="--kind-color:${SOCIAL_COLORS[kind]}"></i>${escapeSocialHtml(SOCIAL_KIND_LABELS[kind])}</span><b>${items.length}</b></button></section>`);
+        }
+    } else if (connections.length) {
+        sections.push(`<section><p class="role-label mb-2">Connected to</p>${connections.map(socialInspectorConnectionRow).join('')}</section>`);
+    }
+    if (!sections.length) sections.push('<p class="text-sage-mist text-xs">No recorded connections yet. They form as you talk.</p>');
+    document.getElementById('social-inspector-body').innerHTML = sections.join('');
+    window.currentSocialGraphNode = node;
+    openSocialInspector();
+}
+
+function openSocialGroup(encodedPersonId, kind) {
+    const personId = decodeURIComponent(encodedPersonId);
+    const items = socialItemsForPerson(personId).filter(item => normalizeSocialKind(item.kind) === kind);
+    const groupKey = `${personId}::${kind}`;
+    expandedSocialGroups.add(groupKey);
+    selectSocialGroup({ personId, kind, groupKey, label: SOCIAL_KIND_LABELS[kind], count: items.length, items });
+    renderSocialGraph();
+}
+
+function setSocialInspectorHeader(kind, title, detail) {
+    const normalized = normalizeSocialKind(kind);
+    document.getElementById('social-inspector-dot').style.backgroundColor = SOCIAL_COLORS[kind] || SOCIAL_COLORS[normalized] || SOCIAL_COLORS.other;
+    document.getElementById('social-inspector-kind').textContent = kind === 'self' ? 'You' : kind;
+    document.getElementById('social-inspector-title').textContent = title;
+    document.getElementById('social-inspector-detail').textContent = detail;
+}
+
+function openSocialInspector() {
+    const inspector = document.getElementById('social-inspector');
+    inspector?.classList.add('is-open');
+    inspector?.setAttribute('aria-hidden', 'false');
+}
+
+function socialInspectorMemoryRow(node) {
+    const color = SOCIAL_COLORS[normalizeSocialKind(node.kind)] || SOCIAL_COLORS.other;
+    return `<button class="mind-map-memory-row" onclick="selectSocialNodeById('${encodeURIComponent(node.id)}')"><i style="--kind-color:${color}"></i><span>${escapeSocialHtml(node.label)}</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>`;
+}
+
+function socialInspectorConnectionRow(connection) {
+    const color = SOCIAL_COLORS[normalizeSocialKind(connection.other.kind)] || SOCIAL_COLORS[connection.other.kind] || SOCIAL_COLORS.other;
+    return `<button class="mind-map-memory-row" onclick="selectSocialNodeById('${encodeURIComponent(connection.other.id)}')"><i style="--kind-color:${color}"></i><span>${escapeSocialHtml(connection.other.label)}</span><small>${escapeSocialHtml((connection.relation || '').replace(/_/g, ' '))}</small></button>`;
+}
+
+window.selectSocialNodeById = function(encodedId) {
+    const id = decodeURIComponent(encodedId);
     const node = socialNodeById(id);
     if (node) selectSocialNode(node);
 };
-
-function selectSocialNode(node) {
-    const inspector = document.getElementById('social-inspector');
-    if (!inspector) return;
-    document.getElementById('social-inspector-dot').style.backgroundColor = SOCIAL_COLORS[node.kind] || SOCIAL_COLORS.other;
-    document.getElementById('social-inspector-kind').textContent = node.kind;
-    document.getElementById('social-inspector-title').textContent = node.label;
-    document.getElementById('social-inspector-detail').textContent = node.detail || '';
-
-    const connections = socialConnectionsFor(node.id);
-    const people = connections.filter((c) => c.other.kind === 'person' || c.other.kind === 'self');
-    const episodes = connections.filter((c) => c.other.kind === 'episode');
-    const rest = connections.filter((c) => !people.includes(c) && !episodes.includes(c));
-
-    const sections = [];
-    if (node.memory_kind && node.memory_id) {
-        sections.push(`<button type="button" class="memory-edit-trigger" onclick="editCurrentSocialMemory()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m4 20 4.2-1 10.5-10.5a2.1 2.1 0 0 0-3-3L5.2 16 4 20Z"/><path d="m14.5 6.5 3 3"/></svg>
-            Edit this memory
-        </button>`);
-    }
-    if (people.length) {
-        sections.push(`<div><p class="role-label mb-1">People</p>${people.map(socialInspectorRow).join('')}</div>`);
-    }
-    if (episodes.length) {
-        sections.push(`<div><p class="role-label mb-1">Moments</p>${episodes.map(socialInspectorRow).join('')}</div>`);
-    }
-    if (rest.length) {
-        sections.push(`<div><p class="role-label mb-1">Signals</p>${rest.map(socialInspectorRow).join('')}</div>`);
-    }
-    if (!sections.length) {
-        sections.push('<p class="text-sage-mist text-xs">No recorded connections yet. They form as you talk.</p>');
-    }
-    document.getElementById('social-inspector-body').innerHTML = sections.join('');
-    window.currentSocialGraphNode = node;
-    inspector.classList.remove('hidden');
-}
 
 window.editCurrentSocialMemory = function() {
     const node = window.currentSocialGraphNode;
     if (!node?.memory_kind || !node?.memory_id) return;
     document.getElementById('social-inspector-kind').textContent = 'Editing memory';
-    renderMemoryEditor(document.getElementById('social-inspector-body'), {
-        kind: node.memory_kind,
-        id: node.memory_id
-    }, {
+    renderMemoryEditor(document.getElementById('social-inspector-body'), { kind: node.memory_kind, id: node.memory_id }, {
         onCancel: () => selectSocialNode(node),
         onSaved: async memory => {
             const refreshed = await reloadSocialGraph();
-            if (!refreshed) throw new Error('Memory saved, but the graph could not refresh.');
-            const updated = (socialGraphData.nodes || []).find(candidate =>
-                candidate.memory_kind === memory.kind && candidate.memory_id === memory.id
-            );
-            if (updated) selectSocialNode(updated);
-            else closeSocialInspector();
+            if (!refreshed) throw new Error('Memory saved, but the map could not refresh.');
+            const updated = (socialGraphData.nodes || []).find(candidate => candidate.memory_kind === memory.kind && candidate.memory_id === memory.id);
+            if (updated) selectSocialNode(updated); else closeSocialInspector();
         }
     });
 };
 
 window.closeSocialInspector = function() {
-    document.getElementById('social-inspector')?.classList.add('hidden');
+    const inspector = document.getElementById('social-inspector');
+    inspector?.classList.remove('is-open');
+    inspector?.setAttribute('aria-hidden', 'true');
 };
 
-function setSocialKind(kind) {
-    const select = document.getElementById('social-kind-filter');
-    select.value = select.value === kind ? '' : kind;
-    applySocialFilters();
+function socialNodeAriaLabel(node) {
+    if (node.visualKind === 'person') return `${node.label}, ${node.itemCount} connected memories`;
+    if (node.visualKind === 'group') return `${node.count} ${node.label}. Activate to ${expandedSocialGroups.has(node.groupKey) ? 'collapse' : 'expand'}`;
+    return `${node.label}, ${node.kind}`;
 }
 
-function applySocialFilters() {
-    const query = (document.getElementById('social-search')?.value || '').trim().toLowerCase();
-    const kind = document.getElementById('social-kind-filter')?.value || '';
-    const matching = new Set();
-    (socialGraphData.nodes || []).forEach((node) => {
-        const text = `${node.label} ${node.kind} ${node.detail}`.toLowerCase();
-        if ((!query || text.includes(query)) && (!kind || node.kind === kind)) {
-            matching.add(node.id);
-        }
-    });
-    const svg = d3.select('#social-graph-canvas svg');
-    if (svg.empty()) return;
-    svg.selectAll('.social-node').attr('opacity', (d) => matching.has(d.id) ? 1 : 0.16);
-    svg.selectAll('text').attr('opacity', (d) => {
-        if (d.id) return matching.has(d.id) ? 1 : 0.22;
-        return matching.has(d.source.id || d.source) && matching.has(d.target.id || d.target) ? 0.85 : 0.1;
-    });
-    svg.selectAll('line').attr('opacity', (d) => matching.has(d.source.id || d.source) && matching.has(d.target.id || d.target) ? 0.72 : 0.08);
+function socialNodeTooltip(node) {
+    if (node.visualKind === 'person') return `${node.label} · ${node.itemCount} memories`;
+    if (node.visualKind === 'group') return `${node.label} · ${node.count} saved`;
+    return node.label;
 }
 
+function showSocialTooltip(event, text) {
+    const tooltip = document.getElementById('mind-map-tooltip');
+    if (!tooltip || !text) return;
+    tooltip.textContent = text;
+    tooltip.classList.remove('hidden');
+    const margin = 12;
+    const bounds = tooltip.getBoundingClientRect();
+    tooltip.style.left = `${Math.min(window.innerWidth - bounds.width - margin, Math.max(margin, event.clientX + 12))}px`;
+    tooltip.style.top = `${Math.min(window.innerHeight - bounds.height - margin, Math.max(margin, event.clientY + 12))}px`;
+}
+
+function hideSocialTooltip() {
+    document.getElementById('mind-map-tooltip')?.classList.add('hidden');
+}
+
+function truncateSocialWords(value, count) {
+    const words = String(value || '').trim().split(/\s+/);
+    return words.length > count ? `${words.slice(0, count).join(' ')}…` : words.join(' ');
+}
+
+function escapeSocialHtml(value) {
+    return String(value || '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
+}
 </script>
 {% endblock %}

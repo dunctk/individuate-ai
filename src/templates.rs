@@ -86,6 +86,8 @@ pub fn create_env() -> Environment<'static> {
         include_str!("../templates/social_graph.html"),
     )
     .unwrap();
+    env.add_template("timeline", include_str!("../templates/timeline.html"))
+        .unwrap();
     env.add_template("cycle", include_str!("../templates/cycle.html"))
         .unwrap();
     env
@@ -318,6 +320,13 @@ pub fn render_social_graph(env: &Environment, graph: &SocialGraph, user_id: &str
         .unwrap()
 }
 
+pub fn render_timeline(env: &Environment) -> String {
+    env.get_template("timeline")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +345,7 @@ mod tests {
             "chat_messages",
             "profile_drawer",
             "social_graph",
+            "timeline",
             "privacy_security",
             "cycle",
         ] {
@@ -350,6 +360,14 @@ mod tests {
         assert!(html.contains(">Mind Map</h1>"));
         assert!(!html.contains(">Social Graph</h1>"));
         assert!(html.contains("fetch('/api/mind-map')"));
+    }
+
+    #[test]
+    fn timeline_page_contains_private_controls() {
+        let html = render_timeline(&create_env());
+        assert!(html.contains("/api/timeline"));
+        assert!(html.contains("Why is this here?"));
+        assert!(html.contains("Pin event"));
     }
 
     #[test]
@@ -518,6 +536,7 @@ mod tests {
         assert!(html.contains("min-w-0 w-full items-end"));
         assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("href=\"/mind-map\""));
+        assert!(html.contains("href=\"/timeline\""));
         assert!(!html.contains("href=\"/social-graph\""));
         assert!(html.contains("copy-thread-button"));
         assert!(html.contains("<span class=\"thread-copy-label\">Copy</span>"));

@@ -4,7 +4,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use individuateai::agent::{
     self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
     is_supported_tts_voice, stream_handler, AuthSession, MemoryEdit, RelationshipProfile,
-    UsageKind, User, DEFAULT_TTS_VOICE,
+    TimelinePatch, UsageKind, User, DEFAULT_TTS_VOICE,
 };
 use individuateai::billing::{
     event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
@@ -158,6 +158,7 @@ async fn main() {
         .route("/billing/success", get(billing_success_page))
         .route("/admin", get(admin_page))
         .route("/mind-map", get(mind_map_page))
+        .route("/timeline", get(timeline_page))
         .route("/social-graph", get(social_graph_page))
         .route("/cycle", get(cycle_page))
         // Fragments
@@ -189,6 +190,13 @@ async fn main() {
         .route("/api/mind-map", get(get_social_graph))
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
+        .route("/api/timeline", get(get_timeline))
+        .route("/api/timeline/:episode_id", patch(update_timeline))
+        .route(
+            "/api/timeline/:episode_id/separate",
+            post(separate_timeline),
+        )
+        .route("/api/timeline/merge", post(merge_timeline))
         .route("/api/memory-status", get(memory_status))
         .route(
             "/api/cycle",
@@ -261,6 +269,7 @@ async fn auth_guard(
         || path == "/billing/success"
         || path == "/admin"
         || path == "/mind-map"
+        || path == "/timeline"
         || path == "/social-graph"
         || path.starts_with("/fragments")
         || path.starts_with("/api/sessions")
@@ -709,6 +718,14 @@ async fn mind_map_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         }
     };
     let html = templates::render_social_graph(&state.templates, &graph, &user.id);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn timeline_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if get_authed_user(&headers, &state.key).await.is_none() {
+        return Redirect::temporary("/login").into_response();
+    }
+    let html = templates::render_timeline(&state.templates);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -1613,6 +1630,147 @@ async fn get_episodes(State(state): State<AppState>, headers: HeaderMap) -> Resp
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_timeline(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.get_timeline(user.id).await {
+        Ok(timeline) => Json(timeline).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn update_timeline(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(episode_id): Path<String>,
+    Json(patch): Json<TimelinePatch>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.update_timeline(user.id, episode_id, patch).await {
+        Ok(Some(card)) => Json(card).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn separate_timeline(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(episode_id): Path<String>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match runtime.separate_timeline(user.id, episode_id).await {
+        Ok(true) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(false) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TimelineMergeRequest {
+    child_episode_id: String,
+    parent_episode_id: String,
+}
+
+async fn merge_timeline(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TimelineMergeRequest>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let patch = TimelinePatch {
+        parent_episode_id: Some(Some(request.parent_episode_id)),
+        ..TimelinePatch::default()
+    };
+    match runtime
+        .update_timeline(user.id, request.child_episode_id, patch)
+        .await
+    {
+        Ok(Some(card)) => Json(card).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
         )
             .into_response(),
     }

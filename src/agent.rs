@@ -256,6 +256,62 @@ pub struct EpisodeWithLinks {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeTimelineMetadata {
+    pub visibility: String,
+    pub pinned: bool,
+    pub date_precision: String,
+    pub parent_episode_id: Option<String>,
+    pub significance_signals: Vec<String>,
+    pub last_revisited_at: Option<String>,
+}
+
+impl Default for EpisodeTimelineMetadata {
+    fn default() -> Self {
+        Self {
+            visibility: "normal".to_string(),
+            pinned: false,
+            date_precision: "unknown".to_string(),
+            parent_episode_id: None,
+            significance_signals: Vec::new(),
+            last_revisited_at: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineCard {
+    pub episode: Episode,
+    pub links: Vec<MemoryLink>,
+    pub metadata: EpisodeTimelineMetadata,
+    pub promotion_reasons: Vec<String>,
+    pub developments: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineGroup {
+    pub label: String,
+    pub cards: Vec<TimelineCard>,
+    pub collapsed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimelineResponse {
+    pub groups: Vec<TimelineGroup>,
+    pub hidden_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct TimelinePatch {
+    pub pinned: Option<bool>,
+    pub visibility: Option<String>,
+    pub date_precision: Option<String>,
+    pub parent_episode_id: Option<Option<String>>,
+    pub title: Option<String>,
+    pub narrative: Option<String>,
+    pub occurred_at: Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditableMemory {
     pub kind: String,
     pub id: String,
@@ -277,11 +333,141 @@ fn default_memory_link_weight() -> usize {
     1
 }
 
+fn infer_date_precision(value: Option<&str>) -> String {
+    let value = value.unwrap_or_default().trim();
+    if value.is_empty() {
+        return "unknown".to_string();
+    }
+    if value.len() >= 10
+        && value.as_bytes().get(4) == Some(&b'-')
+        && value.as_bytes().get(7) == Some(&b'-')
+    {
+        return "day".to_string();
+    }
+    if value.len() >= 7 && value.as_bytes().get(4) == Some(&b'-') {
+        return "month".to_string();
+    }
+    let lower = value.to_ascii_lowercase();
+    if ["spring", "summer", "autumn", "fall", "winter"]
+        .iter()
+        .any(|season| lower.contains(season))
+    {
+        return "season".to_string();
+    }
+    if value.chars().any(|character| character.is_ascii_digit()) {
+        return "year".to_string();
+    }
+    "unknown".to_string()
+}
+
+fn timeline_signals(episode: &Episode, link_count: usize) -> Vec<String> {
+    let text = format!("{} {}", episode.title, episode.narrative).to_ascii_lowercase();
+    let mut signals = Vec::new();
+    if [
+        "chapter",
+        "turning point",
+        "began",
+        "started",
+        "ended",
+        "moved",
+        "graduat",
+        "new job",
+        "left",
+        "decided",
+        "breakup",
+        "recovered",
+        "birth",
+        "died",
+    ]
+    .iter()
+    .any(|term| text.contains(term))
+    {
+        signals.push("lasting change or chapter boundary".to_string());
+    }
+    if episode.updated_at.is_some() && episode.created_at != episode.updated_at {
+        signals.push("revisited in a later conversation".to_string());
+    }
+    if link_count >= 2 {
+        signals.push("connected to several people or concepts".to_string());
+    }
+    signals
+}
+
+fn promotion_reasons(
+    metadata: &EpisodeTimelineMetadata,
+    signals: &[String],
+    link_count: usize,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if metadata.pinned {
+        reasons.push("you pinned it".to_string());
+    }
+    if metadata.visibility == "landmark" {
+        reasons.push("you marked it as a landmark".to_string());
+    }
+    reasons.extend(signals.iter().cloned());
+    if reasons.is_empty() && link_count >= 2 {
+        reasons.push("connected to several memories".to_string());
+    }
+    reasons
+}
+
+fn timeline_group_label(episode: &Episode, metadata: &EpisodeTimelineMetadata) -> String {
+    let date = episode
+        .occurred_at
+        .as_deref()
+        .unwrap_or(episode.created_at.as_deref().unwrap_or(""));
+    if date.is_empty() {
+        return "Undated landmarks".to_string();
+    }
+    match metadata.date_precision.as_str() {
+        "day" => date.get(..10).unwrap_or(date).to_string(),
+        "month" => format!("Around {}", friendly_month(date.get(..7).unwrap_or(date))),
+        "season" => date.to_string(),
+        "year" => format!("Around {}", date.chars().take(4).collect::<String>()),
+        _ => "Approximate date".to_string(),
+    }
+}
+
+fn friendly_month(value: &str) -> String {
+    let parts = value.split('-').collect::<Vec<_>>();
+    let [year, month] = parts.as_slice() else {
+        return value.to_string();
+    };
+    let name = match *month {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return value.to_string(),
+    };
+    format!("{name} {year}")
+}
+
+fn timeline_sort_key(card: &TimelineCard) -> String {
+    card.episode
+        .occurred_at
+        .clone()
+        .or(card.episode.updated_at.clone())
+        .or(card.episode.created_at.clone())
+        .unwrap_or_default()
+}
+
 mod runtime {
     use super::{
-        AdminUserAccess, BillingAccount, ChatLog, EditableMemory, Episode, EpisodeWithLinks,
-        GraphEdge, GraphNode, MemoryEdit, MemoryLink, MemoryStatus, PatientGraph,
-        RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode, UsageKind,
+        infer_date_precision, promotion_reasons, timeline_group_label, timeline_signals,
+        timeline_sort_key, AdminUserAccess, BillingAccount, ChatLog, EditableMemory, Episode,
+        EpisodeTimelineMetadata, EpisodeWithLinks, GraphEdge, GraphNode, MemoryEdit, MemoryLink,
+        MemoryStatus, PatientGraph, RelationshipProfile, Session, SocialGraph, SocialGraphEdge,
+        SocialGraphNode, TimelineCard, TimelineGroup, TimelinePatch, TimelineResponse, UsageKind,
         User,
     };
     use crate::{
@@ -1169,6 +1355,22 @@ mod runtime {
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (user_id, from_kind, from_id, relation, to_kind, to_id)
                 );
+                CREATE TABLE IF NOT EXISTS episode_timeline_metadata (
+                    user_id TEXT NOT NULL,
+                    episode_id TEXT NOT NULL,
+                    visibility TEXT NOT NULL DEFAULT 'normal',
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    date_precision TEXT NOT NULL DEFAULT 'unknown',
+                    parent_episode_id TEXT,
+                    significance_signals_ciphertext BLOB,
+                    last_revisited_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, episode_id),
+                    FOREIGN KEY(user_id, episode_id) REFERENCES episodes(user_id, id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_episode_timeline_user
+                    ON episode_timeline_metadata(user_id, visibility, pinned);
                 CREATE TABLE IF NOT EXISTS passkeys (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
@@ -1300,6 +1502,7 @@ mod runtime {
                 ("episodes", "narrative_ciphertext", "BLOB"),
                 ("episodes", "user_quotes_ciphertext", "BLOB"),
                 ("memory_links", "evidence_ciphertext", "BLOB"),
+                ("episode_timeline_metadata", "significance_signals_ciphertext", "BLOB"),
             ] {
                 if table_exists(conn, table).map_err(tokio_rusqlite::Error::Rusqlite)?
                     && !table_has_column(conn, table, column)
@@ -7985,6 +8188,212 @@ mod runtime {
                     EpisodeWithLinks { episode, links }
                 })
                 .collect())
+        }
+
+        pub async fn get_timeline(&self, user_id: String) -> Result<TimelineResponse> {
+            let episodes = self.get_episodes_with_links(user_id.clone()).await?;
+            let metadata = self.list_timeline_metadata(user_id.clone()).await?;
+            let mut cards = Vec::new();
+            let mut hidden_count = 0;
+            let mut by_id = HashMap::new();
+            for item in episodes {
+                by_id.insert(normalize_slug(&item.episode.id), item);
+            }
+            for (id, item) in by_id.clone() {
+                let mut meta = metadata.get(&id).cloned().unwrap_or_default();
+                if meta.parent_episode_id.is_some() {
+                    continue;
+                }
+                let signals = timeline_signals(&item.episode, item.links.len());
+                if meta.significance_signals.is_empty() && !signals.is_empty() {
+                    meta.significance_signals = signals.clone();
+                    self.save_timeline_metadata(&user_id, &id, &meta).await?;
+                }
+                if meta.visibility == "hidden" {
+                    hidden_count += 1;
+                    continue;
+                }
+                let reasons = promotion_reasons(&meta, &signals, item.links.len());
+                if reasons.is_empty() && !meta.pinned && meta.visibility != "landmark" {
+                    continue;
+                }
+                if meta.date_precision == "unknown" {
+                    meta.date_precision = infer_date_precision(item.episode.occurred_at.as_deref());
+                }
+                let developments = by_id
+                    .values()
+                    .filter(|child| {
+                        child.episode.id != item.episode.id
+                            && metadata
+                                .get(&normalize_slug(&child.episode.id))
+                                .and_then(|child_meta| child_meta.parent_episode_id.as_deref())
+                                == Some(item.episode.id.as_str())
+                    })
+                    .map(|child| child.episode.title.clone())
+                    .collect();
+                cards.push(TimelineCard {
+                    episode: item.episode,
+                    links: item.links,
+                    metadata: meta,
+                    promotion_reasons: reasons,
+                    developments,
+                });
+            }
+            cards.sort_by_key(|card| std::cmp::Reverse(timeline_sort_key(card)));
+            let mut groups: Vec<TimelineGroup> = Vec::new();
+            for card in cards {
+                let label = timeline_group_label(&card.episode, &card.metadata);
+                if let Some(group) = groups.iter_mut().find(|group| group.label == label) {
+                    group.cards.push(card);
+                } else {
+                    groups.push(TimelineGroup {
+                        label,
+                        cards: vec![card],
+                        collapsed: false,
+                    });
+                }
+            }
+            for group in &mut groups {
+                group.collapsed = group.cards.len() > 5;
+            }
+            Ok(TimelineResponse {
+                groups,
+                hidden_count,
+            })
+        }
+
+        async fn list_timeline_metadata(
+            &self,
+            user_id: String,
+        ) -> Result<HashMap<String, EpisodeTimelineMetadata>> {
+            let dek = self.active_dek(&user_id)?;
+            self.conn.call(move |conn| {
+                let mut stmt = conn.prepare("SELECT episode_id, visibility, pinned, date_precision, parent_episode_id, significance_signals_ciphertext, last_revisited_at FROM episode_timeline_metadata WHERE user_id = ?1")?;
+                let rows = stmt.query_map([user_id.clone()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<Vec<u8>>>(5)?, row.get::<_, Option<String>>(6)?)))?;
+                let mut result = HashMap::new();
+                for row in rows {
+                    let (id, visibility, pinned, precision, parent, encrypted, revisited) = row?;
+                    let signals = encrypted.map(|value| security::decrypt(&dek, &value, format!("episode_timeline_metadata:{}:{}:signals", user_id, id).as_bytes()).map_err(|_| rusqlite::Error::InvalidQuery)).transpose()?.and_then(|value| serde_json::from_slice(&value).ok()).unwrap_or_default();
+                    result.insert(id, EpisodeTimelineMetadata { visibility, pinned: pinned != 0, date_precision: precision, parent_episode_id: parent, significance_signals: signals, last_revisited_at: revisited });
+                }
+                Ok(result)
+            }).await.context("Listing timeline metadata")
+        }
+
+        async fn save_timeline_metadata(
+            &self,
+            user_id: &str,
+            episode_id: &str,
+            metadata: &EpisodeTimelineMetadata,
+        ) -> Result<()> {
+            let dek = self.active_dek(user_id)?;
+            let uid = user_id.to_string();
+            let id = normalize_slug(episode_id);
+            let signals = security::encrypt(
+                &dek,
+                &serde_json::to_vec(&metadata.significance_signals)?,
+                format!("episode_timeline_metadata:{}:{}:signals", uid, id).as_bytes(),
+            )?;
+            let metadata = metadata.clone();
+            self.conn.call(move |conn| {
+                conn.execute("INSERT INTO episode_timeline_metadata (user_id, episode_id, visibility, pinned, date_precision, parent_episode_id, significance_signals_ciphertext, last_revisited_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(user_id, episode_id) DO UPDATE SET visibility = excluded.visibility, pinned = excluded.pinned, date_precision = excluded.date_precision, parent_episode_id = excluded.parent_episode_id, significance_signals_ciphertext = excluded.significance_signals_ciphertext, last_revisited_at = excluded.last_revisited_at, updated_at = CURRENT_TIMESTAMP", rusqlite::params![uid, id, metadata.visibility, metadata.pinned as i64, metadata.date_precision, metadata.parent_episode_id, signals, metadata.last_revisited_at]).map_err(tokio_rusqlite::Error::Rusqlite)
+            }).await.context("Saving timeline metadata").map(|_| ())
+        }
+
+        pub async fn update_timeline(
+            &self,
+            user_id: String,
+            episode_id: String,
+            patch: TimelinePatch,
+        ) -> Result<Option<TimelineCard>> {
+            let id = normalize_slug(&episode_id);
+            let Some(mut item) = self
+                .get_episodes_with_links(user_id.clone())
+                .await?
+                .into_iter()
+                .find(|item| normalize_slug(&item.episode.id) == id)
+            else {
+                return Ok(None);
+            };
+            if patch.title.is_some() || patch.narrative.is_some() || patch.occurred_at.is_some() {
+                let edit = MemoryEdit {
+                    title: patch.title.unwrap_or_else(|| item.episode.title.clone()),
+                    category: None,
+                    body: Some(
+                        patch
+                            .narrative
+                            .unwrap_or_else(|| item.episode.narrative.clone()),
+                    ),
+                    occurred_at: patch
+                        .occurred_at
+                        .unwrap_or_else(|| item.episode.occurred_at.clone()),
+                };
+                self.update_editable_memory(
+                    user_id.clone(),
+                    "episode".to_string(),
+                    id.clone(),
+                    edit,
+                )
+                .await?;
+                item = self
+                    .get_episodes_with_links(user_id.clone())
+                    .await?
+                    .into_iter()
+                    .find(|item| normalize_slug(&item.episode.id) == id)
+                    .unwrap();
+            }
+            let mut meta = self
+                .list_timeline_metadata(user_id.clone())
+                .await?
+                .remove(&id)
+                .unwrap_or_default();
+            if let Some(value) = patch.pinned {
+                meta.pinned = value;
+            }
+            if let Some(value) = patch.visibility {
+                if !matches!(value.as_str(), "normal" | "landmark" | "hidden") {
+                    anyhow::bail!("Unsupported timeline visibility");
+                }
+                meta.visibility = value;
+            }
+            if let Some(value) = patch.date_precision {
+                if !matches!(
+                    value.as_str(),
+                    "day" | "month" | "season" | "year" | "unknown"
+                ) {
+                    anyhow::bail!("Unsupported date precision");
+                }
+                meta.date_precision = value;
+            }
+            if let Some(value) = patch.parent_episode_id {
+                meta.parent_episode_id = value.map(|value| normalize_slug(&value));
+            }
+            if meta.significance_signals.is_empty() {
+                meta.significance_signals = timeline_signals(&item.episode, item.links.len());
+            }
+            self.save_timeline_metadata(&user_id, &id, &meta).await?;
+            let link_count = item.links.len();
+            Ok(Some(TimelineCard {
+                episode: item.episode,
+                links: item.links,
+                promotion_reasons: promotion_reasons(&meta, &meta.significance_signals, link_count),
+                metadata: meta,
+                developments: Vec::new(),
+            }))
+        }
+
+        pub async fn separate_timeline(&self, user_id: String, episode_id: String) -> Result<bool> {
+            let id = normalize_slug(&episode_id);
+            let Some(mut meta) = self
+                .list_timeline_metadata(user_id.clone())
+                .await?
+                .remove(&id)
+            else {
+                return Ok(false);
+            };
+            meta.parent_episode_id = None;
+            self.save_timeline_metadata(&user_id, &id, &meta).await?;
+            Ok(true)
         }
 
         pub async fn get_editable_memory(

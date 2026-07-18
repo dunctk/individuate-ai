@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="min-h-screen bg-[#0F1C18] text-parchment">
+    <header class="glass flex items-center justify-between gap-3 px-4 py-3 border-b border-sage-mist/20 sticky top-0 z-20">
+        <div class="flex items-center gap-3 min-w-0">
+            <a href="/chat" class="icon-btn shrink-0" aria-label="Back to chat">←</a>
+            <div class="min-w-0"><p class="role-label">A gentle record of change</p><h1 class="text-lg sm:text-xl font-fraunces font-bold truncate">Life timeline</h1></div>
+        </div>
+        <a href="/mind-map" class="pill no-underline text-inherit">Mind Map</a>
+    </header>
+    <main class="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+        <div class="mb-8">
+            <p class="text-sage-mist text-sm leading-6 max-w-xl">Only meaningful landmarks appear here. Everyday memories remain private and searchable, even when they are not shown on the timeline.</p>
+            <p id="timeline-status" class="text-xs text-sage-mist/70 mt-3" role="status" aria-live="polite">Loading your timeline…</p>
+        </div>
+        <div id="timeline-groups" class="relative pl-6 sm:pl-8" aria-live="polite"></div>
+        <div id="timeline-empty" class="hidden glass rounded-pebble-xs p-6 text-center text-sm text-sage-mist">No landmarks yet. When a concrete memory becomes important, you can pin it here.</div>
+    </main>
+</div>
+<script>
+const timelineRoot = document.getElementById('timeline-groups');
+const timelineStatus = document.getElementById('timeline-status');
+const timelineEmpty = document.getElementById('timeline-empty');
+let timelineCards = [];
+const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+function dateLabel(card) {
+    const value = card.episode.occurred_at || card.episode.created_at;
+    if (!value) return 'Date not recorded';
+    if (card.metadata.date_precision === 'day') return value.slice(0, 10);
+    if (card.metadata.date_precision === 'month') return 'Around ' + new Intl.DateTimeFormat(undefined, {month:'long', year:'numeric'}).format(new Date(value.slice(0, 7) + '-01T00:00:00Z'));
+    if (card.metadata.date_precision === 'year') return 'Around ' + value.slice(0, 4);
+    return value;
+}
+function cardHtml(card) {
+    const reasons = (card.promotion_reasons || []).map(reason => `<li>${esc(reason)}</li>`).join('');
+    const links = (card.links || []).filter(link => link.to_kind !== 'episode').slice(0, 5).map(link => `<span class="timeline-chip">${esc(link.to_id.replaceAll('_', ' '))}</span>`).join('');
+    const developments = (card.developments || []).map(item => `<li>${esc(item)}</li>`).join('');
+    return `<article class="timeline-card glass rounded-pebble-xs p-4 sm:p-5" data-id="${esc(card.episode.id)}">
+        <div class="flex items-start justify-between gap-3"><div><p class="role-label">${esc(dateLabel(card))}</p><h3 class="font-fraunces text-xl text-parchment leading-tight mt-1">${esc(card.episode.title)}</h3></div><button class="timeline-pin ${card.metadata.pinned ? 'is-pinned' : ''}" aria-label="${card.metadata.pinned ? 'Unpin event' : 'Pin event'}" onclick="togglePin('${esc(card.episode.id)}', ${!card.metadata.pinned})">${card.metadata.pinned ? '★' : '☆'}</button></div>
+        <p class="text-sm text-parchment/85 leading-6 mt-3">${esc(card.episode.narrative)}</p>
+        ${links ? `<div class="flex flex-wrap gap-2 mt-4">${links}</div>` : ''}
+        <details class="mt-4"><summary class="min-h-11 inline-flex items-center cursor-pointer text-xs text-sage-mist hover:text-parchment">Why is this here?</summary><ul class="text-xs text-sage-mist leading-5 list-disc pl-5 mt-2">${reasons || '<li>You chose to keep this landmark visible.</li>'}</ul>${developments ? `<p class="role-label mt-4">Later developments</p><ul class="text-xs text-sage-mist leading-5 list-disc pl-5 mt-2">${developments}</ul>` : ''}</details>
+        <div class="flex flex-wrap gap-2 mt-3"><button class="timeline-action" onclick="editTimeline('${esc(card.episode.id)}')">Edit</button><button class="timeline-action" onclick="mergeTimeline('${esc(card.episode.id)}')">Group with…</button><button class="timeline-action" onclick="hideTimeline('${esc(card.episode.id)}')">Hide from timeline</button><button class="timeline-action" onclick="separateTimeline('${esc(card.episode.id)}')">Separate</button></div>
+    </article>`;
+}
+function renderTimeline(data) {
+    timelineCards = (data.groups || []).flatMap(group => group.cards || []);
+    timelineRoot.innerHTML = (data.groups || []).map(group => `<section class="timeline-group ${group.collapsed ? 'is-collapsed' : ''}"><h2 class="timeline-group-label">${esc(group.label)} <span>${group.cards.length}</span></h2><div class="space-y-4">${group.cards.map(cardHtml).join('')}</div>${group.collapsed ? '<button class="timeline-expand" onclick="this.parentElement.classList.remove(\'is-collapsed\')">Show dense period</button>' : ''}</section>`).join('');
+    timelineEmpty.classList.toggle('hidden', Boolean(data.groups?.length));
+    timelineStatus.textContent = data.hidden_count ? `${data.hidden_count} memory${data.hidden_count === 1 ? '' : 'ies'} hidden from the timeline, still available to recall.` : 'Your timeline is private to you.';
+}
+async function loadTimeline() { const response = await fetch('/api/timeline', {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not load timeline'); renderTimeline(data); }
+async function updateTimeline(id, body) { const response = await fetch('/api/timeline/' + encodeURIComponent(id), {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)}); if (!response.ok) throw new Error('Could not update timeline'); await loadTimeline(); }
+async function togglePin(id, pinned) { await updateTimeline(id, {pinned}); }
+async function hideTimeline(id) { if (confirm('Hide this from the timeline? It will remain in private memory recall.')) await updateTimeline(id, {visibility:'hidden'}); }
+async function separateTimeline(id) { await fetch('/api/timeline/' + encodeURIComponent(id) + '/separate', {method:'POST'}); await loadTimeline(); }
+async function mergeTimeline(childId) { const choices = timelineCards.filter(card => card.episode.id !== childId); if (!choices.length) return; const choice = prompt('Group this development beneath which event?\n\n' + choices.map((card, index) => `${index + 1}. ${card.episode.title}`).join('\n')); const index = Number(choice) - 1; if (!Number.isInteger(index) || !choices[index]) return; await fetch('/api/timeline/merge', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({child_episode_id:childId, parent_episode_id:choices[index].episode.id})}); await loadTimeline(); }
+async function editTimeline(id) { const card = timelineCards.find(item => item.episode.id === id); const title = prompt('Title', card?.episode.title || ''); if (!title) return; const narrative = prompt('What happened', card?.episode.narrative || ''); if (narrative === null) return; const occurredAt = prompt('Date or honest range (optional)', card?.episode.occurred_at || ''); await updateTimeline(id, {title, narrative, occurred_at: occurredAt ? occurredAt : null}); }
+loadTimeline().catch(error => { timelineStatus.textContent = error.message; });
+</script>
+{% endblock %}

@@ -2,6 +2,25 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .timeline-group { position: relative; padding-bottom: 2rem; }
+  .timeline-group::before { content: ''; position: absolute; left: -1.5rem; top: 2.3rem; bottom: 0; width: 1px; background: rgba(184, 201, 193, .28); }
+  .timeline-group-label { margin: 0 0 1rem -1.5rem; color: #B8C9C1; font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  .timeline-group-label::before { content: ''; display: inline-block; width: .65rem; height: .65rem; margin-right: .55rem; border: 2px solid #8DE0D1; border-radius: 999px; background: #0F1C18; }
+  .timeline-group-label span { opacity: .55; }
+  .timeline-card { position: relative; }
+  .timeline-card::before { content: ''; position: absolute; left: -2rem; top: 1.7rem; width: .55rem; height: .55rem; border-radius: 999px; background: #D98C6A; box-shadow: 0 0 0 4px #0F1C18; }
+  .timeline-pin, .timeline-action, .timeline-expand { min-width: 44px; min-height: 44px; border-radius: 999px; color: #B8C9C1; transition: color .2s, background .2s; }
+  .timeline-pin { font-size: 1.5rem; line-height: 1; }
+  .timeline-pin:hover, .timeline-pin.is-pinned { color: #F2D88A; background: rgba(242, 216, 138, .1); }
+  .timeline-action { min-height: 44px; padding: .5rem .7rem; font-size: .72rem; }
+  .timeline-action:hover, .timeline-expand:hover { color: #F2F0E9; background: rgba(184, 201, 193, .1); }
+  .timeline-chip { padding: .25rem .55rem; border: 1px solid rgba(141, 224, 209, .28); border-radius: 999px; color: #8DE0D1; font-size: .7rem; }
+  .timeline-group.is-collapsed .timeline-card:nth-child(n+4) { display: none; }
+  .timeline-expand { margin-top: 1rem; padding: .5rem .8rem; border: 1px solid rgba(184, 201, 193, .2); }
+  @media (prefers-reduced-motion: reduce) { .timeline-pin, .timeline-action, .timeline-expand { transition: none; } }
+}
+
 @layer base {
     :root {
         color-scheme: dark;

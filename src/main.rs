@@ -160,6 +160,7 @@ async fn main() {
         .route("/admin", get(admin_page))
         .route("/mind-map", get(mind_map_page))
         .route("/timeline", get(timeline_page))
+        .route("/inner-work", get(inner_work_timeline_page))
         .route("/import", get(import_page))
         .route("/social-graph", get(social_graph_page))
         .route("/cycle", get(cycle_page))
@@ -193,6 +194,10 @@ async fn main() {
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
         .route("/api/timeline", get(get_timeline))
+        .route(
+            "/api/inner-work-timeline",
+            post(generate_inner_work_timeline),
+        )
         .route(
             "/api/import/gemini",
             post(import_gemini).layer(DefaultBodyLimit::max(25 * 1024 * 1024)),
@@ -278,6 +283,7 @@ async fn auth_guard(
         || path == "/admin"
         || path == "/mind-map"
         || path == "/timeline"
+        || path == "/inner-work"
         || path == "/import"
         || path == "/social-graph"
         || path.starts_with("/fragments")
@@ -747,6 +753,14 @@ async fn timeline_page(State(state): State<AppState>, headers: HeaderMap) -> Res
         return Redirect::temporary("/login").into_response();
     }
     let html = templates::render_timeline(&state.templates);
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+}
+
+async fn inner_work_timeline_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if get_authed_user(&headers, &state.key).await.is_none() {
+        return Redirect::temporary("/login").into_response();
+    }
+    let html = templates::render_inner_work_timeline(&state.templates);
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
@@ -1708,6 +1722,74 @@ async fn get_timeline(State(state): State<AppState>, headers: HeaderMap) -> Resp
             Json(serde_json::json!({"error": error.to_string()})),
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct GenerateInnerWorkTimelinePayload {
+    #[serde(default = "default_inner_work_range")]
+    range: String,
+}
+
+fn default_inner_work_range() -> String {
+    "all".to_string()
+}
+
+async fn generate_inner_work_timeline(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<GenerateInnerWorkTimelinePayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error":"Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    if !matches!(
+        payload.range.as_str(),
+        "all" | "year" | "90_days" | "30_days"
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"Unsupported timeline range"})),
+        )
+            .into_response();
+    }
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match runtime
+        .generate_inner_work_timeline(user.id, payload.range)
+        .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) if error.to_string().contains("No reflections were found") => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("Could not generate inner-work timeline: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error":"Could not generate the timeline. Your reflections are unchanged."
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

@@ -88,6 +88,11 @@ pub fn create_env() -> Environment<'static> {
     .unwrap();
     env.add_template("timeline", include_str!("../templates/timeline.html"))
         .unwrap();
+    env.add_template(
+        "inner_work_timeline",
+        include_str!("../templates/inner_work_timeline.html"),
+    )
+    .unwrap();
     env.add_template("import", include_str!("../templates/import.html"))
         .unwrap();
     env.add_template("cycle", include_str!("../templates/cycle.html"))
@@ -329,6 +334,13 @@ pub fn render_timeline(env: &Environment) -> String {
         .unwrap()
 }
 
+pub fn render_inner_work_timeline(env: &Environment) -> String {
+    env.get_template("inner_work_timeline")
+        .unwrap()
+        .render(json!({}))
+        .unwrap()
+}
+
 pub fn render_import(env: &Environment) -> String {
     env.get_template("import")
         .unwrap()
@@ -355,6 +367,7 @@ mod tests {
             "profile_drawer",
             "social_graph",
             "timeline",
+            "inner_work_timeline",
             "import",
             "privacy_security",
             "cycle",
@@ -385,6 +398,15 @@ mod tests {
     }
 
     #[test]
+    fn inner_work_timeline_is_opt_in_and_time_scoped() {
+        let html = render_inner_work_timeline(&create_env());
+        assert!(html.contains("/api/inner-work-timeline"));
+        assert!(html.contains("All time"));
+        assert!(html.contains("Generate timeline"));
+        assert!(html.contains("your own reflection messages"));
+    }
+
+    #[test]
     fn import_page_explains_user_only_memory_extraction() {
         let html = render_import(&create_env());
         assert!(html.contains("only your own messages are sent to memory extraction"));
@@ -400,7 +422,7 @@ mod tests {
             .unwrap();
         assert!(html.contains("/manifest.webmanifest"));
         assert!(html.contains("apple-mobile-web-app-capable"));
-        assert!(html.contains("individuateai.css?v=20260718-mind-map"));
+        assert!(html.contains("individuateai.css?v=20260721-inner-work"));
         assert!(html.contains("apple-touch-icon.png"));
         assert!(html.contains("navigator.serviceWorker.register('/service-worker.js'"));
     }

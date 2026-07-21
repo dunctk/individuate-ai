@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Inner work timeline · IndividuateAI{% endblock %}
+{% block content %}
+<div class="inner-work-shell min-h-screen">
+    <header class="inner-work-topbar">
+        <a href="/chat" class="inner-work-back" aria-label="Back to chat">← <span>Chat</span></a>
+        <div class="min-w-0 text-center">
+            <p class="role-label">Private reflective synthesis</p>
+            <h1>Inner work timeline</h1>
+        </div>
+        <a href="/timeline" class="inner-work-life-link">Life timeline</a>
+    </header>
+
+    <main class="inner-work-main">
+        <section class="inner-work-intro" aria-labelledby="inner-work-intro-title">
+            <p class="role-label">Look back with context</p>
+            <h2 id="inner-work-intro-title">See the work you have been doing</h2>
+            <p>This creates an AI-generated account from your own reflection messages: what you explored, practices you tried, shifts you described, and what remained unfinished.</p>
+            <div class="inner-work-controls">
+                <label for="inner-work-range">
+                    <span>Timescale</span>
+                    <select id="inner-work-range" class="field">
+                        <option value="all">All time</option>
+                        <option value="year">Past year</option>
+                        <option value="90_days">Past 90 days</option>
+                        <option value="30_days">Past 30 days</option>
+                    </select>
+                </label>
+                <button id="inner-work-generate" type="button" onclick="generateInnerWorkTimeline()">Generate timeline</button>
+            </div>
+            <p class="inner-work-privacy">Nothing is generated until you ask. Your selected reflections are sent to the app's configured AI provider with no-retention routing requested by default. The report is not saved automatically or treated as a diagnosis or objective truth.</p>
+            <p id="inner-work-status" class="inner-work-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section id="inner-work-report" class="inner-work-report hidden" aria-live="polite" aria-busy="false">
+            <header class="inner-work-report-head">
+                <div>
+                    <p class="role-label">Generated reflection</p>
+                    <h2>Your arc of inner work</h2>
+                </div>
+                <p id="inner-work-coverage"></p>
+            </header>
+            <div id="inner-work-overview" class="inner-work-overview"></div>
+            <section aria-labelledby="inner-work-themes-title">
+                <h3 id="inner-work-themes-title">Themes across time</h3>
+                <div id="inner-work-themes" class="inner-work-themes"></div>
+            </section>
+            <section aria-labelledby="inner-work-periods-title">
+                <h3 id="inner-work-periods-title">Chronological record</h3>
+                <div id="inner-work-periods" class="inner-work-periods"></div>
+            </section>
+            <details id="inner-work-limitations" class="inner-work-limitations">
+                <summary>Limits of this synthesis</summary>
+                <ul></ul>
+            </details>
+        </section>
+    </main>
+</div>
+
+<script>
+const innerWorkEsc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const innerWorkList = (items, emptyCopy = '') => Array.isArray(items) && items.length
+    ? `<ul>${items.map(item => `<li>${innerWorkEsc(item)}</li>`).join('')}</ul>`
+    : (emptyCopy ? `<p class="inner-work-none">${innerWorkEsc(emptyCopy)}</p>` : '');
+
+function innerWorkDate(value) {
+    if (!value) return 'date unavailable';
+    const date = new Date(value.replace(' ', 'T') + (value.includes('Z') ? '' : 'Z'));
+    return Number.isNaN(date.getTime()) ? value.slice(0, 10) : new Intl.DateTimeFormat(undefined, {day:'numeric', month:'short', year:'numeric'}).format(date);
+}
+
+function renderInnerWorkReport(report) {
+    const root = document.getElementById('inner-work-report');
+    document.getElementById('inner-work-coverage').textContent = `${report.range_label} · ${report.source_reflection_count} reflections across ${report.source_session_count} sessions · ${innerWorkDate(report.coverage_start)}–${innerWorkDate(report.coverage_end)}`;
+    document.getElementById('inner-work-overview').innerHTML = `<p>${innerWorkEsc(report.overview)}</p><small>Generated ${innerWorkDate(report.generated_at)}. Review this as a fallible reflection, not a verdict.</small>`;
+    document.getElementById('inner-work-themes').innerHTML = (report.themes || []).map(theme => `<article><h4>${innerWorkEsc(theme.name)}</h4><p>${innerWorkEsc(theme.evolution)}</p></article>`).join('') || '<p class="inner-work-none">No recurring theme was clear enough to name.</p>';
+    document.getElementById('inner-work-periods').innerHTML = (report.timeline || []).map(entry => `<article class="inner-work-period">
+        <div class="inner-work-period-marker" aria-hidden="true"></div>
+        <div class="inner-work-period-body">
+            <p class="role-label">${innerWorkEsc(entry.period_label || [entry.period_start, entry.period_end].filter(Boolean).join('–') || 'Date uncertain')}</p>
+            <h4>${innerWorkEsc(entry.title)}</h4>
+            <p>${innerWorkEsc(entry.work_explored)}</p>
+            ${entry.practices?.length ? `<section><strong>Practices tried</strong>${innerWorkList(entry.practices)}</section>` : ''}
+            ${entry.shifts?.length ? `<section><strong>Shifts you described</strong>${innerWorkList(entry.shifts)}</section>` : ''}
+            ${entry.continuing_edges?.length ? `<section><strong>Still unfolding</strong>${innerWorkList(entry.continuing_edges)}</section>` : ''}
+            ${entry.source_dates?.length ? `<small>Grounded in reflections from ${entry.source_dates.map(innerWorkDate).join(', ')}</small>` : ''}
+        </div>
+    </article>`).join('') || '<p class="inner-work-none">There was not enough dated material to build a chronological record.</p>';
+    const limitations = report.limitations?.length ? report.limitations : ['This synthesis can only reflect what you wrote in the selected period.', 'Dates usually show when you wrote a reflection, not necessarily when an event happened.'];
+    document.querySelector('#inner-work-limitations ul').innerHTML = limitations.map(item => `<li>${innerWorkEsc(item)}</li>`).join('');
+    root.classList.remove('hidden');
+    root.setAttribute('aria-busy', 'false');
+    root.scrollIntoView({behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start'});
+}
+
+async function generateInnerWorkTimeline() {
+    const button = document.getElementById('inner-work-generate');
+    const status = document.getElementById('inner-work-status');
+    const report = document.getElementById('inner-work-report');
+    button.disabled = true;
+    button.textContent = 'Building your timeline…';
+    status.textContent = 'Reading the selected reflections and organizing them across time. A long history can take a minute.';
+    report.setAttribute('aria-busy', 'true');
+    try {
+        const response = await fetch('/api/inner-work-timeline', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({range: document.getElementById('inner-work-range').value})
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Could not generate your inner work timeline');
+        renderInnerWorkReport(data);
+        status.textContent = 'Timeline generated. You can change the timescale and regenerate it whenever you want.';
+    } catch (error) {
+        report.setAttribute('aria-busy', 'false');
+        status.textContent = error.message || 'Could not generate the timeline. Your reflections are unchanged.';
+    } finally {
+        button.disabled = false;
+        button.textContent = 'Generate timeline';
+    }
+}
+</script>
+{% endblock %}

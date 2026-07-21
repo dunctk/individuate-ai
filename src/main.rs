@@ -12,8 +12,8 @@ use base64::Engine;
 use dashmap::DashMap;
 use individuateai::agent::{
     self, agent_runtime, cookie_key, draft_stream_handler, graph_handler, has_auth_cookie,
-    is_supported_tts_voice, stream_handler, AuthSession, MemoryEdit, RelationshipProfile,
-    TimelinePatch, UsageKind, User, DEFAULT_TTS_VOICE,
+    is_supported_tts_voice, stream_handler, AuthSession, CorePatternPatch, MemoryEdit,
+    RelationshipProfile, TimelinePatch, UsageKind, User, DEFAULT_TTS_VOICE,
 };
 use individuateai::billing::{
     event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
@@ -204,6 +204,8 @@ async fn main() {
         )
         .route("/api/timeline/merge", post(merge_timeline))
         .route("/api/memory-status", get(memory_status))
+        .route("/api/core-patterns", get(list_core_patterns))
+        .route("/api/core-patterns/:id", patch(update_core_pattern))
         .route(
             "/api/cycle",
             get(get_cycle_dashboard).delete(delete_cycle_data),
@@ -465,12 +467,24 @@ async fn home_page(
         {
             Ok(history) => {
                 messages = history;
-                id.as_str()
+                id.to_string()
             }
-            Err(_) => "",
+            Err(_) => String::new(),
         }
     } else {
-        ""
+        match runtime
+            .create_new_session(user.id.clone(), "New Session".to_string())
+            .await
+        {
+            Ok(session) => {
+                return Redirect::temporary(&format!("/chat?session={}", session.id))
+                    .into_response()
+            }
+            Err(error) => {
+                tracing::error!("Could not create opening session: {error}");
+                String::new()
+            }
+        }
     };
     let cycle = runtime
         .get_cycle_dashboard(user.id.clone(), None)
@@ -490,7 +504,7 @@ async fn home_page(
     let html = templates::render_home(
         &state.templates,
         &user,
-        session_id,
+        &session_id,
         &messages,
         &cycle,
         &body_onboarding,
@@ -1169,8 +1183,24 @@ async fn create_session(
     };
     let title = payload.title.unwrap_or_else(|| "New Session".to_string());
     let runtime = agent_runtime().await.unwrap();
-    match runtime.create_new_session(user.id, title).await {
-        Ok(session) => Json(session).into_response(),
+    match runtime.create_new_session(user.id.clone(), title).await {
+        Ok(session) => {
+            let opening_message = runtime
+                .get_session_history(user.id, session.id.clone())
+                .await
+                .ok()
+                .and_then(|history| history.into_iter().next())
+                .map(|message| message.content);
+            Json(serde_json::json!({
+                "id": session.id,
+                "user_id": session.user_id,
+                "title": session.title,
+                "date": session.date,
+                "preview": session.preview,
+                "opening_message": opening_message,
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -1994,6 +2024,79 @@ async fn memory_status(State(state): State<AppState>, headers: HeaderMap) -> Res
             Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+async fn list_core_patterns(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime.get_core_patterns(user.id).await {
+        Ok(patterns) => Json(patterns).into_response(),
+        Err(error) => {
+            tracing::error!("Could not list working formulations: {error}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Could not load working focuses"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn update_core_pattern(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<CorePatternPatch>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Unauthorized"})),
+            )
+                .into_response()
+        }
+    };
+    let runtime = agent_runtime().await.unwrap();
+    match runtime.update_core_pattern(user.id, id, payload).await {
+        Ok(Some(pattern)) => Json(pattern).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Working focus not found"})),
+        )
+            .into_response(),
+        Err(error) => {
+            let message = error.to_string();
+            let validation_error = message.starts_with("Working")
+                || message.starts_with("Protective")
+                || message.starts_with("Desired")
+                || message.starts_with("Unsupported");
+            if !validation_error {
+                tracing::error!("Could not update working formulation: {error}");
+            }
+            (
+                if validation_error {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                Json(serde_json::json!({
+                    "error": if validation_error { message } else { "Could not save working focus".to_string() }
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

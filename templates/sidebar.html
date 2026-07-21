@@ -6,9 +6,13 @@
         </button>
     </div>
 
-    <button hx-post="/api/sessions" hx-target="#sidebar" hx-swap="outerHTML"
-        class="w-full bg-integral-turquoise/10 border border-integral-turquoise/30 text-integral-turquoise rounded-lg px-3 py-2 text-sm font-medium hover:bg-integral-turquoise/20 transition-colors">
+    <a href="/chat"
+        class="flex min-h-11 w-full items-center justify-center bg-integral-turquoise/10 border border-integral-turquoise/30 text-integral-turquoise rounded-lg px-3 py-2 text-sm font-medium hover:bg-integral-turquoise/20 transition-colors">
         + New Session
+    </a>
+    <button type="button" onclick="toggleSidebar(); openFocusDrawer()"
+        class="min-h-11 w-full rounded-lg border border-sage-mist/20 bg-sage-mist/10 px-3 py-2 text-sm font-medium text-parchment hover:bg-sage-mist/20">
+        Working focus
     </button>
     <a href="/timeline" class="block w-full text-center bg-sage-mist/10 border border-sage-mist/20 text-parchment rounded-lg px-3 py-2 text-sm font-medium hover:bg-sage-mist/20 transition-colors">Life timeline</a>
 

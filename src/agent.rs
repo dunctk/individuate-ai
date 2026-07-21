@@ -224,6 +224,59 @@ pub struct MemoryStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CorePattern {
+    pub user_id: String,
+    pub id: String,
+    pub short_label: String,
+    pub formulation: String,
+    #[serde(default)]
+    pub protective_function: String,
+    #[serde(default)]
+    pub costs: Vec<String>,
+    #[serde(default)]
+    pub underlying_needs: Vec<String>,
+    #[serde(default)]
+    pub desired_capacity: String,
+    pub status: String,
+    #[serde(default)]
+    pub user_confirmed: bool,
+    #[serde(default)]
+    pub mention_in_openings: bool,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default)]
+    pub evidence_session_ids: Vec<String>,
+    #[serde(default)]
+    pub evidence_summaries: Vec<String>,
+    #[serde(default)]
+    pub counterevidence: Vec<String>,
+    #[serde(default)]
+    pub practices: Vec<String>,
+    #[serde(default)]
+    pub progress: Vec<String>,
+    #[serde(default)]
+    pub last_observed_at: Option<String>,
+    #[serde(default)]
+    pub last_raised_at: Option<String>,
+    #[serde(default)]
+    pub cooldown_until: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CorePatternPatch {
+    pub short_label: Option<String>,
+    pub formulation: Option<String>,
+    pub protective_function: Option<String>,
+    pub desired_capacity: Option<String>,
+    pub status: Option<String>,
+    pub mention_in_openings: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Episode {
     pub user_id: String,
     pub id: String,
@@ -494,11 +547,11 @@ fn import_memory_chunks(user_turns: &[String], max_chars: usize) -> Vec<String> 
 mod runtime {
     use super::{
         import_memory_chunks, infer_date_precision, promotion_reasons, timeline_group_label,
-        timeline_signals, timeline_sort_key, AdminUserAccess, BillingAccount, ChatLog,
-        EditableMemory, Episode, EpisodeTimelineMetadata, EpisodeWithLinks, GraphEdge, GraphNode,
-        ImportSummary, MemoryEdit, MemoryLink, MemoryStatus, PatientGraph, RelationshipProfile,
-        Session, SocialGraph, SocialGraphEdge, SocialGraphNode, TimelineCard, TimelineGroup,
-        TimelinePatch, TimelineResponse, UsageKind, User,
+        timeline_signals, timeline_sort_key, AdminUserAccess, BillingAccount, ChatLog, CorePattern,
+        CorePatternPatch, EditableMemory, Episode, EpisodeTimelineMetadata, EpisodeWithLinks,
+        GraphEdge, GraphNode, ImportSummary, MemoryEdit, MemoryLink, MemoryStatus, PatientGraph,
+        RelationshipProfile, Session, SocialGraph, SocialGraphEdge, SocialGraphNode, TimelineCard,
+        TimelineGroup, TimelinePatch, TimelineResponse, UsageKind, User,
     };
     use crate::{
         cycle::{
@@ -582,6 +635,8 @@ mod runtime {
 
         Previous-chat search: when the user asks for a specific detail from an earlier conversation and it is not clear in the supplied persistent memory, use search_previous_chats. Search for the distinctive person, event, phrase, or subject rather than the whole question. Treat returned excerpts as private evidence: use them to answer naturally, do not expose internal session IDs, and say clearly when the search finds nothing relevant.
 
+        Working formulations: an <active_formulations> block may contain user-approved hypotheses about recurring patterns. Use them as a quiet compass, never as diagnoses or universal explanations. Explicitly connect the present situation to a formulation only when the block marks it relevant, the user asks for pattern-level analysis, or a previously agreed practice needs review. Ask permission before making a new explicit connection. Look for counterexamples and changed behavior. Distinguish the user's contribution from real external conditions such as exploitation, incompatibility, coercion, discrimination, or another person's choices. Never shame the user, repeatedly confront them with a formulation, or pressure them toward a breakup, resignation, confrontation, or other irreversible action. A proposed formulation is not user-approved and must not guide therapy until activated by the user.
+
         Response preferences: your system instructions may end with a <response_preferences> block containing the user's explicit standing instructions for how you should respond. Follow them in every later response, but treat them as subordinate to safety, accuracy, and this therapist role. Use store_meta_memory only when the user explicitly asks you to persist, change, or forget a response preference (for example, analysis depth, tone, or response structure). Do not use it for autobiographical facts, events, relationships, mind-map concepts, inferred preferences, or the text-to-speech voice. For an upsert, choose a stable short key and store the requested preference as its value; reuse that key when changing it. For removal, use the existing key. A successful tool call affects future requests; honor the user's current instruction directly in the current response.
     "###;
     const DRAFT_SYSTEM_PROMPT: &str = r###"
@@ -607,6 +662,19 @@ mod runtime {
         concept_id MUST be an existing node id or one of the new_concepts you return.
         Use concept-to-person relations only from: originates_from, manifests_with, directed_at, triggered_by_person.
         If nothing changes, return empty arrays.
+    "###;
+    const CORE_PATTERN_PROMPT: &str = r###"
+        Identify only central, recurring psychological or behavioral patterns that the USER explicitly describes across situations, relationships, or time.
+        The user's message is the sole factual authority. Assistant interpretations are not evidence.
+        A difficult event, ordinary preference, isolated conflict, symptom, or trait is not a core pattern.
+        Return a candidate only when the user clearly describes repetition, reenactment, an unconscious dynamic, or the same costly response occurring in more than one context.
+        Treat every candidate as a tentative working formulation, never a diagnosis or established truth.
+        Prefer neutral, compassionate language. Include the pattern's possible protective function and unmet needs only when supported by the user's own account.
+        Do not blame the user or erase real external conditions such as exploitation, incompatibility, discrimination, coercion, or another person's unavailability.
+        When an existing formulation describes the same dynamic, reuse its exact id and return an update rather than creating a synonym.
+        For an existing formulation, capture explicit counterexamples, changed responses, progress, or a practice the user says they intend to try. Do not treat the assistant's suggestion as the user's practice unless the user adopts it.
+        Keep short_label to 2-6 words. Use a stable snake_case id. Paraphrase evidence; do not copy private user wording verbatim.
+        If the threshold is not clearly met, return an empty candidates array.
     "###;
     const EPISODE_PROMPT: &str = r###"
         Extract episodic memory from the user's message only.
@@ -871,6 +939,37 @@ mod runtime {
         pub person_links: Vec<ExtractedPersonLink>,
     }
 
+    #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+    struct ExtractedCorePattern {
+        pub id: String,
+        pub short_label: String,
+        pub formulation: String,
+        #[serde(default)]
+        pub protective_function: String,
+        #[serde(default)]
+        pub costs: Vec<String>,
+        #[serde(default)]
+        pub underlying_needs: Vec<String>,
+        #[serde(default)]
+        pub desired_capacity: String,
+        #[serde(default)]
+        pub confidence: f32,
+        #[serde(default)]
+        pub evidence_summary: String,
+        #[serde(default)]
+        pub counterevidence: Vec<String>,
+        #[serde(default)]
+        pub practices: Vec<String>,
+        #[serde(default)]
+        pub progress: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+    struct CorePatternDelta {
+        #[serde(default)]
+        pub candidates: Vec<ExtractedCorePattern>,
+    }
+
     impl ConversationGraphDelta {
         fn is_empty(&self) -> bool {
             self.new_concepts.is_empty()
@@ -957,6 +1056,7 @@ mod runtime {
     struct TherapistContext {
         response_preferences: String,
         persistent_memory: String,
+        active_formulations: String,
         body_context: String,
     }
 
@@ -1266,6 +1366,28 @@ mod runtime {
                 );
                 CREATE INDEX IF NOT EXISTS idx_meta_memories_user_id
                     ON meta_memories(user_id);
+                CREATE TABLE IF NOT EXISTS core_patterns (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    payload_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, id),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_core_patterns_user_id
+                    ON core_patterns(user_id, updated_at);
+                CREATE TABLE IF NOT EXISTS core_pattern_events (
+                    event_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    pattern_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id, pattern_id) REFERENCES core_patterns(user_id, id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_core_pattern_events_pattern
+                    ON core_pattern_events(user_id, pattern_id, created_at);
                 CREATE TABLE IF NOT EXISTS cycle_profiles (
                     user_id TEXT PRIMARY KEY,
                     payload_ciphertext BLOB NOT NULL,
@@ -1884,6 +2006,7 @@ mod runtime {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     struct MemoryExtractionPlan {
         graph: bool,
+        core_patterns: bool,
         relationship_profiles: bool,
         episodes: bool,
         social_relationships: bool,
@@ -2045,9 +2168,36 @@ mod runtime {
         ]
         .iter()
         .any(|signal| contains_signal(&normalized, signal));
+        let core_pattern_signal = [
+            "pattern",
+            "recurring",
+            "repeat",
+            "repeating",
+            "again and again",
+            "same thing",
+            "keep choosing",
+            "keep ending up",
+            "unconscious",
+            "unconsciously",
+            "across relationships",
+            "across situations",
+            "i always",
+            "i often",
+            "i tend to",
+            "familiar dynamic",
+            "this time",
+            "did something different",
+            "set a boundary",
+            "held my boundary",
+            "said no",
+            "chose differently",
+        ]
+        .iter()
+        .any(|signal| contains_signal(&normalized, signal));
 
         MemoryExtractionPlan {
             graph: !words.is_empty() || correction_signal,
+            core_patterns: core_pattern_signal,
             relationship_profiles: mentions_person,
             episodes: episode_signal,
             social_relationships: mentions_person,
@@ -3886,6 +4036,59 @@ mod runtime {
         )
     }
 
+    fn format_active_formulations_block(patterns: &[CorePattern], prompt: &str) -> String {
+        let query_terms = tokenize(prompt);
+        let lines = patterns
+            .iter()
+            .filter(|pattern| pattern.status == "active" && pattern.user_confirmed)
+            .take(2)
+            .map(|pattern| {
+                let searchable = format!(
+                    "{} {} {} {} {}",
+                    pattern.short_label,
+                    pattern.formulation,
+                    pattern.protective_function,
+                    pattern.desired_capacity,
+                    pattern.underlying_needs.join(" ")
+                );
+                // Require more than a stray shared word (for example "user"
+                // or "relationship") before explicitly surfacing a sensitive
+                // formulation. Missing a weak connection is safer than
+                // repeatedly forcing the same interpretation.
+                let relevant = overlap_score(&searchable, &query_terms) >= 2;
+                format!(
+                    "- {}: {}\n  protective function: {}\n  desired capacity: {}\n  relevance to current message: {}",
+                    pattern.short_label.trim(),
+                    pattern.formulation.trim(),
+                    if pattern.protective_function.trim().is_empty() { "not established" } else { pattern.protective_function.trim() },
+                    if pattern.desired_capacity.trim().is_empty() { "not established" } else { pattern.desired_capacity.trim() },
+                    if relevant { "possible; ask before explicitly connecting it" } else { "not established; use silently and do not mention it" },
+                )
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "<active_formulations>\nUser-approved, revisable hypotheses. They are interpretive, not factual.\n{}\n</active_formulations>",
+            if lines.is_empty() { "none".to_string() } else { lines.join("\n") }
+        )
+    }
+
+    fn new_session_opening_text(patterns: &[CorePattern]) -> String {
+        let named_focus = patterns.iter().find(|pattern| {
+            pattern.status == "active"
+                && pattern.user_confirmed
+                && pattern.mention_in_openings
+                && !pattern.short_label.trim().is_empty()
+        });
+        if let Some(pattern) = named_focus {
+            format!(
+                "Welcome back. We can continue with your working focus on **{}**, start somewhere new, or simply notice what's most present. Where would you like to begin?",
+                pattern.short_label.trim()
+            )
+        } else {
+            "Welcome back. We can continue something you've been exploring, start somewhere new, or simply notice what's most present. Where would you like to begin?".to_string()
+        }
+    }
+
     fn compress_logs_for_profile_bootstrap(
         logs: &[(String, String, String, String)],
         max_chars: usize,
@@ -4186,11 +4389,16 @@ mod runtime {
         format!("{THERAPIST_SYSTEM_PROMPT}\n\n{response_preferences}")
     }
 
-    fn therapist_user_prompt(persistent_memory: &str, body_context: &str, prompt: &str) -> String {
+    fn therapist_user_prompt(
+        persistent_memory: &str,
+        active_formulations: &str,
+        body_context: &str,
+        prompt: &str,
+    ) -> String {
         if body_context.trim().is_empty() {
-            format!("{persistent_memory}\n\n{prompt}")
+            format!("{persistent_memory}\n\n{active_formulations}\n\n{prompt}")
         } else {
-            format!("{persistent_memory}\n\n{body_context}\n\n{prompt}")
+            format!("{persistent_memory}\n\n{active_formulations}\n\n{body_context}\n\n{prompt}")
         }
     }
 
@@ -6758,6 +6966,253 @@ mod runtime {
             ))
         }
 
+        async fn list_core_patterns_secure(&self, user_id: String) -> Result<Vec<CorePattern>> {
+            let dek = self.active_dek(&user_id)?;
+            self.conn
+                .call(move |conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT id, payload_ciphertext, created_at, updated_at FROM core_patterns WHERE user_id = ?1 ORDER BY updated_at DESC",
+                    )?;
+                    let rows = statement.query_map([user_id.clone()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })?;
+                    let mut patterns = Vec::new();
+                    for row in rows {
+                        let (id, encrypted, created_at, updated_at) = row?;
+                        let plaintext = security::decrypt(
+                            &dek,
+                            &encrypted,
+                            format!("core_patterns:{}:{}", user_id, id).as_bytes(),
+                        )
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        let mut pattern: CorePattern = serde_json::from_slice(&plaintext)
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                        pattern.user_id = user_id.clone();
+                        pattern.id = id;
+                        pattern.created_at = created_at;
+                        pattern.updated_at = updated_at;
+                        patterns.push(pattern);
+                    }
+                    Ok(patterns)
+                })
+                .await
+                .context("Listing encrypted working formulations")
+        }
+
+        async fn record_core_pattern_event(
+            &self,
+            user_id: &str,
+            pattern_id: &str,
+            event_type: &str,
+        ) -> Result<()> {
+            let dek = self.active_dek(user_id)?;
+            let event_id = Uuid::new_v4().to_string();
+            let payload = serde_json::to_vec(&serde_json::json!({ "event": event_type }))?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("core_pattern_events:{}:{}", user_id, event_id).as_bytes(),
+            )?;
+            let user_id = user_id.to_string();
+            let pattern_id = pattern_id.to_string();
+            let event_type = event_type.to_string();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO core_pattern_events (event_id, user_id, pattern_id, event_type, payload_ciphertext) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![event_id, user_id, pattern_id, event_type, encrypted],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Recording working-formulation event")
+                .map(|_| ())
+        }
+
+        async fn save_core_pattern_secure(
+            &self,
+            pattern: &CorePattern,
+            event_type: &str,
+        ) -> Result<()> {
+            let id = normalize_slug(&pattern.id);
+            if id.is_empty() {
+                anyhow::bail!("Working focus needs an id");
+            }
+            let user_id = pattern.user_id.clone();
+            let dek = self.active_dek(&user_id)?;
+            let mut stored = pattern.clone();
+            stored.id = id.clone();
+            stored.user_id = user_id.clone();
+            stored.created_at = None;
+            stored.updated_at = None;
+            let payload = serde_json::to_vec(&stored)?;
+            let encrypted = security::encrypt(
+                &dek,
+                &payload,
+                format!("core_patterns:{}:{}", user_id, id).as_bytes(),
+            )?;
+            let uid = user_id.clone();
+            let pattern_id = id.clone();
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        "INSERT INTO core_patterns (user_id, id, payload_ciphertext) VALUES (?1, ?2, ?3) ON CONFLICT(user_id, id) DO UPDATE SET payload_ciphertext = excluded.payload_ciphertext, updated_at = CURRENT_TIMESTAMP",
+                        rusqlite::params![uid, pattern_id, encrypted],
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving encrypted working formulation")?;
+            self.record_core_pattern_event(&user_id, &id, event_type)
+                .await
+        }
+
+        async fn sync_core_patterns_from_text(
+            &self,
+            user_id: String,
+            session_id: Option<String>,
+            source_text: String,
+        ) -> Result<Option<String>> {
+            let existing = self.list_core_patterns_secure(user_id.clone()).await?;
+            let context = if existing.is_empty() {
+                "Existing working formulations: none".to_string()
+            } else {
+                format!(
+                    "Existing working formulations:\n{}",
+                    existing
+                        .iter()
+                        .map(|pattern| format!("- {}: {}", pattern.id, pattern.formulation))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            let model = std::env::var("CORE_PATTERN_MODEL")
+                .unwrap_or_else(|_| DEFAULT_MEMORY_EXTRACTION_MODEL.to_string());
+            let extractor = self
+                .openrouter_client
+                .extractor::<CorePatternDelta>(&model)
+                .preamble(CORE_PATTERN_PROMPT)
+                .context(&context)
+                .additional_params(openrouter_privacy_params())
+                .build();
+            let delta = extractor.extract(source_text).await.map_err(|error| {
+                anyhow::anyhow!("Working-formulation extractor failed: {error}")
+            })?;
+            let mut headline = None;
+            for candidate in delta.candidates.into_iter().take(2) {
+                let candidate_id = normalize_slug(&candidate.id);
+                if candidate_id.is_empty()
+                    || candidate.short_label.trim().is_empty()
+                    || candidate.formulation.trim().is_empty()
+                {
+                    continue;
+                }
+                let mut pattern = existing
+                    .iter()
+                    .find(|pattern| {
+                        normalize_slug(&pattern.id) == candidate_id
+                            || normalize_slug(&pattern.short_label)
+                                == normalize_slug(&candidate.short_label)
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| CorePattern {
+                        user_id: user_id.clone(),
+                        id: candidate_id.clone(),
+                        short_label: candidate.short_label.trim().chars().take(120).collect(),
+                        formulation: candidate.formulation.trim().chars().take(1200).collect(),
+                        protective_function: String::new(),
+                        costs: Vec::new(),
+                        underlying_needs: Vec::new(),
+                        desired_capacity: String::new(),
+                        status: "proposed".to_string(),
+                        user_confirmed: false,
+                        mention_in_openings: false,
+                        confidence: 0.0,
+                        evidence_session_ids: Vec::new(),
+                        evidence_summaries: Vec::new(),
+                        counterevidence: Vec::new(),
+                        practices: Vec::new(),
+                        progress: Vec::new(),
+                        last_observed_at: None,
+                        last_raised_at: None,
+                        cooldown_until: None,
+                        created_at: None,
+                        updated_at: None,
+                    });
+                if !pattern.user_confirmed {
+                    pattern.short_label = candidate.short_label.trim().chars().take(120).collect();
+                    pattern.formulation = candidate.formulation.trim().chars().take(1200).collect();
+                    pattern.protective_function = candidate
+                        .protective_function
+                        .trim()
+                        .chars()
+                        .take(600)
+                        .collect();
+                    pattern.costs = candidate.costs.into_iter().take(6).collect();
+                    pattern.underlying_needs =
+                        candidate.underlying_needs.into_iter().take(6).collect();
+                    pattern.desired_capacity = candidate
+                        .desired_capacity
+                        .trim()
+                        .chars()
+                        .take(600)
+                        .collect();
+                }
+                pattern.confidence = pattern.confidence.max(candidate.confidence.clamp(0.0, 1.0));
+                if let Some(session_id) = session_id.as_ref() {
+                    if !pattern.evidence_session_ids.contains(session_id) {
+                        pattern.evidence_session_ids.push(session_id.clone());
+                        pattern.evidence_session_ids.truncate(20);
+                    }
+                }
+                let evidence = candidate.evidence_summary.trim();
+                if !evidence.is_empty()
+                    && !pattern
+                        .evidence_summaries
+                        .iter()
+                        .any(|item| item == evidence)
+                {
+                    pattern
+                        .evidence_summaries
+                        .push(evidence.chars().take(500).collect());
+                    pattern.evidence_summaries.truncate(12);
+                }
+                for item in candidate.counterevidence.into_iter().take(4) {
+                    let item = item.trim();
+                    if !item.is_empty()
+                        && !pattern.counterevidence.iter().any(|saved| saved == item)
+                    {
+                        pattern
+                            .counterevidence
+                            .push(item.chars().take(500).collect());
+                    }
+                }
+                pattern.counterevidence.truncate(12);
+                for item in candidate.practices.into_iter().take(4) {
+                    let item = item.trim();
+                    if !item.is_empty() && !pattern.practices.iter().any(|saved| saved == item) {
+                        pattern.practices.push(item.chars().take(500).collect());
+                    }
+                }
+                pattern.practices.truncate(8);
+                for item in candidate.progress.into_iter().take(4) {
+                    let item = item.trim();
+                    if !item.is_empty() && !pattern.progress.iter().any(|saved| saved == item) {
+                        pattern.progress.push(item.chars().take(500).collect());
+                    }
+                }
+                pattern.progress.truncate(12);
+                self.save_core_pattern_secure(&pattern, "observed").await?;
+                headline.get_or_insert_with(|| "Working focus proposed".to_string());
+            }
+            Ok(headline)
+        }
+
         async fn build_therapist_context(
             &self,
             user_id: String,
@@ -6783,6 +7238,10 @@ mod runtime {
                 .unwrap_or_default();
             let memory_links = self
                 .list_memory_links(user_id.clone())
+                .await
+                .unwrap_or_default();
+            let core_patterns = self
+                .list_core_patterns_secure(user_id.clone())
                 .await
                 .unwrap_or_default();
             let all_logs = self.get_user_memory_logs(user_id.clone(), 250).await?;
@@ -6921,6 +7380,7 @@ mod runtime {
                     &social_hits,
                     &episode_hits,
                 ),
+                active_formulations: format_active_formulations_block(&core_patterns, &prompt),
                 body_context,
             })
         }
@@ -7161,6 +7621,29 @@ mod runtime {
                     ),
                 }
             }
+            if plan.core_patterns {
+                match timeout(
+                    Duration::from_secs(30),
+                    self.sync_core_patterns_from_text(
+                        user_id.clone(),
+                        session_id.clone(),
+                        source_text.clone(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => headline = headline.or(value),
+                    Ok(Err(error)) => tracing::error!(
+                        target: "memory.core_patterns",
+                        error = %error,
+                        "Working-formulation extraction failed"
+                    ),
+                    Err(_) => tracing::error!(
+                        target: "memory.core_patterns",
+                        "Working-formulation extraction timed out"
+                    ),
+                }
+            }
             if plan.relationship_profiles {
                 match timeout(
                     Duration::from_secs(30),
@@ -7276,6 +7759,7 @@ mod runtime {
                 self.therapist_agent_for_response(&therapist_context.response_preferences);
             let enriched_prompt = therapist_user_prompt(
                 &therapist_context.persistent_memory,
+                &therapist_context.active_formulations,
                 &therapist_context.body_context,
                 &prompt,
             );
@@ -7727,6 +8211,7 @@ mod runtime {
                 self.therapist_agent_for_response(&therapist_context.response_preferences);
             let enriched_prompt = therapist_user_prompt(
                 &therapist_context.persistent_memory,
+                &therapist_context.active_formulations,
                 &therapist_context.body_context,
                 &prompt,
             );
@@ -8151,7 +8636,89 @@ mod runtime {
         }
 
         pub async fn create_new_session(&self, user_id: String, title: String) -> Result<Session> {
-            self.create_session(user_id, title).await
+            let session = self.create_session(user_id.clone(), title).await?;
+            let opening = self.new_session_opening(user_id).await?;
+            self.save_message(session.id.clone(), "assistant".into(), opening)
+                .await?;
+            Ok(session)
+        }
+
+        async fn new_session_opening(&self, user_id: String) -> Result<String> {
+            let patterns = self.list_core_patterns_secure(user_id).await?;
+            Ok(new_session_opening_text(&patterns))
+        }
+
+        pub async fn get_core_patterns(&self, user_id: String) -> Result<Vec<CorePattern>> {
+            self.list_core_patterns_secure(user_id).await
+        }
+
+        pub async fn update_core_pattern(
+            &self,
+            user_id: String,
+            id: String,
+            patch: CorePatternPatch,
+        ) -> Result<Option<CorePattern>> {
+            let normalized_id = normalize_slug(&id);
+            let Some(mut pattern) = self
+                .list_core_patterns_secure(user_id.clone())
+                .await?
+                .into_iter()
+                .find(|pattern| normalize_slug(&pattern.id) == normalized_id)
+            else {
+                return Ok(None);
+            };
+            if let Some(label) = patch.short_label {
+                let label = label.trim();
+                if label.is_empty() || label.chars().count() > 120 {
+                    anyhow::bail!("Working-focus label must be 1-120 characters");
+                }
+                pattern.short_label = label.to_string();
+            }
+            if let Some(formulation) = patch.formulation {
+                let formulation = formulation.trim();
+                if formulation.is_empty() || formulation.chars().count() > 1200 {
+                    anyhow::bail!("Working formulation must be 1-1200 characters");
+                }
+                pattern.formulation = formulation.to_string();
+            }
+            if let Some(value) = patch.protective_function {
+                if value.chars().count() > 600 {
+                    anyhow::bail!("Protective function must be at most 600 characters");
+                }
+                pattern.protective_function = value.trim().to_string();
+            }
+            if let Some(value) = patch.desired_capacity {
+                if value.chars().count() > 600 {
+                    anyhow::bail!("Desired capacity must be at most 600 characters");
+                }
+                pattern.desired_capacity = value.trim().to_string();
+            }
+            if let Some(status) = patch.status {
+                if !matches!(
+                    status.as_str(),
+                    "proposed" | "active" | "paused" | "retired"
+                ) {
+                    anyhow::bail!("Unsupported working-focus status");
+                }
+                pattern.status = status.clone();
+                if status == "active" {
+                    pattern.user_confirmed = true;
+                }
+                if status == "proposed" {
+                    pattern.user_confirmed = false;
+                    pattern.mention_in_openings = false;
+                }
+            }
+            if let Some(value) = patch.mention_in_openings {
+                pattern.mention_in_openings = value && pattern.status == "active";
+            }
+            self.save_core_pattern_secure(&pattern, "user_updated")
+                .await?;
+            Ok(self
+                .list_core_patterns_secure(user_id)
+                .await?
+                .into_iter()
+                .find(|candidate| normalize_slug(&candidate.id) == normalized_id))
         }
 
         /// Import history into encrypted sessions. Assistant turns are kept so
@@ -9457,6 +10024,18 @@ mod runtime {
             let plan = memory_extraction_plan("I feel devastated", &[]);
 
             assert!(plan.graph);
+            assert!(!plan.core_patterns);
+        }
+
+        #[test]
+        fn test_memory_extraction_plan_routes_explicit_recurring_patterns() {
+            let plan = memory_extraction_plan(
+                "I keep ending up in the same thing across relationships.",
+                &[],
+            );
+
+            assert!(plan.graph);
+            assert!(plan.core_patterns);
         }
 
         #[test]
@@ -10109,7 +10688,13 @@ mod runtime {
 
             let preamble = therapist_preamble(&response_preferences);
             let body_context = "<body_context>Estimated context.</body_context>";
-            let user_prompt = therapist_user_prompt(&persistent_memory, body_context, user_input);
+            let active_formulations = "<active_formulations>none</active_formulations>";
+            let user_prompt = therapist_user_prompt(
+                &persistent_memory,
+                active_formulations,
+                body_context,
+                user_input,
+            );
 
             assert_eq!(
                 preamble,
@@ -10122,13 +10707,70 @@ mod runtime {
 
             assert_eq!(
                 user_prompt,
-                format!("{persistent_memory}\n\n{body_context}\n\n{user_input}")
+                format!(
+                    "{persistent_memory}\n\n{active_formulations}\n\n{body_context}\n\n{user_input}"
+                )
             );
             assert!(user_prompt.contains("<persistent_memory>"));
             assert!(user_prompt.contains("<body_context>"));
             assert!(!user_prompt.contains("<response_preferences>"));
             assert!(!user_prompt.contains("Give me more in-depth Jungian analysis."));
             assert!(!user_prompt.contains(THERAPIST_SYSTEM_PROMPT));
+        }
+
+        #[test]
+        fn active_formulations_are_relevance_gated_and_require_confirmation() {
+            let pattern = CorePattern {
+                user_id: "user-a".to_string(),
+                id: "availability_pattern".to_string(),
+                short_label: "Availability pattern".to_string(),
+                formulation: "The user may remain in persistently unavailable situations."
+                    .to_string(),
+                protective_function: "Preserves connection".to_string(),
+                costs: Vec::new(),
+                underlying_needs: vec!["reliable support".to_string()],
+                desired_capacity: "Notice evidence and set proportionate boundaries".to_string(),
+                status: "active".to_string(),
+                user_confirmed: true,
+                mention_in_openings: false,
+                confidence: 0.8,
+                evidence_session_ids: Vec::new(),
+                evidence_summaries: Vec::new(),
+                counterevidence: Vec::new(),
+                practices: Vec::new(),
+                progress: Vec::new(),
+                last_observed_at: None,
+                last_raised_at: None,
+                cooldown_until: None,
+                created_at: None,
+                updated_at: None,
+            };
+            let relevant = format_active_formulations_block(
+                std::slice::from_ref(&pattern),
+                "I am not getting reliable support at work",
+            );
+            assert!(relevant.contains("possible; ask before explicitly connecting it"));
+
+            let unrelated = format_active_formulations_block(
+                std::slice::from_ref(&pattern),
+                "I enjoyed painting a landscape today",
+            );
+            assert!(unrelated.contains("use silently and do not mention it"));
+
+            assert!(!new_session_opening_text(std::slice::from_ref(&pattern))
+                .contains("Availability pattern"));
+            let mut opening_pattern = pattern.clone();
+            opening_pattern.mention_in_openings = true;
+            assert!(
+                new_session_opening_text(&[opening_pattern]).contains("**Availability pattern**")
+            );
+
+            let mut proposed = pattern;
+            proposed.status = "proposed".to_string();
+            proposed.user_confirmed = false;
+            assert!(
+                format_active_formulations_block(&[proposed], "reliable support").contains("none")
+            );
         }
 
         #[test]

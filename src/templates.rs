@@ -558,6 +558,10 @@ mod tests {
         assert!(html.contains("brand-mark hidden sm:inline"));
         assert!(html.contains("href=\"/mind-map\""));
         assert!(html.contains("href=\"/timeline\""));
+        assert!(html.contains("id=\"focus-drawer\""));
+        assert!(html.contains("openFocusDrawer()"));
+        assert!(html.contains("/api/core-patterns"));
+        assert!(html.contains("Nothing guides future chats until you activate it."));
         assert!(!html.contains("href=\"/social-graph\""));
         assert!(html.contains("copy-thread-button"));
         assert!(html.contains("<span class=\"thread-copy-label\">Copy</span>"));

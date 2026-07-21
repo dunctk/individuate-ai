@@ -88,6 +88,7 @@
 
     <div id="sidebar-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="toggleSidebar()"></div>
     <div id="profile-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="closeProfileDrawer()"></div>
+    <div id="focus-overlay" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-30 hidden" onclick="closeFocusDrawer()"></div>
 
     <aside id="sidebar"
         class="fixed top-0 left-0 z-40 h-full w-72 glass-strong border-r border-sage-mist/20 transform -translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"
@@ -95,6 +96,18 @@
 
     <aside id="profile-drawer"
         class="fixed top-0 right-0 z-40 h-full w-80 glass-strong border-l border-sage-mist/20 transform translate-x-full transition-transform duration-300 ease-in-out overflow-y-auto"></aside>
+
+    <aside id="focus-drawer" class="focus-drawer" aria-hidden="true" aria-labelledby="focus-drawer-title">
+        <header class="focus-drawer-head">
+            <div>
+                <span class="role-label">Your control</span>
+                <h2 id="focus-drawer-title">Working focus</h2>
+            </div>
+            <button type="button" onclick="closeFocusDrawer()" aria-label="Close working focus">&times;</button>
+        </header>
+        <p class="focus-drawer-intro">Tentative patterns the therapist has noticed. Nothing guides future chats until you activate it.</p>
+        <div id="focus-list" class="focus-list" aria-live="polite"><p class="focus-empty">Loading securely…</p></div>
+    </aside>
 
     <!-- Glass header — the "foggy greenhouse window" floating membrane -->
     <header class="glass shrink-0 flex min-w-0 items-center justify-between overflow-hidden px-3 sm:px-4 py-3 border-b border-sage-mist/15 z-10">
@@ -112,6 +125,7 @@
                 Cycle{% if cycle_day %} {{ cycle_day }}{% endif %}
             </a>
             {% endif %}
+            <button onclick="openFocusDrawer()" class="pill" data-active="false">Focus</button>
             <button onclick="openProfileDrawer()" class="pill" data-active="false">Settings</button>
             <a href="/mind-map" class="pill no-underline text-inherit" data-active="false">Mind Map</a>
             <a href="/timeline" class="pill no-underline text-inherit" data-active="false">Timeline</a>
@@ -355,6 +369,120 @@ function closeProfileDrawer() {
     overlay.classList.add('hidden');
 }
 
+async function openFocusDrawer() {
+    const drawer = document.getElementById('focus-drawer');
+    const overlay = document.getElementById('focus-overlay');
+    drawer.classList.add('is-open');
+    drawer.setAttribute('aria-hidden', 'false');
+    overlay.classList.remove('hidden');
+    drawer.querySelector('button')?.focus({ preventScroll: true });
+    await loadCorePatterns();
+}
+
+function closeFocusDrawer() {
+    const drawer = document.getElementById('focus-drawer');
+    drawer.classList.remove('is-open');
+    drawer.setAttribute('aria-hidden', 'true');
+    document.getElementById('focus-overlay')?.classList.add('hidden');
+    document.querySelector('button[onclick="openFocusDrawer()"]')?.focus({ preventScroll: true });
+}
+
+function corePatternActions(pattern) {
+    if (pattern.status === 'proposed') {
+        return '<button type="button" data-pattern-action="active" class="focus-primary">Activate focus</button>';
+    }
+    if (pattern.status === 'active') {
+        return '<button type="button" data-pattern-action="paused">Pause</button>';
+    }
+    if (pattern.status === 'paused') {
+        return '<button type="button" data-pattern-action="active" class="focus-primary">Resume</button>';
+    }
+    return '<button type="button" data-pattern-action="proposed">Restore for review</button>';
+}
+
+function focusObservationList(title, items) {
+    if (!Array.isArray(items) || !items.length) return '';
+    return `<section class="focus-observations"><strong>${escapeHtml(title)}</strong><ul>${items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></section>`;
+}
+
+function renderCorePatternCard(pattern) {
+    const article = document.createElement('article');
+    article.className = 'focus-card';
+    article.dataset.status = pattern.status;
+    article.innerHTML = `
+        <div class="focus-card-status"><span>${escapeHtml(pattern.status)}</span>${pattern.user_confirmed ? '<small>User approved</small>' : '<small>Needs your review</small>'}</div>
+        <label>Short label<input class="field" data-pattern-field="short_label" maxlength="120" value="${escapeHtml(pattern.short_label || '')}"></label>
+        <label>Working formulation<textarea class="field" data-pattern-field="formulation" maxlength="1200" required>${escapeHtml(pattern.formulation || '')}</textarea></label>
+        <label>What it may protect<textarea class="field" data-pattern-field="protective_function" maxlength="600">${escapeHtml(pattern.protective_function || '')}</textarea></label>
+        <label>Capacity being developed<textarea class="field" data-pattern-field="desired_capacity" maxlength="600">${escapeHtml(pattern.desired_capacity || '')}</textarea></label>
+        ${focusObservationList('Signs of change', pattern.progress)}
+        ${focusObservationList('Counterexamples', pattern.counterevidence)}
+        ${focusObservationList('Practices you adopted', pattern.practices)}
+        <label class="focus-opening-choice">
+            <input type="checkbox" data-pattern-field="mention_in_openings" ${pattern.mention_in_openings ? 'checked' : ''} ${pattern.status === 'active' ? '' : 'disabled'}>
+            <span>Name this focus in new-chat openings</span>
+        </label>
+        <p class="focus-card-note">A hypothesis, not a diagnosis. The therapist is instructed to check counterexamples and external circumstances.</p>
+        <p class="focus-card-feedback" role="status" aria-live="polite"></p>
+        <div class="focus-card-actions">
+            <button type="button" data-pattern-save>Save edits</button>
+            ${corePatternActions(pattern)}
+            ${pattern.status === 'retired' ? '' : '<button type="button" data-pattern-action="retired" class="focus-retire">Retire</button>'}
+        </div>`;
+    article.querySelector('[data-pattern-save]').addEventListener('click', () => saveCorePatternCard(pattern.id, article, {}));
+    article.querySelectorAll('[data-pattern-action]').forEach(button => {
+        button.addEventListener('click', () => saveCorePatternCard(pattern.id, article, { status: button.dataset.patternAction }));
+    });
+    return article;
+}
+
+async function loadCorePatterns() {
+    const list = document.getElementById('focus-list');
+    list.innerHTML = '<p class="focus-empty">Loading securely…</p>';
+    try {
+        const response = await fetch('/api/core-patterns', { cache: 'no-store' });
+        const patterns = await response.json().catch(() => []);
+        if (!response.ok) throw new Error(patterns.error || 'Could not load working focuses');
+        list.innerHTML = '';
+        if (!patterns.length) {
+            list.innerHTML = '<div class="focus-empty"><strong>No proposed focuses yet</strong><span>When you clearly describe a recurring pattern, it can appear here for your review. It will not become active automatically.</span></div>';
+            return;
+        }
+        patterns.forEach(pattern => list.appendChild(renderCorePatternCard(pattern)));
+    } catch (error) {
+        list.innerHTML = '<p class="focus-empty focus-error"></p>';
+        list.querySelector('p').textContent = error.message || 'Could not load working focuses.';
+    }
+}
+
+async function saveCorePatternCard(id, article, extraPatch) {
+    const feedback = article.querySelector('.focus-card-feedback');
+    const buttons = [...article.querySelectorAll('button')];
+    feedback.textContent = 'Saving securely…';
+    buttons.forEach(button => { button.disabled = true; });
+    const patch = {
+        short_label: article.querySelector('[data-pattern-field="short_label"]').value,
+        formulation: article.querySelector('[data-pattern-field="formulation"]').value,
+        protective_function: article.querySelector('[data-pattern-field="protective_function"]').value,
+        desired_capacity: article.querySelector('[data-pattern-field="desired_capacity"]').value,
+        mention_in_openings: article.querySelector('[data-pattern-field="mention_in_openings"]').checked,
+        ...extraPatch
+    };
+    try {
+        const response = await fetch('/api/core-patterns/' + encodeURIComponent(id), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        const saved = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(saved.error || 'Could not save working focus');
+        await loadCorePatterns();
+    } catch (error) {
+        feedback.textContent = error.message || 'Could not save. Your original is unchanged.';
+        buttons.forEach(button => { button.disabled = false; });
+    }
+}
+
 function setMode(mode) {
     currentMode = mode;
     document.getElementById('mode-therapist').setAttribute('data-active', mode === 'therapist');
@@ -548,8 +676,12 @@ async function ensureSession() {
     if (!resp.ok) throw new Error('Could not create session');
     const session = await resp.json();
     currentSessionId = session.id;
+    if (session.opening_message && !document.querySelector('#chat-messages [data-chat-role]')) {
+        addMessage('therapist', session.opening_message);
+    }
     const shell = document.getElementById('app-shell');
     if (shell) shell.dataset.sessionId = currentSessionId;
+    window.history.replaceState({}, '', '/chat?session=' + encodeURIComponent(currentSessionId));
     refreshSidebar();
     return currentSessionId;
 }
@@ -2004,6 +2136,12 @@ async function saveBodyOnboarding(periodTrackingChoice, openTracker) {
 
 // Keyboard submit on desktop (Enter to send, Shift+Enter newline)
 document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('focus-drawer')?.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closeFocusDrawer();
+        }
+    });
     const autoRead = document.getElementById('auto-read-responses');
     if (autoRead) autoRead.checked = speechAutoRead;
     const input = document.getElementById('chat-input');

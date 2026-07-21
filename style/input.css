@@ -2403,3 +2403,27 @@
 @media (prefers-reduced-motion: reduce) { .body-onboarding-options button, .body-onboarding-primary, .body-onboarding-secondary { transition: none; }.body-onboarding-options button:active, .body-onboarding-primary:active, .body-onboarding-secondary:active { transform: none; } }
 @media (prefers-reduced-transparency: reduce) { .body-onboarding-modal { backdrop-filter: none; -webkit-backdrop-filter: none; }.body-onboarding-card { background: #10231C; } }
 @media (prefers-contrast: more) { .body-onboarding-card, .body-onboarding-options button, .body-onboarding-secondary { border-color: #AFC8C0; } }
+
+/* User-controlled, revisable therapeutic formulations. */
+.focus-drawer { position: fixed; inset: 0 0 0 auto; z-index: 40; width: min(26rem, 100%); height: 100dvh; overflow-y: auto; padding-bottom: max(1rem, env(safe-area-inset-bottom)); border-left: 1px solid rgba(107,138,130,.25); background: rgba(13,29,23,.97); box-shadow: -24px 0 70px rgba(0,0,0,.42); transform: translateX(100%); transition: transform 240ms cubic-bezier(.2,.8,.2,1); }
+.focus-drawer.is-open { transform: translateX(0); }
+.focus-drawer-head { position: sticky; top: 0; z-index: 1; display: flex; min-height: 72px; align-items: center; justify-content: space-between; gap: 1rem; padding: max(.75rem, env(safe-area-inset-top)) 1rem .75rem; border-bottom: 1px solid rgba(107,138,130,.18); background: rgba(13,29,23,.92); backdrop-filter: blur(18px) saturate(140%); }
+.focus-drawer-head h2 { margin-top: .2rem; color: #F2F0E9; font-family: Fraunces, serif; font-size: 1.45rem; line-height: 1.1; letter-spacing: -.015em; }
+.focus-drawer-head button { width: 44px; height: 44px; border-radius: 999px; color: #9DB3AC; font-size: 1.5rem; transition: background-color 120ms ease-out, color 120ms ease-out, transform 100ms ease-out; }
+.focus-drawer-head button:hover { color: #F2F0E9; background: rgba(107,138,130,.13); }.focus-drawer-head button:active { transform: scale(.94); }
+.focus-drawer-intro { padding: 1rem 1rem 0; color: #8EA9A1; font-size: .78rem; line-height: 1.55; }
+.focus-list { display: grid; gap: .8rem; padding: 1rem; }
+.focus-empty { display: grid; gap: .4rem; padding: 1rem; border: 1px dashed rgba(107,138,130,.3); border-radius: 1rem; color: #78938B; font-size: .76rem; line-height: 1.5; }.focus-empty strong { color: #D6DFDA; }.focus-error { color: #E0A9B0; }
+.focus-card { padding: 1rem; border: 1px solid rgba(107,138,130,.24); border-radius: 1.1rem; background: rgba(8,19,14,.55); }
+.focus-card[data-status="active"] { border-color: rgba(63,184,164,.46); }.focus-card[data-status="proposed"] { border-color: rgba(233,196,106,.38); }
+.focus-card-status { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .7rem; }.focus-card-status span { color: #B8CBC5; font-size: .65rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }.focus-card-status small { color: #78938B; font-size: .64rem; }
+.focus-card > label { display: grid; gap: .3rem; margin-top: .7rem; color: #9DB3AC; font-size: .7rem; font-weight: 760; }.focus-card textarea { min-height: 5.5rem; resize: vertical; line-height: 1.45; }
+.focus-opening-choice { grid-template-columns: 22px minmax(0,1fr); align-items: center; min-height: 44px; cursor: pointer; }.focus-opening-choice input { width: 20px; height: 20px; accent-color: #3FB8A4; }.focus-opening-choice input:disabled + span { opacity: .48; }
+.focus-card-note { margin-top: .75rem; color: #6F8C83; font-size: .66rem; line-height: 1.5; }
+.focus-observations { margin-top: .75rem; padding: .7rem .8rem; border-radius: .8rem; background: rgba(107,138,130,.08); }.focus-observations strong { color: #9DB3AC; font-size: .68rem; }.focus-observations ul { display: grid; gap: .28rem; margin-top: .4rem; padding-left: 1rem; color: #B8CBC5; font-size: .7rem; line-height: 1.45; list-style: disc; }
+.focus-card-feedback { min-height: 1.2rem; margin-top: .5rem; color: #8DE0D1; font-size: .68rem; }
+.focus-card-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .35rem; }.focus-card-actions button { min-height: 44px; padding: .5rem .75rem; border: 1px solid rgba(107,138,130,.3); border-radius: .75rem; color: #AFC8C0; font-size: .7rem; font-weight: 800; transition: transform 100ms ease-out, border-color 120ms ease-out, background-color 120ms ease-out; }.focus-card-actions button:active { transform: scale(.97); }.focus-card-actions button:disabled { cursor: wait; opacity: .5; }.focus-card-actions .focus-primary { border-color: rgba(63,184,164,.5); background: rgba(42,157,143,.14); color: #8DE0D1; }.focus-card-actions .focus-retire { margin-left: auto; color: #B8878D; }
+@media (max-width: 430px) { .focus-drawer { width: 100%; border-left: 0; }.focus-card-actions .focus-retire { margin-left: 0; } }
+@media (prefers-reduced-motion: reduce) { .focus-drawer, .focus-drawer-head button, .focus-card-actions button { transition: none; }.focus-drawer-head button:active, .focus-card-actions button:active { transform: none; } }
+@media (prefers-reduced-transparency: reduce) { .focus-drawer, .focus-drawer-head { background: #0D1D17; backdrop-filter: none; } }
+@media (prefers-contrast: more) { .focus-drawer, .focus-card, .focus-card-actions button { border-color: #AFC8C0; } }

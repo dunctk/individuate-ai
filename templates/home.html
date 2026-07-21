@@ -292,6 +292,8 @@ let currentUserId = '{{ user_id }}';
 let currentUsername = '{{ username }}';
 let memoryStatusSnapshot = null;
 let memoryWatchToken = 0;
+let chatRequestActive = false;
+const retryPrompts = new WeakMap();
 let voiceRecorder = null;
 let voiceChunks = [];
 let voiceInputPrefix = '';
@@ -686,11 +688,12 @@ async function ensureSession() {
     return currentSessionId;
 }
 
-function buildChatStreamUrl(prompt) {
+function buildChatStreamUrl(prompt, isRetry = false) {
     const params = new URLSearchParams({
         prompt,
         session_id: currentSessionId,
-        user_id: currentUserId
+        user_id: currentUserId,
+        retry: isRetry ? 'true' : 'false'
     });
     if (currentMode === 'draft') {
         params.set('relationship_slug', 'default');
@@ -770,7 +773,17 @@ async function ensureSpeechContext() {
     return context;
 }
 
-async function unlockSpeechAudio() {
+function configureSpeechPlaybackSession() {
+    // iOS routes Web Audio through the ambient session by default, which the
+    // Ring/Silent switch can mute even while AudioContext.currentTime advances.
+    // Safari 17+ lets media-style playback opt into the audible playback route.
+    try {
+        if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch (_) {}
+}
+
+async function unlockSpeechAudio(forPlayback = false) {
+    if (forPlayback) configureSpeechPlaybackSession();
     const context = getSpeechContext();
     const resume = context.state === 'suspended' || context.state === 'interrupted'
         ? context.resume()
@@ -1181,7 +1194,7 @@ async function readTherapistMessage(button) {
     const text = bubble?.dataset.chatMarkdown || bubble?.textContent || '';
     if (!controls || !text.trim()) return;
     try {
-        await unlockSpeechAudio();
+        await unlockSpeechAudio(true);
         beginSpokenResponse();
         activateSpeechControls(controls);
         speechGenerationActive = true;
@@ -1207,7 +1220,7 @@ function updateSpokenResponse(text, final = false) {
 
 async function toggleSpokenResponse() {
     try {
-        await unlockSpeechAudio();
+        await unlockSpeechAudio(true);
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
@@ -1231,7 +1244,7 @@ async function toggleSpokenResponse() {
 
 async function seekSpokenResponse(delta) {
     try {
-        await unlockSpeechAudio();
+        await unlockSpeechAudio(true);
         const target = Math.max(0, Math.min(currentSpeechPosition() + delta, speechLoadedDuration()));
         speechPosition = target;
         if (speechWantsPlay) await startSpokenResponseAt(target);
@@ -1243,7 +1256,7 @@ async function seekSpokenResponse(delta) {
 
 async function replaySpokenResponse() {
     try {
-        await unlockSpeechAudio();
+        await unlockSpeechAudio(true);
         if (!speechGenerationActive) {
             speechGenerationActive = true;
             queueAvailableSpeech(speechResponseFinal);
@@ -1266,7 +1279,7 @@ function setAutoReadResponses(enabled) {
         activateSpeechControls(latestControls);
         speechGenerationActive = true;
         speechWantsPlay = true;
-        unlockSpeechAudio()
+        unlockSpeechAudio(true)
             .then(() => {
                 queueAvailableSpeech(speechResponseFinal);
                 if (speechResponseFinal) finishSpeechGeneration();
@@ -1276,11 +1289,62 @@ function setAutoReadResponses(enabled) {
     }
 }
 
-function streamAssistantResponse(prompt) {
+function streamFailureMessage(code) {
+    if (code === 'response_timeout') return 'That response took too long to begin.';
+    if (code === 'connection_failed') return 'The connection was interrupted.';
+    return 'I couldn\'t finish that response.';
+}
+
+function showResponseRetry(message, bubble, avatar, prompt, code) {
+    bubble.classList.remove('bubble-streaming');
+    bubble.classList.add('bubble-retryable');
+    bubble.textContent = streamFailureMessage(code);
+    bubble.dataset.chatMarkdown = '';
+    if (avatar) {
+        avatar.classList.remove('avatar-thinking');
+        avatar.innerHTML = therapistAvatarMarkup(false);
+    }
+    message.querySelector('.therapist-audio')?.classList.add('hidden');
+    message.querySelector('.chat-retry')?.remove();
+
+    const retry = document.createElement('div');
+    retry.className = 'chat-retry';
+    retry.setAttribute('role', 'status');
+    retry.innerHTML =
+        '<button type="button" class="chat-retry-button" aria-label="Retry therapist response" title="Retry response">' +
+          '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6"/></svg>' +
+        '</button>' +
+        '<span>Try again</span>';
+    retryPrompts.set(message, prompt);
+    retry.querySelector('button').addEventListener('click', event => retryAssistantResponse(event.currentTarget));
+    message.querySelector('.bubble')?.parentElement?.appendChild(retry);
+    scheduleScrollChatToBottom();
+}
+
+function streamAssistantResponse(prompt, options = {}) {
     return new Promise((resolve, reject) => {
-        const { message, bubble, avatar } = addStreamingAssistantMessage();
+        let message;
+        let bubble;
+        let avatar;
+        if (options.message) {
+            message = options.message;
+            bubble = message.querySelector('.bubble');
+            avatar = message.querySelector('.avatar-video-wrap');
+            message.querySelector('.chat-retry')?.remove();
+            message.querySelector('.therapist-audio')?.classList.remove('hidden');
+            bubble.classList.remove('bubble-retryable');
+            bubble.classList.add('bubble-streaming');
+            bubble.innerHTML = renderWaitingMessage();
+            if (avatar) {
+                avatar.classList.add('avatar-thinking');
+                avatar.innerHTML = therapistAvatarMarkup(true);
+                avatar.querySelector('video')?.play?.().catch(() => {});
+            }
+        } else {
+            ({ message, bubble, avatar } = addStreamingAssistantMessage());
+        }
         if (speechAutoRead) activateSpeechControls(message.querySelector('.therapist-audio'));
-        const source = new EventSource(buildChatStreamUrl(prompt));
+        const source = new EventSource(buildChatStreamUrl(prompt, Boolean(options.isRetry)));
         let assembled = '';
         let settled = false;
         let responseSettled = false;
@@ -1298,6 +1362,7 @@ function streamAssistantResponse(prompt) {
             responseSettled = true;
             clearInterval(waitingTimer);
             bubble.classList.remove('bubble-streaming');
+            bubble.classList.remove('bubble-retryable');
             bubble.innerHTML = formatChatContent(value || assembled);
             bubble.dataset.chatMarkdown = value || assembled;
             updateSpokenResponse(value || assembled, true);
@@ -1308,8 +1373,24 @@ function streamAssistantResponse(prompt) {
             resolve({ text: value || assembled, memoryUpdated });
         }
 
+        function failResponse(code) {
+            if (responseSettled) return;
+            settled = true;
+            responseSettled = true;
+            clearInterval(waitingTimer);
+            source.close();
+            showResponseRetry(message, bubble, avatar, prompt, code);
+            const error = new Error(streamFailureMessage(code));
+            error.retryVisible = true;
+            reject(error);
+        }
+
         source.onmessage = (event) => {
             if (event.data === '[RESPONSE_DONE]') {
+                if (!assembled.trim()) {
+                    failResponse('empty_response');
+                    return;
+                }
                 finishResponse(assembled);
                 return;
             }
@@ -1329,10 +1410,7 @@ function streamAssistantResponse(prompt) {
                 return;
             }
             if (event.data.startsWith('error:') || event.data === '[error]') {
-                clearInterval(waitingTimer);
-                if (!assembled.trim()) message.remove();
-                source.close();
-                reject(new Error(event.data.replace(/^error:/, '') || 'Stream failed'));
+                failResponse(event.data.replace(/^error:/, '') || 'response_failed');
                 return;
             }
             hasFirstToken = true;
@@ -1345,19 +1423,18 @@ function streamAssistantResponse(prompt) {
 
         source.onerror = () => {
             if (settled) return;
-            clearInterval(waitingTimer);
-            source.close();
-            bubble.classList.remove('bubble-streaming');
-            if (assembled.trim()) updateSpokenResponse(assembled, true);
-            if (responseSettled) return;
-            reject(new Error('Stream connection failed'));
+            failResponse('connection_failed');
         };
     });
 }
 
 function setChatBusy(on) {
+    chatRequestActive = on;
     const orb = document.getElementById('seed-send');
     if (orb) orb.toggleAttribute('disabled', on);
+    document.querySelectorAll('.chat-retry-button').forEach(button => {
+        button.toggleAttribute('disabled', on);
+    });
 }
 
 function setVoiceState(state, interim = '') {
@@ -1740,12 +1817,13 @@ async function offerCycleLogFromChat(messageText) {
 }
 
 async function submitChat() {
+    if (chatRequestActive) return;
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
     beginSpokenResponse();
     if (speechAutoRead) {
-        await unlockSpeechAudio().catch(handleSpeechError);
+        await unlockSpeechAudio(true).catch(handleSpeechError);
         speechWantsPlay = speechAudioUnlocked;
     }
     const voiceLive = document.getElementById('voice-live');
@@ -1766,7 +1844,32 @@ async function submitChat() {
         }
         offerCycleLogFromChat(text);
     } catch (e) {
-        showToast('Error: ' + e.message, 'error');
+        if (!e.retryVisible) showToast('Error: ' + e.message, 'error');
+    } finally {
+        setChatBusy(false);
+    }
+}
+
+async function retryAssistantResponse(button) {
+    if (chatRequestActive) return;
+    const message = button.closest('[data-chat-role="assistant"]');
+    const prompt = message ? retryPrompts.get(message) : '';
+    if (!message || !prompt) {
+        showToast('This response can no longer be retried.', 'error');
+        return;
+    }
+
+    beginSpokenResponse();
+    if (speechAutoRead) {
+        await unlockSpeechAudio(true).catch(handleSpeechError);
+        speechWantsPlay = speechAudioUnlocked;
+    }
+    setChatBusy(true);
+    try {
+        const response = await streamAssistantResponse(prompt, { message, isRetry: true });
+        if (response.text.trim() && !response.memoryUpdated) watchMemoryWrite();
+    } catch (error) {
+        if (!error.retryVisible) showToast('Error: ' + error.message, 'error');
     } finally {
         setChatBusy(false);
     }

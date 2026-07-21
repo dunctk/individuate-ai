@@ -3373,12 +3373,20 @@ input[type="range"]::-webkit-slider-thumb {
   agent-stream: timeout;
 }
 
+.\[agent-stream\:usage-refund\] {
+  agent-stream: usage-refund;
+}
+
 .\[draft-stream\:error\] {
   draft-stream: error;
 }
 
 .\[draft-stream\:timeout\] {
   draft-stream: timeout;
+}
+
+.\[draft-stream\:usage-refund\] {
+  draft-stream: usage-refund;
 }
 
 /* Mind map — a quiet constellation navigator, not a force-directed hairball. */
@@ -7101,6 +7109,85 @@ input[type="range"]::-webkit-slider-thumb {
 @media (prefers-contrast: more) {
   .focus-drawer, .focus-card, .focus-card-actions button {
     border-color: #AFC8C0;
+  }
+}
+
+/* A quiet recovery affordance when an upstream response stalls. */
+
+.bubble-retryable {
+  border-color: rgba(224,169,176,.28);
+  color: #BFA9AB;
+  font-size: .78rem;
+}
+
+.chat-retry {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: .1rem;
+  margin-top: .1rem;
+  color: #78938B;
+  font-size: .65rem;
+  font-weight: 760;
+}
+
+.chat-retry-button {
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #8FB5AB;
+  transition: color 120ms ease-out, background-color 120ms ease-out, transform 100ms ease-out;
+}
+
+.chat-retry-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-retry-button:hover {
+  color: #DCE8E3;
+  background: rgba(107,138,130,.12);
+}
+
+.chat-retry-button:active {
+  transform: rotate(-18deg) scale(.94);
+}
+
+.chat-retry-button:focus-visible {
+  outline: 2px solid #62C7B5;
+  outline-offset: 2px;
+}
+
+.chat-retry-button:disabled {
+  cursor: wait;
+  opacity: .45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-retry-button {
+    transition: none;
+  }
+
+  .chat-retry-button:active {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .bubble-retryable {
+    border-color: #E0A9B0;
+  }
+
+  .chat-retry-button {
+    color: #DCE8E3;
   }
 }
 

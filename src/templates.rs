@@ -609,6 +609,10 @@ mod tests {
         assert!(!html.contains("wss://api.deepgram.com/v1/speak"));
         assert!(!html.contains("window.webkitSpeechRecognition"));
         assert!(html.contains("seed-orb"));
+        assert!(html.contains("chat-retry-button"));
+        assert!(html.contains("retryAssistantResponse"));
+        assert!(html.contains("retry: isRetry ? 'true' : 'false'"));
+        assert!(html.contains("if (!assembled.trim())"));
         assert!(html.contains("M12 19V5"));
         assert!(html.contains("mandala-avatar.jpg"));
         assert!(html.contains("Create a new recovery key"));

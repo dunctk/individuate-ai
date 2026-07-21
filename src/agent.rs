@@ -649,6 +649,7 @@ mod runtime {
     const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
     const DEFAULT_SESSION_SUMMARY_INTERVAL: usize = 4;
     const DEFAULT_MAX_HISTORY_MESSAGES: usize = 24;
+    const DEFAULT_AGENT_STREAM_IDLE_TIMEOUT_SECONDS: usize = 45;
     const DEFAULT_MONTHLY_CHAT_SOFT_LIMIT: usize = 500;
 
     const THERAPIST_SYSTEM_PROMPT: &str = r###"
@@ -5934,6 +5935,21 @@ mod runtime {
                 .context("Fetching history")
         }
 
+        async fn require_retryable_message(
+            &self,
+            session_id: String,
+            expected_user_content: &str,
+        ) -> Result<()> {
+            let history = self.get_history(session_id).await?;
+            let is_retryable = history.last().is_some_and(|message| {
+                message.role == "user" && message.content.trim() == expected_user_content.trim()
+            });
+            if !is_retryable {
+                anyhow::bail!("This response can no longer be retried");
+            }
+            Ok(())
+        }
+
         async fn update_session_summary(
             &self,
             session_id: String,
@@ -8061,6 +8077,7 @@ mod runtime {
             accountability: i32,
             spirituality: i32,
             directness: i32,
+            is_retry: bool,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
@@ -8084,8 +8101,13 @@ mod runtime {
                 "Draft request [{} / {}]: {}",
                 relationship_slug, intent, prompt
             );
-            self.save_message(session_id.clone(), "user".into(), request_label.clone())
-                .await?;
+            if is_retry {
+                self.require_retryable_message(session_id.clone(), &request_label)
+                    .await?;
+            } else {
+                self.save_message(session_id.clone(), "user".into(), request_label.clone())
+                    .await?;
+            }
 
             let draft_context = self
                 .build_draft_context(
@@ -8101,6 +8123,9 @@ mod runtime {
                 let mut guard = self.histories.write().await;
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
+                if is_retry {
+                    guard.remove(&session_id);
+                }
                 if !guard.contains_key(&session_id) {
                     let db_logs = history_before_current_user(
                         self.get_history(session_id.clone()).await?,
@@ -8153,12 +8178,24 @@ mod runtime {
             tokio::spawn(async move {
                 let mut assembled = String::new();
                 let mut final_text = None;
+                let mut failed = false;
+                let idle_timeout = Duration::from_secs(env_usize(
+                    "AGENT_STREAM_IDLE_TIMEOUT_SECONDS",
+                    DEFAULT_AGENT_STREAM_IDLE_TIMEOUT_SECONDS,
+                    15,
+                    180,
+                ) as u64);
                 loop {
-                    let next = timeout(Duration::from_secs(10), stream.next()).await;
+                    let next = timeout(idle_timeout, stream.next()).await;
                     let chunk = match next {
                         Ok(val) => val,
                         Err(_) => {
-                            eprintln!("[draft-stream:timeout] no chunk within 10s, falling back");
+                            eprintln!(
+                                "[draft-stream:timeout] no stream event within {}s",
+                                idle_timeout.as_secs()
+                            );
+                            failed = true;
+                            let _ = tx.send(Ok("error:response_timeout".to_string())).await;
                             break;
                         }
                     };
@@ -8186,15 +8223,24 @@ mod runtime {
                         }
                         Some(Err(e)) => {
                             eprintln!("[draft-stream:error] {}", e);
-                            let _ = tx.send(Ok(format!("error:{e}"))).await;
+                            failed = true;
+                            let _ = tx.send(Ok("error:response_failed".to_string())).await;
                             break;
                         }
                         Some(_) => {}
-                        None => break,
+                        None => {
+                            if final_text.is_none() {
+                                failed = true;
+                                let _ = tx.send(Ok("error:response_ended".to_string())).await;
+                            }
+                            break;
+                        }
                     }
                 }
 
-                let final_content = if let Some(text) = final_text {
+                let final_content = if failed {
+                    String::new()
+                } else if let Some(text) = final_text {
                     text
                 } else if !assembled.is_empty() {
                     assembled
@@ -8212,7 +8258,9 @@ mod runtime {
                         .await;
                     runtime.spawn_session_summary_update(session_id_clone.clone());
                 }
-                let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+                if !failed {
+                    let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+                }
 
                 if !final_content.is_empty() {
                     match runtime
@@ -8233,14 +8281,19 @@ mod runtime {
                 }
                 let _ = tx.send(Ok("[DONE]".to_string())).await;
 
-                history.push(Message::user(draft_prompt));
-                if !final_content.is_empty() {
+                if !failed {
+                    history.push(Message::user(draft_prompt));
                     history.push(Message::Assistant {
                         id: None,
                         content: rig::OneOrMany::one(AssistantContent::Text(Text {
                             text: final_content,
                         })),
                     });
+                } else if let Err(error) = runtime
+                    .refund_monthly_usage(user_id_clone, UsageKind::ChatResponse, 1)
+                    .await
+                {
+                    eprintln!("[draft-stream:usage-refund] {error}");
                 }
                 trim_message_history(
                     &mut history,
@@ -8263,6 +8316,7 @@ mod runtime {
             user_id: String,
             session_id: String,
             prompt: String,
+            is_retry: bool,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
@@ -8282,13 +8336,21 @@ mod runtime {
             {
                 anyhow::bail!("This account has reached its current usage capacity");
             }
-            self.save_message(session_id.clone(), "user".into(), prompt.clone())
-                .await?;
+            if is_retry {
+                self.require_retryable_message(session_id.clone(), &prompt)
+                    .await?;
+            } else {
+                self.save_message(session_id.clone(), "user".into(), prompt.clone())
+                    .await?;
+            }
 
             let mut history = {
                 let mut guard = self.histories.write().await;
                 guard
                     .retain(|_, (last_used, _)| last_used.elapsed() < Duration::from_secs(30 * 60));
+                if is_retry {
+                    guard.remove(&session_id);
+                }
                 if !guard.contains_key(&session_id) {
                     let db_logs = history_before_current_user(
                         self.get_history(session_id.clone()).await?,
@@ -8353,14 +8415,24 @@ mod runtime {
                 AUTHENTICATED_TOOL_USER_ID.scope(user_id_clone.clone(), async move {
                     let mut assembled = String::new();
                     let mut final_text = None;
+                    let mut failed = false;
+                    let idle_timeout = Duration::from_secs(env_usize(
+                        "AGENT_STREAM_IDLE_TIMEOUT_SECONDS",
+                        DEFAULT_AGENT_STREAM_IDLE_TIMEOUT_SECONDS,
+                        15,
+                        180,
+                    ) as u64);
                     loop {
-                        let next = timeout(Duration::from_secs(10), stream.next()).await;
+                        let next = timeout(idle_timeout, stream.next()).await;
                         let chunk = match next {
                             Ok(val) => val,
                             Err(_) => {
                                 eprintln!(
-                                    "[agent-stream:timeout] no chunk within 10s, falling back"
+                                    "[agent-stream:timeout] no stream event within {}s",
+                                    idle_timeout.as_secs()
                                 );
+                                failed = true;
+                                let _ = tx.send(Ok("error:response_timeout".to_string())).await;
                                 break;
                             }
                         };
@@ -8388,15 +8460,24 @@ mod runtime {
                             }
                             Some(Err(e)) => {
                                 eprintln!("[agent-stream:error] {}", e);
-                                let _ = tx.send(Ok(format!("error:{e}"))).await;
+                                failed = true;
+                                let _ = tx.send(Ok("error:response_failed".to_string())).await;
                                 break;
                             }
                             Some(_) => {} // Ignore other stream items
-                            None => break,
+                            None => {
+                                if final_text.is_none() {
+                                    failed = true;
+                                    let _ = tx.send(Ok("error:response_ended".to_string())).await;
+                                }
+                                break;
+                            }
                         }
                     }
 
-                    let final_content = if let Some(text) = final_text {
+                    let final_content = if failed {
+                        String::new()
+                    } else if let Some(text) = final_text {
                         text
                     } else if !assembled.is_empty() {
                         assembled
@@ -8414,7 +8495,9 @@ mod runtime {
                             .await;
                         runtime.spawn_session_summary_update(session_id_clone.clone());
                     }
-                    let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+                    if !failed {
+                        let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+                    }
 
                     if !final_content.is_empty() {
                         match runtime
@@ -8435,14 +8518,19 @@ mod runtime {
                     }
                     let _ = tx.send(Ok("[DONE]".to_string())).await;
 
-                    history.push(Message::user(prompt));
-                    if !final_content.is_empty() {
+                    if !failed {
+                        history.push(Message::user(prompt));
                         history.push(Message::Assistant {
                             id: None,
                             content: rig::OneOrMany::one(AssistantContent::Text(Text {
                                 text: final_content,
                             })),
                         });
+                    } else if let Err(error) = runtime
+                        .refund_monthly_usage(user_id_clone, UsageKind::ChatResponse, 1)
+                        .await
+                    {
+                        eprintln!("[agent-stream:usage-refund] {error}");
                     }
                     trim_message_history(
                         &mut history,
@@ -8747,6 +8835,36 @@ mod runtime {
                 })
                 .await
                 .context("Updating monthly usage")
+        }
+
+        async fn refund_monthly_usage(
+            &self,
+            user_id: String,
+            kind: UsageKind,
+            amount: usize,
+        ) -> Result<()> {
+            if amount == 0 {
+                return Ok(());
+            }
+            let column = match kind {
+                UsageKind::ChatResponse => "chat_responses",
+                UsageKind::VoiceToken => "voice_tokens",
+                UsageKind::TtsCharacter => "tts_characters",
+            };
+            let amount = i64::try_from(amount).unwrap_or(i64::MAX);
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        &format!(
+                            "UPDATE monthly_usage SET {column} = MAX(0, {column} - ?1), updated_at = CURRENT_TIMESTAMP WHERE user_id = ?2 AND period = strftime('%Y-%m', 'now')"
+                        ),
+                        rusqlite::params![amount, user_id],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Refunding failed monthly usage")
         }
 
         async fn list_reflection_sources(
@@ -9997,6 +10115,8 @@ mod runtime {
         pub prompt: String,
         pub session_id: String,
         pub user_id: String,
+        #[serde(default)]
+        pub retry: bool,
     }
 
     #[derive(Deserialize)]
@@ -10009,6 +10129,8 @@ mod runtime {
         pub accountability: i32,
         pub spirituality: i32,
         pub directness: i32,
+        #[serde(default)]
+        pub retry: bool,
     }
 
     pub async fn stream_handler(
@@ -10032,7 +10154,12 @@ mod runtime {
             .cache_dek(&session.user_id, session.dek)
             .map_err(internal_err)?;
         let stream = runtime
-            .stream(params.user_id, params.session_id, params.prompt)
+            .stream(
+                params.user_id,
+                params.session_id,
+                params.prompt,
+                params.retry,
+            )
             .await
             .map_err(internal_err)?;
 
@@ -10098,6 +10225,7 @@ mod runtime {
                 params.accountability,
                 params.spirituality,
                 params.directness,
+                params.retry,
             )
             .await
             .map_err(internal_err)?;

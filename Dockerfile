@@ -1,4 +1,6 @@
-FROM rust:1.93-bookworm AS builder
+# fastembed's prebuilt ONNX Runtime requires glibc's ISO C23 conversion
+# symbols, which are newer than the glibc shipped by Debian Bookworm.
+FROM rust:1.93-trixie AS builder
 
 # Install Node.js and npm for Tailwind CSS
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,14 +26,14 @@ RUN npx tailwindcss -i style/input.css -o style/output.css --minify
 RUN cargo build --locked --release --bin individuateai
 
 # Runner stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 WORKDIR /app
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 

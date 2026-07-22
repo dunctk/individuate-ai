@@ -207,6 +207,7 @@
                     <div class="flex items-center gap-1.5">
                         <button onclick="setMode('therapist')" id="mode-therapist" class="pill" data-active="true">Therapist</button>
                         <button onclick="setMode('draft')" id="mode-draft" class="pill" data-active="false">Draft</button>
+                        <button onclick="setDeepInsight()" id="mode-deep-insight" class="pill deep-insight-pill" data-active="false" aria-pressed="false" title="Use a more capable model to explore patterns from multiple perspectives">Deep Insight</button>
                         <button id="copy-thread-button" type="button" class="thread-copy-button" onclick="copyThreadMarkdown()" aria-label="Copy entire thread as Markdown" title="Copy thread as Markdown" disabled>
                             <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                                 <rect x="8" y="8" width="11" height="11" rx="2"></rect>
@@ -287,6 +288,7 @@ window.visualViewport?.addEventListener('resize', syncChatViewport, { passive: t
 window.visualViewport?.addEventListener('scroll', syncChatViewport, { passive: true });
 
 let currentMode = 'therapist';
+let deepInsightEnabled = false;
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
 let currentUsername = '{{ username }}';
@@ -497,6 +499,21 @@ function setMode(mode) {
         : 'What happened, and what do you want to say?';
 }
 
+function setDeepInsight() {
+    if (currentMode === 'draft') setMode('therapist');
+    deepInsightEnabled = !deepInsightEnabled;
+    const button = document.getElementById('mode-deep-insight');
+    button?.setAttribute('data-active', deepInsightEnabled);
+    button?.setAttribute('aria-pressed', deepInsightEnabled ? 'true' : 'false');
+    if (button) button.title = deepInsightEnabled
+        ? 'Deep Insight is on: a more capable model will examine this from multiple perspectives'
+        : 'Use a more capable model to explore patterns from multiple perspectives';
+    const input = document.getElementById('chat-input');
+    if (input && currentMode === 'therapist') input.placeholder = deepInsightEnabled
+        ? 'What would you like to understand more deeply?'
+        : 'What happened, and what do you want to say?';
+}
+
 function selectSession(sessionId) {
     window.location.href = '/chat?session=' + sessionId;
 }
@@ -688,13 +705,14 @@ async function ensureSession() {
     return currentSessionId;
 }
 
-function buildChatStreamUrl(prompt, isRetry = false) {
+function buildChatStreamUrl(prompt, isRetry = false, deepInsight = deepInsightEnabled) {
     const params = new URLSearchParams({
         prompt,
         session_id: currentSessionId,
         user_id: currentUserId,
         retry: isRetry ? 'true' : 'false'
     });
+    if (currentMode !== 'draft' && deepInsight) params.set('deep_insight', 'true');
     if (currentMode === 'draft') {
         params.set('relationship_slug', 'default');
         params.set('intent', 'general');
@@ -1315,7 +1333,7 @@ function showResponseRetry(message, bubble, avatar, prompt, code) {
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6"/></svg>' +
         '</button>' +
         '<span>Try again</span>';
-    retryPrompts.set(message, prompt);
+    retryPrompts.set(message, { prompt, deepInsight: deepInsightEnabled });
     retry.querySelector('button').addEventListener('click', event => retryAssistantResponse(event.currentTarget));
     message.querySelector('.bubble')?.parentElement?.appendChild(retry);
     scheduleScrollChatToBottom();
@@ -1344,7 +1362,11 @@ function streamAssistantResponse(prompt, options = {}) {
             ({ message, bubble, avatar } = addStreamingAssistantMessage());
         }
         if (speechAutoRead) activateSpeechControls(message.querySelector('.therapist-audio'));
-        const source = new EventSource(buildChatStreamUrl(prompt, Boolean(options.isRetry)));
+        const source = new EventSource(buildChatStreamUrl(
+            prompt,
+            Boolean(options.isRetry),
+            options.deepInsight ?? deepInsightEnabled,
+        ));
         let assembled = '';
         let settled = false;
         let responseSettled = false;
@@ -1853,8 +1875,8 @@ async function submitChat() {
 async function retryAssistantResponse(button) {
     if (chatRequestActive) return;
     const message = button.closest('[data-chat-role="assistant"]');
-    const prompt = message ? retryPrompts.get(message) : '';
-    if (!message || !prompt) {
+    const retry = message ? retryPrompts.get(message) : null;
+    if (!message || !retry) {
         showToast('This response can no longer be retried.', 'error');
         return;
     }
@@ -1866,7 +1888,11 @@ async function retryAssistantResponse(button) {
     }
     setChatBusy(true);
     try {
-        const response = await streamAssistantResponse(prompt, { message, isRetry: true });
+        const response = await streamAssistantResponse(retry.prompt, {
+            message,
+            isRetry: true,
+            deepInsight: retry.deepInsight,
+        });
         if (response.text.trim() && !response.memoryUpdated) watchMemoryWrite();
     } catch (error) {
         if (!error.retryVisible) showToast('Error: ' + error.message, 'error');

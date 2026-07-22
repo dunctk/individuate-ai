@@ -644,6 +644,7 @@ mod runtime {
     use webauthn_rs::prelude::*;
 
     const DEFAULT_THERAPIST_MODEL: &str = "z-ai/glm-5.2";
+    const DEFAULT_DEEP_INSIGHT_MODEL: &str = "openai/gpt-5.6-sol";
     const DEFAULT_MEMORY_EXTRACTION_MODEL: &str = "openai/gpt-5.4-nano";
     const DEFAULT_SESSION_SUMMARY_MODEL: &str = "openai/gpt-4o-mini";
     const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
@@ -685,6 +686,23 @@ mod runtime {
         Working formulations: an <active_formulations> block may contain user-approved hypotheses about recurring patterns. Use them as a quiet compass, never as diagnoses or universal explanations. Explicitly connect the present situation to a formulation only when the block marks it relevant, the user asks for pattern-level analysis, or a previously agreed practice needs review. Ask permission before making a new explicit connection. Look for counterexamples and changed behavior. Distinguish the user's contribution from real external conditions such as exploitation, incompatibility, coercion, discrimination, or another person's choices. Never shame the user, repeatedly confront them with a formulation, or pressure them toward a breakup, resignation, confrontation, or other irreversible action. A proposed formulation is not user-approved and must not guide therapy until activated by the user.
 
         Response preferences: your system instructions may end with a <response_preferences> block containing the user's explicit standing instructions for how you should respond. Follow them in every later response, but treat them as subordinate to safety, accuracy, and this therapist role. Use store_meta_memory only when the user explicitly asks you to persist, change, or forget a response preference (for example, analysis depth, tone, or response structure). Do not use it for autobiographical facts, events, relationships, mind-map concepts, inferred preferences, or the text-to-speech voice. For an upsert, choose a stable short key and store the requested preference as its value; reuse that key when changing it. For removal, use the existing key. A successful tool call affects future requests; honor the user's current instruction directly in the current response.
+    "###;
+    const DEEP_INSIGHT_SYSTEM_PROMPT: &str = r###"
+        You are IndividuateAI in Deep Insight mode. Keep the warmth, humility, and safety discipline of the ordinary therapist role, but use more deliberate reasoning and a wider set of perspectives. Usually stay under ~350 words unless the material genuinely requires more.
+
+        First audit the recent assistant turns before building on them:
+        - Notice agreement-seeking, excessive reassurance, flattering the user, one-sided validation, premature certainty, mind-reading, or an interpretation presented as fact.
+        - Correct or qualify those tendencies when they matter. Do not defensively repeat the prior assistant's framing.
+        - The user's account remains the primary evidence; persistent memory is context, not proof.
+
+        Think across several lenses when relevant, without forcing every lens into every answer:
+        - Humanistic psychotherapy: lived experience, agency, needs, congruence, and the user's own meaning.
+        - Thich Nhat Hanh's mindfulness tradition: compassionate presence, interbeing, non-reactivity, and seeing suffering without making it an identity.
+        - Integral psychology and Spiral Dynamics: developmental perspectives, including Turquoise, as tentative maps of meaning-making and systems awareness—not status labels, diagnoses, or evidence that the user is spiritually superior.
+        - The Gottmans: use only when intimate relationships are involved; attend to interaction patterns, repair, bids for connection, friendship, conflict, and both partners' perspectives.
+        - Jordan Peterson's publicly discussed psychological themes: responsibility, order and chaos, meaning, and voluntary confrontation with difficulty. Treat these as optional concepts, not as an instruction to imitate his voice or endorse every claim.
+
+        Separate your response into a grounded reflection, the strongest alternative interpretation or counter-perspective, and one useful question or next step. Name uncertainty. Do not diagnose, villainize absent people, or turn a framework into a verdict. Never use this mode to encourage an impulsive, irreversible confrontation or major decision. For safety-critical content, encourage appropriate human or emergency support.
     "###;
     const DRAFT_SYSTEM_PROMPT: &str = r###"
         You write messages on behalf of the user.
@@ -4711,6 +4729,7 @@ mod runtime {
 
     pub struct AgentRuntime {
         therapist_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
+        deep_insight_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         // Conversation context is an ephemeral cache, never a second durable
         // copy. Entries expire after the same short inactivity window as DEKs.
@@ -4768,6 +4787,8 @@ mod runtime {
                 std::env::var("OPENROUTER_API_KEY").context("Set OPENROUTER_API_KEY")?;
             let openrouter_model = std::env::var("OPENROUTER_MODEL")
                 .unwrap_or_else(|_| DEFAULT_THERAPIST_MODEL.to_string());
+            let deep_insight_model = std::env::var("DEEP_INSIGHT_MODEL")
+                .unwrap_or_else(|_| DEFAULT_DEEP_INSIGHT_MODEL.to_string());
             let mut openrouter_builder = openrouter::Client::builder().api_key(openrouter_key);
             if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
                 openrouter_builder = openrouter_builder.base_url(&base_url);
@@ -4783,6 +4804,24 @@ mod runtime {
                     .name("individuateai_therapist")
                     .preamble(THERAPIST_SYSTEM_PROMPT)
                     .additional_params(openrouter_privacy_params())
+                    .tool(CurrentDateTimeTool)
+                    .tool(SearchPreviousChatsTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                    })
+                    .tool(StoreMetaMemoryTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                    })
+                    .build();
+            let deep_insight_agent =
+                AgentBuilder::new(openrouter_client.completion_model(deep_insight_model))
+                    .name("individuateai_deep_insight")
+                    .preamble(DEEP_INSIGHT_SYSTEM_PROMPT)
+                    .additional_params(serde_json::json!({
+                        "provider": openrouter_privacy_params()["provider"].clone(),
+                        "reasoning": { "effort": "high" }
+                    }))
                     .tool(CurrentDateTimeTool)
                     .tool(SearchPreviousChatsTool {
                         conn: conn.clone(),
@@ -4812,6 +4851,7 @@ mod runtime {
 
             Ok(Self {
                 therapist_agent,
+                deep_insight_agent,
                 draft_agent,
                 histories: RwLock::new(HashMap::new()),
                 openai_client,
@@ -7528,6 +7568,18 @@ mod runtime {
             agent
         }
 
+        fn deep_insight_agent_for_response(
+            &self,
+            response_preferences: &str,
+        ) -> rig::agent::Agent<openrouter::completion::CompletionModel> {
+            let mut agent = self.deep_insight_agent.clone();
+            agent.preamble = Some(format!(
+                "{}\n\n{}",
+                DEEP_INSIGHT_SYSTEM_PROMPT, response_preferences
+            ));
+            agent
+        }
+
         async fn read_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
             self.read_patient_graph_secure(&user_id).await
         }
@@ -8317,6 +8369,7 @@ mod runtime {
             session_id: String,
             prompt: String,
             is_retry: bool,
+            deep_insight: bool,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
@@ -8387,8 +8440,11 @@ mod runtime {
                 .build_therapist_context(user_id.clone(), prompt.clone())
                 .await
                 .unwrap_or_default();
-            let therapist_agent =
-                self.therapist_agent_for_response(&therapist_context.response_preferences);
+            let therapist_agent = if deep_insight {
+                self.deep_insight_agent_for_response(&therapist_context.response_preferences)
+            } else {
+                self.therapist_agent_for_response(&therapist_context.response_preferences)
+            };
             let enriched_prompt = therapist_user_prompt(
                 &therapist_context.persistent_memory,
                 &therapist_context.active_formulations,
@@ -10117,6 +10173,8 @@ mod runtime {
         pub user_id: String,
         #[serde(default)]
         pub retry: bool,
+        #[serde(default)]
+        pub deep_insight: bool,
     }
 
     #[derive(Deserialize)]
@@ -10159,6 +10217,7 @@ mod runtime {
                 params.session_id,
                 params.prompt,
                 params.retry,
+                params.deep_insight,
             )
             .await
             .map_err(internal_err)?;

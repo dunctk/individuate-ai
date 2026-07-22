@@ -586,9 +586,14 @@ mod tests {
         assert!(html.contains("Nothing guides future chats until you activate it."));
         assert!(!html.contains("href=\"/social-graph\""));
         assert!(html.contains("copy-thread-button"));
-        assert!(html.contains("<span class=\"thread-copy-label\">Copy</span>"));
+        assert!(html.contains("thread-copy-label\">Copy conversation</strong>"));
         assert!(!html.contains("thread-copy-label sr-only"));
         assert!(html.contains("copyThreadMarkdown()"));
+        assert!(html.contains("id=\"composer-tools-button\""));
+        assert!(html.contains("id=\"composer-tools-panel\""));
+        assert!(html.contains("id=\"composer-mode-indicator\""));
+        assert!(html.contains("syncComposerAction()"));
+        assert!(html.contains("class=\"seed-orb hidden\""));
         assert!(html.contains("# Conversation"));
         assert!(html.contains("voice-live"));
         assert!(html.contains("Deepgram live"));
@@ -612,7 +617,16 @@ mod tests {
         assert!(html.contains("chat-retry-button"));
         assert!(html.contains("retryAssistantResponse"));
         assert!(html.contains("retry: isRetry ? 'true' : 'false'"));
+        assert!(html.contains("request_id: requestId"));
+        assert!(html.contains("window.crypto?.randomUUID?.()"));
+        assert!(html.contains("[RESPONSE_REPLAY]"));
         assert!(html.contains("if (!assembled.trim())"));
+        assert!(html.contains(
+            "document.addEventListener('visibilitychange', handleStreamVisibilityChange)"
+        ));
+        assert!(html.contains("window.addEventListener('pageshow', handleStreamPageShow)"));
+        assert!(html.contains("/history'"));
+        assert!(html.contains("history[index].content === persistedUserPrompt"));
         assert!(html.contains("M12 19V5"));
         assert!(html.contains("mandala-avatar.jpg"));
         assert!(html.contains("Create a new recovery key"));

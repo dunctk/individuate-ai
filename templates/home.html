@@ -198,45 +198,50 @@
         </div>
     </main>
 
-    <!-- Composer — the bottom "membrane" with mode toggle, presets, input, and seed orb -->
+    <!-- Composer — a compact input with secondary tools revealed on demand -->
     <footer class="composer-shell shrink-0 z-10">
         <div class="fern-divider"></div>
         <div class="glass-strong">
-            <div class="px-4 sm:px-6 pt-3 pb-2 max-w-3xl mx-auto">
-                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                    <div class="flex items-center gap-1.5">
-                        <button onclick="setMode('therapist')" id="mode-therapist" class="pill" data-active="true">Therapist</button>
-                        <button onclick="setMode('draft')" id="mode-draft" class="pill" data-active="false">Draft</button>
-                        <button onclick="setDeepInsight()" id="mode-deep-insight" class="pill deep-insight-pill" data-active="false" aria-pressed="false" title="Use a more capable model to explore patterns from multiple perspectives">Deep Insight</button>
-                        <button id="copy-thread-button" type="button" class="thread-copy-button" onclick="copyThreadMarkdown()" aria-label="Copy entire thread as Markdown" title="Copy thread as Markdown" disabled>
-                            <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                <rect x="8" y="8" width="11" height="11" rx="2"></rect>
-                                <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
-                            </svg>
-                            <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                <path d="m5 12 4 4L19 6"></path>
-                            </svg>
-                            <span class="thread-copy-label">Copy</span>
-                        </button>
-                    </div>
-                    <label class="auto-read-toggle" for="auto-read-responses">
-                        <input id="auto-read-responses" type="checkbox" onchange="setAutoReadResponses(this.checked)">
-                        <span class="auto-read-track" aria-hidden="true"><span></span></span>
-                        <span>Auto-read</span>
-                    </label>
-                    <div id="draft-controls" class="hidden order-last w-full sm:w-auto items-center gap-2">
-                        <select id="draft-profile-select"
-                            class="field !py-1.5 !px-2.5 !w-auto text-xs min-w-[140px]"></select>
-                    </div>
-                </div>
-            </div>
-            <div class="px-4 sm:px-6 pb-4 pt-1 max-w-3xl mx-auto">
+            <div class="px-3 sm:px-6 pb-3 pt-2.5 max-w-3xl mx-auto">
                 <div id="voice-live" class="voice-live" data-state="idle" role="status" aria-live="polite">
                     <span class="voice-live-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
                     <span id="voice-live-label" class="voice-live-label">Deepgram live</span>
                     <span id="voice-live-interim" class="voice-live-interim" aria-hidden="true"></span>
                 </div>
-                <form id="chat-form" class="flex min-w-0 w-full items-end gap-2 sm:gap-3" onsubmit="event.preventDefault(); submitChat();">
+                <div class="composer-row">
+                    <button id="composer-mode-indicator" type="button" class="composer-mode-indicator hidden" onclick="clearComposerMode()" aria-label="Turn off special response mode"></button>
+                    <div id="composer-tools-panel" class="composer-tools-panel" role="dialog" aria-label="Message tools" aria-hidden="true" inert>
+                        <p class="composer-tools-title">Message tools</p>
+                        <button onclick="setDeepInsight(); setComposerToolsOpen(false, false, true)" id="mode-deep-insight" type="button" class="composer-tool-row" data-active="false" aria-pressed="false">
+                            <span class="composer-tool-icon" aria-hidden="true">✦</span>
+                            <span><strong>Deep Insight</strong><small>Explore this with a more capable model</small></span>
+                            <span class="composer-tool-state" aria-hidden="true">On</span>
+                        </button>
+                        <button onclick="toggleDraftMode(); setComposerToolsOpen(false, false, true)" id="mode-draft" type="button" class="composer-tool-row" data-active="false" aria-pressed="false">
+                            <span class="composer-tool-icon" aria-hidden="true">✎</span>
+                            <span><strong>Draft a message</strong><small>Shape something you want to say</small></span>
+                            <span class="composer-tool-state" aria-hidden="true">On</span>
+                        </button>
+                        <label class="composer-tool-row composer-tool-toggle" for="auto-read-responses">
+                            <span class="composer-tool-icon" aria-hidden="true">◖</span>
+                            <span><strong>Auto-read replies</strong><small>Play new responses aloud</small></span>
+                            <span class="auto-read-toggle">
+                                <input id="auto-read-responses" type="checkbox" onchange="setAutoReadResponses(this.checked)">
+                                <span class="auto-read-track" aria-hidden="true"><span></span></span>
+                            </span>
+                        </label>
+                        <button id="copy-thread-button" type="button" class="composer-tool-row" onclick="copyThreadMarkdown()" disabled>
+                            <span class="composer-tool-icon" aria-hidden="true">
+                                <svg class="thread-copy-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+                                <svg class="thread-copy-check" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></svg>
+                            </span>
+                            <span><strong class="thread-copy-label">Copy conversation</strong><small>Copy this thread as Markdown</small></span>
+                        </button>
+                    </div>
+                    <form id="chat-form" class="flex min-w-0 w-full items-end gap-2" onsubmit="event.preventDefault(); submitChat();">
+                    <button id="composer-tools-button" type="button" class="composer-tools-button shrink-0" aria-label="Open message tools" aria-expanded="false" aria-controls="composer-tools-panel" onclick="toggleComposerTools()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    </button>
                     <div class="flex-1 min-w-0 relative">
                         <input id="chat-input" type="text" autocomplete="off"
                             placeholder="What happened, and what do you want to say?"
@@ -248,12 +253,13 @@
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>
                         </svg>
                     </button>
-                    <button id="seed-send" type="submit" class="seed-orb" aria-label="Send">
+                    <button id="seed-send" type="submit" class="seed-orb hidden" aria-label="Send">
                         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.35" aria-hidden="true">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0-5.5 5.5M12 5l5.5 5.5"/>
                         </svg>
                     </button>
-                </form>
+                    </form>
+                </div>
             </div>
         </div>
     </footer>
@@ -489,29 +495,81 @@ async function saveCorePatternCard(id, article, extraPatch) {
 
 function setMode(mode) {
     currentMode = mode;
-    document.getElementById('mode-therapist').setAttribute('data-active', mode === 'therapist');
-    document.getElementById('mode-draft').setAttribute('data-active', mode === 'draft');
-    const draftControls = document.getElementById('draft-controls');
-    draftControls.classList.toggle('hidden', mode !== 'draft');
-    draftControls.classList.toggle('flex', mode === 'draft');
+    if (mode === 'draft' && deepInsightEnabled) deepInsightEnabled = false;
+    syncComposerModeUi();
     document.getElementById('chat-input').placeholder = mode === 'draft'
         ? 'Describe the message you want to draft…'
-        : 'What happened, and what do you want to say?';
+        : deepInsightEnabled
+            ? 'What would you like to understand more deeply?'
+            : 'What happened, and what do you want to say?';
 }
 
 function setDeepInsight() {
     if (currentMode === 'draft') setMode('therapist');
     deepInsightEnabled = !deepInsightEnabled;
-    const button = document.getElementById('mode-deep-insight');
-    button?.setAttribute('data-active', deepInsightEnabled);
-    button?.setAttribute('aria-pressed', deepInsightEnabled ? 'true' : 'false');
-    if (button) button.title = deepInsightEnabled
-        ? 'Deep Insight is on: a more capable model will examine this from multiple perspectives'
-        : 'Use a more capable model to explore patterns from multiple perspectives';
+    syncComposerModeUi();
     const input = document.getElementById('chat-input');
     if (input && currentMode === 'therapist') input.placeholder = deepInsightEnabled
         ? 'What would you like to understand more deeply?'
         : 'What happened, and what do you want to say?';
+}
+
+function toggleDraftMode() {
+    setMode(currentMode === 'draft' ? 'therapist' : 'draft');
+}
+
+function clearComposerMode() {
+    if (currentMode === 'draft') setMode('therapist');
+    else if (deepInsightEnabled) setDeepInsight();
+}
+
+function syncComposerModeUi() {
+    const deepButton = document.getElementById('mode-deep-insight');
+    const draftButton = document.getElementById('mode-draft');
+    const indicator = document.getElementById('composer-mode-indicator');
+    deepButton?.setAttribute('data-active', deepInsightEnabled ? 'true' : 'false');
+    deepButton?.setAttribute('aria-pressed', deepInsightEnabled ? 'true' : 'false');
+    draftButton?.setAttribute('data-active', currentMode === 'draft' ? 'true' : 'false');
+    draftButton?.setAttribute('aria-pressed', currentMode === 'draft' ? 'true' : 'false');
+    if (!indicator) return;
+    const label = currentMode === 'draft' ? '✎ Draft mode' : deepInsightEnabled ? '✦ Deep Insight' : '';
+    indicator.textContent = label;
+    indicator.classList.toggle('hidden', !label);
+    indicator.setAttribute('aria-label', currentMode === 'draft'
+        ? 'Turn off draft mode'
+        : 'Turn off Deep Insight');
+}
+
+function setComposerToolsOpen(open, restoreFocus = false, focusInput = false) {
+    const button = document.getElementById('composer-tools-button');
+    const panel = document.getElementById('composer-tools-panel');
+    if (!button || !panel) return;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    button.setAttribute('aria-label', open ? 'Close message tools' : 'Open message tools');
+    button.classList.toggle('is-open', open);
+    panel.classList.toggle('is-open', open);
+    panel.setAttribute('aria-hidden', open ? 'false' : 'true');
+    panel.inert = !open;
+    if (open) requestAnimationFrame(() => panel.querySelector('button')?.focus({ preventScroll: true }));
+    else if (restoreFocus) button.focus({ preventScroll: true });
+    else if (focusInput) document.getElementById('chat-input')?.focus({ preventScroll: true });
+}
+
+function toggleComposerTools() {
+    const button = document.getElementById('composer-tools-button');
+    setComposerToolsOpen(button?.getAttribute('aria-expanded') !== 'true');
+}
+
+function syncComposerAction() {
+    const input = document.getElementById('chat-input');
+    const voice = document.getElementById('voice-input');
+    const send = document.getElementById('seed-send');
+    const voiceState = document.getElementById('voice-live')?.dataset.state || 'idle';
+    if (!input || !voice || !send) return;
+    const voiceActive = ['connecting', 'listening', 'recording', 'refining'].includes(voiceState);
+    const showSend = Boolean(input.value.trim()) && !voiceActive;
+    voice.classList.toggle('hidden', showSend);
+    send.classList.toggle('hidden', !showSend);
 }
 
 function selectSession(sessionId) {
@@ -705,11 +763,12 @@ async function ensureSession() {
     return currentSessionId;
 }
 
-function buildChatStreamUrl(prompt, isRetry = false, deepInsight = deepInsightEnabled) {
+function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = deepInsightEnabled) {
     const params = new URLSearchParams({
         prompt,
         session_id: currentSessionId,
         user_id: currentUserId,
+        request_id: requestId,
         retry: isRetry ? 'true' : 'false'
     });
     if (currentMode !== 'draft' && deepInsight) params.set('deep_insight', 'true');
@@ -1362,8 +1421,11 @@ function streamAssistantResponse(prompt, options = {}) {
             ({ message, bubble, avatar } = addStreamingAssistantMessage());
         }
         if (speechAutoRead) activateSpeechControls(message.querySelector('.therapist-audio'));
+        const requestId = window.crypto?.randomUUID?.()
+            || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
         const source = new EventSource(buildChatStreamUrl(
             prompt,
+            requestId,
             Boolean(options.isRetry),
             options.deepInsight ?? deepInsightEnabled,
         ));
@@ -1372,6 +1434,12 @@ function streamAssistantResponse(prompt, options = {}) {
         let responseSettled = false;
         let hasFirstToken = false;
         let memoryUpdated = false;
+        let resumePollTimer = null;
+        let resumePollInFlight = false;
+        const minimumPersistedMessages = document.querySelectorAll('#chat-messages [data-chat-role]').length;
+        const persistedUserPrompt = currentMode === 'draft'
+            ? 'Draft request [default / general]: ' + prompt
+            : prompt;
         const waitingTimer = setInterval(() => {
             if (!hasFirstToken && !settled) {
                 bubble.innerHTML = renderWaitingMessage();
@@ -1379,10 +1447,69 @@ function streamAssistantResponse(prompt, options = {}) {
             }
         }, 2600);
 
+        function stopResumeReconciliation() {
+            clearTimeout(resumePollTimer);
+            resumePollTimer = null;
+            document.removeEventListener('visibilitychange', handleStreamVisibilityChange);
+            window.removeEventListener('pageshow', handleStreamPageShow);
+        }
+
+        function persistedReplyForPrompt(history) {
+            if (!Array.isArray(history) || history.length < minimumPersistedMessages) return '';
+            const replyIndex = history.length - 1;
+            const reply = history[replyIndex];
+            if (reply?.role !== 'assistant' || !String(reply.content || '').trim()) return '';
+            for (let index = replyIndex - 1; index >= 0; index -= 1) {
+                if (history[index]?.role === 'user') {
+                    return history[index].content === persistedUserPrompt ? reply.content : '';
+                }
+            }
+            return '';
+        }
+
+        async function reconcileResponseAfterResume() {
+            if (responseSettled || resumePollInFlight || document.visibilityState !== 'visible') return;
+            resumePollInFlight = true;
+            try {
+                const response = await fetch(
+                    '/api/sessions/' + encodeURIComponent(currentSessionId) + '/history',
+                    { cache: 'no-store' },
+                );
+                if (response.ok) {
+                    const persistedReply = persistedReplyForPrompt(await response.json());
+                    if (persistedReply && !responseSettled) {
+                        settled = true;
+                        source.close();
+                        finishResponse(persistedReply);
+                        return;
+                    }
+                }
+            } catch (_) {
+                // The live stream remains the primary path; retry while this page is foregrounded.
+            } finally {
+                resumePollInFlight = false;
+            }
+            if (!responseSettled && document.visibilityState === 'visible') {
+                resumePollTimer = setTimeout(reconcileResponseAfterResume, 1000);
+            }
+        }
+
+        function handleStreamVisibilityChange() {
+            if (document.visibilityState === 'visible') reconcileResponseAfterResume();
+        }
+
+        function handleStreamPageShow() {
+            reconcileResponseAfterResume();
+        }
+
+        document.addEventListener('visibilitychange', handleStreamVisibilityChange);
+        window.addEventListener('pageshow', handleStreamPageShow);
+
         function finishResponse(value) {
             if (responseSettled) return;
             responseSettled = true;
             clearInterval(waitingTimer);
+            stopResumeReconciliation();
             bubble.classList.remove('bubble-streaming');
             bubble.classList.remove('bubble-retryable');
             bubble.innerHTML = formatChatContent(value || assembled);
@@ -1400,6 +1527,7 @@ function streamAssistantResponse(prompt, options = {}) {
             settled = true;
             responseSettled = true;
             clearInterval(waitingTimer);
+            stopResumeReconciliation();
             source.close();
             showResponseRetry(message, bubble, avatar, prompt, code);
             const error = new Error(streamFailureMessage(code));
@@ -1435,6 +1563,15 @@ function streamAssistantResponse(prompt, options = {}) {
                 failResponse(event.data.replace(/^error:/, '') || 'response_failed');
                 return;
             }
+            if (event.data.startsWith('[RESPONSE_REPLAY]')) {
+                hasFirstToken = true;
+                assembled = event.data.slice('[RESPONSE_REPLAY]'.length);
+                bubble.dataset.chatMarkdown = assembled;
+                updateSpokenResponse(assembled);
+                bubble.innerHTML = formatStreamingChatContent(assembled) || renderWaitingMessage();
+                scheduleScrollChatToBottom();
+                return;
+            }
             hasFirstToken = true;
             assembled += event.data;
             bubble.dataset.chatMarkdown = assembled;
@@ -1454,6 +1591,8 @@ function setChatBusy(on) {
     chatRequestActive = on;
     const orb = document.getElementById('seed-send');
     if (orb) orb.toggleAttribute('disabled', on);
+    document.getElementById('voice-input')?.toggleAttribute('disabled', on);
+    document.getElementById('composer-tools-button')?.toggleAttribute('disabled', on);
     document.querySelectorAll('.chat-retry-button').forEach(button => {
         button.toggleAttribute('disabled', on);
     });
@@ -1488,6 +1627,7 @@ function setVoiceState(state, interim = '') {
     icon.innerHTML = listening
         ? '<rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" fill="none"/>'
         : '<path stroke-linecap="round" stroke-linejoin="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8"/>';
+    syncComposerAction();
 }
 
 function joinVoiceText(prefix, speech) {
@@ -1843,6 +1983,7 @@ async function submitChat() {
     const input = document.getElementById('chat-input');
     const text = input.value.trim();
     if (!text) return;
+    setComposerToolsOpen(false);
     beginSpokenResponse();
     if (speechAutoRead) {
         await unlockSpeechAudio(true).catch(handleSpeechError);
@@ -1857,6 +1998,7 @@ async function submitChat() {
     await ensureMemoryStatusBaseline();
     await ensureSession();
     input.value = '';
+    syncComposerAction();
     addMessage('user', text);
     setChatBusy(true);
     try {
@@ -1972,10 +2114,11 @@ async function copyThreadMarkdown() {
         clearTimeout(copyThreadFeedbackTimer);
         button.dataset.copied = 'true';
         button.querySelector('.thread-copy-label').textContent = 'Copied';
+        setComposerToolsOpen(false, true);
         showToast('Thread copied as Markdown');
         copyThreadFeedbackTimer = setTimeout(() => {
             button.dataset.copied = 'false';
-            button.querySelector('.thread-copy-label').textContent = 'Copy';
+            button.querySelector('.thread-copy-label').textContent = 'Copy conversation';
         }, 2200);
     } catch (_) {
         showToast('Could not copy the thread', 'error');
@@ -2275,6 +2418,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (autoRead) autoRead.checked = speechAutoRead;
     const input = document.getElementById('chat-input');
     if (input) {
+        input.addEventListener('input', syncComposerAction);
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -2289,6 +2433,21 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 250);
         });
     }
+    document.addEventListener('pointerdown', event => {
+        const panel = document.getElementById('composer-tools-panel');
+        const button = document.getElementById('composer-tools-button');
+        if (button?.getAttribute('aria-expanded') === 'true'
+            && !panel?.contains(event.target)
+            && !button.contains(event.target)) {
+            setComposerToolsOpen(false);
+        }
+    });
+    document.getElementById('composer-tools-panel')?.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            setComposerToolsOpen(false, true);
+        }
+    });
     // Hide the empty state the moment any message lands (covers initial hx history load too)
     const mo = new MutationObserver(() => {
         const msgs = document.getElementById('chat-messages');
@@ -2299,6 +2458,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const target = document.getElementById('chat-messages');
     if (target) mo.observe(target, { childList: true });
     syncCopyThreadButton();
+    syncComposerModeUi();
+    syncComposerAction();
     if (target && target.children.length > 0) scheduleScrollChatToBottom();
     ensureMemoryStatusBaseline();
     if (new URLSearchParams(window.location.search).get('setup_passkey_sync') === '1' || localStorage.getItem('setup_passkey_sync') === '1') {

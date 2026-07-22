@@ -610,7 +610,10 @@ mod runtime {
         collections::{hash_map::DefaultHasher, HashMap, HashSet},
         hash::{Hash, Hasher},
         path::Path as FsPath,
-        sync::Arc,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
         time::Instant,
     };
 
@@ -2319,7 +2322,12 @@ mod runtime {
         current_user_content: &str,
         max_messages: usize,
     ) -> Vec<ChatLog> {
-        if logs.last().is_some_and(|log| {
+        logs.dedup_by(|next, previous| {
+            next.role == "user"
+                && previous.role == "user"
+                && next.content.trim() == previous.content.trim()
+        });
+        while logs.last().is_some_and(|log| {
             log.role == "user" && log.content.trim() == current_user_content.trim()
         }) {
             logs.pop();
@@ -4745,6 +4753,15 @@ mod runtime {
         pending_logins: DashMap<String, (Instant, DiscoverableAuthentication)>,
         pending_recovery_rotations: DashMap<String, PendingRecoveryRotation>,
         active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
+        active_chat_requests: DashMap<String, Arc<ActiveChatRequest>>,
+    }
+
+    struct ActiveChatRequest {
+        started: Instant,
+        user_id: String,
+        session_id: String,
+        prompt: String,
+        history_len_before_response: AtomicUsize,
     }
 
     impl AgentRuntime {
@@ -4863,6 +4880,7 @@ mod runtime {
                 pending_logins: DashMap::new(),
                 pending_recovery_rotations: DashMap::new(),
                 active_deks,
+                active_chat_requests: DashMap::new(),
             })
         }
 
@@ -8119,6 +8137,107 @@ mod runtime {
         }
 
         #[allow(clippy::too_many_arguments)]
+        fn claim_chat_request(
+            &self,
+            request_id: &str,
+            user_id: &str,
+            session_id: &str,
+            prompt: &str,
+        ) -> Result<(bool, Arc<ActiveChatRequest>)> {
+            if request_id.is_empty() {
+                return Ok((
+                    true,
+                    Arc::new(ActiveChatRequest {
+                        started: Instant::now(),
+                        user_id: user_id.to_string(),
+                        session_id: session_id.to_string(),
+                        prompt: prompt.to_string(),
+                        history_len_before_response: AtomicUsize::new(usize::MAX),
+                    }),
+                ));
+            }
+            if request_id.len() > 64
+                || !request_id
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            {
+                anyhow::bail!("Invalid chat request id");
+            }
+
+            self.active_chat_requests
+                .retain(|_, request| request.started.elapsed() < Duration::from_secs(30 * 60));
+            let key = format!("{user_id}:{request_id}");
+            match self.active_chat_requests.entry(key) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    let request = Arc::clone(entry.get());
+                    if request.user_id != user_id
+                        || request.session_id != session_id
+                        || request.prompt != prompt
+                    {
+                        anyhow::bail!("Chat request id was reused with different content");
+                    }
+                    Ok((false, request))
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    let request = Arc::new(ActiveChatRequest {
+                        started: Instant::now(),
+                        user_id: user_id.to_string(),
+                        session_id: session_id.to_string(),
+                        prompt: prompt.to_string(),
+                        history_len_before_response: AtomicUsize::new(usize::MAX),
+                    });
+                    entry.insert(Arc::clone(&request));
+                    Ok((true, request))
+                }
+            }
+        }
+
+        fn replay_chat_request(
+            self: &Arc<Self>,
+            request: Arc<ActiveChatRequest>,
+        ) -> ReceiverStream<Result<String, std::convert::Infallible>> {
+            let (tx, rx) = mpsc::channel(4);
+            let runtime = Arc::clone(self);
+            tokio::spawn(async move {
+                let wait_limit = Duration::from_secs(
+                    env_usize(
+                        "AGENT_STREAM_IDLE_TIMEOUT_SECONDS",
+                        DEFAULT_AGENT_STREAM_IDLE_TIMEOUT_SECONDS,
+                        15,
+                        180,
+                    ) as u64
+                        + 10,
+                );
+                let started = Instant::now();
+                loop {
+                    let history_len = request.history_len_before_response.load(Ordering::Acquire);
+                    if history_len != usize::MAX {
+                        if let Ok(history) = runtime.get_history(request.session_id.clone()).await {
+                            if history.len() > history_len {
+                                if let Some(reply) = history.last().filter(|log| {
+                                    log.role == "assistant" && !log.content.trim().is_empty()
+                                }) {
+                                    let _ = tx
+                                        .send(Ok(format!("[RESPONSE_REPLAY]{}", reply.content)))
+                                        .await;
+                                    let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
+                                    let _ = tx.send(Ok("[DONE]".to_string())).await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    if started.elapsed() >= wait_limit {
+                        let _ = tx.send(Ok("error:response_timeout".to_string())).await;
+                        return;
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+            });
+            ReceiverStream::new(rx)
+        }
+
+        #[allow(clippy::too_many_arguments)]
         pub async fn draft_stream(
             self: &Arc<Self>,
             user_id: String,
@@ -8130,9 +8249,19 @@ mod runtime {
             spirituality: i32,
             directness: i32,
             is_retry: bool,
+            request_id: String,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
+            let request_label = format!(
+                "Draft request [{} / {}]: {}",
+                relationship_slug, intent, prompt
+            );
+            let (is_primary_request, request_state) =
+                self.claim_chat_request(&request_id, &user_id, &session_id, &request_label)?;
+            if !is_primary_request {
+                return Ok(self.replay_chat_request(request_state));
+            }
             if !self
                 .consume_monthly_usage(
                     user_id.clone(),
@@ -8149,10 +8278,6 @@ mod runtime {
             {
                 anyhow::bail!("This account has reached its current usage capacity");
             }
-            let request_label = format!(
-                "Draft request [{} / {}]: {}",
-                relationship_slug, intent, prompt
-            );
             if is_retry {
                 self.require_retryable_message(session_id.clone(), &request_label)
                     .await?;
@@ -8160,6 +8285,10 @@ mod runtime {
                 self.save_message(session_id.clone(), "user".into(), request_label.clone())
                     .await?;
             }
+            request_state.history_len_before_response.store(
+                self.get_history(session_id.clone()).await?.len(),
+                Ordering::Release,
+            );
 
             let draft_context = self
                 .build_draft_context(
@@ -8370,9 +8499,15 @@ mod runtime {
             prompt: String,
             is_retry: bool,
             deep_insight: bool,
+            request_id: String,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
                 .await?;
+            let (is_primary_request, request_state) =
+                self.claim_chat_request(&request_id, &user_id, &session_id, &prompt)?;
+            if !is_primary_request {
+                return Ok(self.replay_chat_request(request_state));
+            }
             if !self
                 .consume_monthly_usage(
                     user_id.clone(),
@@ -8396,6 +8531,10 @@ mod runtime {
                 self.save_message(session_id.clone(), "user".into(), prompt.clone())
                     .await?;
             }
+            request_state.history_len_before_response.store(
+                self.get_history(session_id.clone()).await?.len(),
+                Ordering::Release,
+            );
 
             let mut history = {
                 let mut guard = self.histories.write().await;
@@ -10172,6 +10311,8 @@ mod runtime {
         pub session_id: String,
         pub user_id: String,
         #[serde(default)]
+        pub request_id: String,
+        #[serde(default)]
         pub retry: bool,
         #[serde(default)]
         pub deep_insight: bool,
@@ -10182,6 +10323,8 @@ mod runtime {
         pub prompt: String,
         pub session_id: String,
         pub user_id: String,
+        #[serde(default)]
+        pub request_id: String,
         pub relationship_slug: String,
         pub intent: String,
         pub accountability: i32,
@@ -10218,6 +10361,7 @@ mod runtime {
                 params.prompt,
                 params.retry,
                 params.deep_insight,
+                params.request_id,
             )
             .await
             .map_err(internal_err)?;
@@ -10285,6 +10429,7 @@ mod runtime {
                 params.spirituality,
                 params.directness,
                 params.retry,
+                params.request_id,
             )
             .await
             .map_err(internal_err)?;
@@ -10561,6 +10706,10 @@ mod runtime {
                     role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
                     content: format!("message {index}"),
                 })
+                .chain(std::iter::once(ChatLog {
+                    role: "user".into(),
+                    content: "current prompt".into(),
+                }))
                 .chain(std::iter::once(ChatLog {
                     role: "user".into(),
                     content: "current prompt".into(),

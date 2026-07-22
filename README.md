@@ -79,6 +79,24 @@ The production defaults use `z-ai/glm-5.2` for therapist and drafting replies,
 `RELATIONSHIP_PROFILE_MODEL`, `SOCIAL_RELATIONSHIP_MODEL`, `EPISODE_EXTRACTOR_MODEL`,
 `SESSION_SUMMARY_MODEL`, and `EMBEDDING_MODEL`.
 
+Focused previous-chat search uses the quantized `BGESmallENV15Q` FastEmbed
+model locally; chat text is never sent to an embedding API. Model artifacts
+use FastEmbed's cache. Set `FASTEMBED_CACHE_DIR` to relocate it (`HF_HOME`
+takes precedence), and set `LOCAL_EMBEDDING_THREADS` to cap ONNX inference
+threads (default `2`, clamped to `1`–`4`). The Docker image defaults the cache
+to `/app/data/fastembed-cache`, so the existing `/app/data` persistent mount
+retains the download. The first semantic search or newly saved user message
+may download the model; if initialization or inference is unavailable, search
+continues with lexical ranking. Initialization waits at most 180 seconds and
+inference waits at most 20 seconds by default; override these with
+`LOCAL_EMBEDDING_INIT_TIMEOUT_SECONDS` (clamped to `10`–`900`) and
+`LOCAL_EMBEDDING_INFERENCE_TIMEOUT_SECONDS` (clamped to `1`–`120`). Inference
+is single-permit, so timed-out or concurrent calls cannot accumulate blocking
+jobs. Hybrid ranking gives user-authored messages a 69% semantic, 28% lexical,
+2% recency, and 1% user-evidence score; semantic-only results must meet a
+conservative `0.55` cosine floor, while lexical matches remain eligible below
+it.
+
 Session titles are refreshed after the first exchange and every four exchanges
 thereafter. `SESSION_SUMMARY_EVERY_N_EXCHANGES` changes that interval. Model
 prompts retain the most recent 24 messages by default; use

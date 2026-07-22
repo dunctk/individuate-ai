@@ -49,6 +49,7 @@ COPY --from=builder /app/mandala-avatar.mp4 /app/mandala-avatar.mp4
 ENV PORT="3008"
 ENV LEPTOS_SITE_ROOT="/app/public"
 ENV MEMORY_DB_PATH="/app/data/memory.sqlite"
+ENV FASTEMBED_CACHE_DIR="/app/data/fastembed-cache"
 
 # Expose the port
 EXPOSE 3008

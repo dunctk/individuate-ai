@@ -612,7 +612,7 @@ mod runtime {
         path::Path as FsPath,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex as StdMutex,
         },
         time::Instant,
     };
@@ -627,6 +627,7 @@ mod runtime {
     use axum_extra::extract::cookie::{Key, PrivateCookieJar};
     use base64::Engine;
     use dashmap::DashMap;
+    use fastembed::{EmbeddingModel as FastEmbeddingModel, TextEmbedding, TextInitOptions};
     use rig::streaming::StreamingPrompt;
     use rig::{
         agent::AgentBuilder,
@@ -639,7 +640,7 @@ mod runtime {
     use rusqlite::OptionalExtension;
     use schemars::{schema_for, JsonSchema};
     use serde::{Deserialize, Serialize};
-    use tokio::sync::{mpsc, OnceCell, RwLock};
+    use tokio::sync::{mpsc, watch, OnceCell, RwLock, Semaphore};
     use tokio::time::{sleep, timeout, Duration};
     use tokio_rusqlite::Connection;
     use tokio_stream::wrappers::ReceiverStream;
@@ -655,6 +656,14 @@ mod runtime {
     const DEFAULT_MAX_HISTORY_MESSAGES: usize = 24;
     const DEFAULT_AGENT_STREAM_IDLE_TIMEOUT_SECONDS: usize = 45;
     const DEFAULT_MONTHLY_CHAT_SOFT_LIMIT: usize = 500;
+    const LOCAL_CHAT_EMBEDDING_MODEL_ID: &str =
+        "fastembed:Qdrant/bge-small-en-v1.5-onnx-Q:model_optimized.onnx:v1";
+    const LOCAL_CHAT_EMBEDDING_MAX_INPUT_CHARS: usize = 8_000;
+    const LOCAL_CHAT_EMBEDDING_BACKFILL_BATCH: usize = 64;
+    const LOCAL_CHAT_EMBEDDING_BATCH_SIZE: usize = 16;
+    const LOCAL_CHAT_SEMANTIC_COSINE_FLOOR: f32 = 0.55;
+    const DEFAULT_LOCAL_EMBEDDING_INIT_TIMEOUT_SECONDS: u64 = 180;
+    const DEFAULT_LOCAL_EMBEDDING_INFERENCE_TIMEOUT_SECONDS: u64 = 20;
 
     const THERAPIST_SYSTEM_PROMPT: &str = r###"
         You are IndividuateAI, a Jungian, gestalt-informed, somatic-aware therapist. Keep responses grounded and practical, usually under ~180 words; go longer only when the user brings heavy material that deserves room. If the user shares safety-critical content, encourage professional or emergency support.
@@ -1125,10 +1134,163 @@ mod runtime {
         static AUTHENTICATED_TOOL_USER_ID: String;
     }
 
+    type SharedLocalEmbeddingModel = Arc<StdMutex<TextEmbedding>>;
+
+    #[derive(Clone)]
+    struct LocalEmbeddingRuntime {
+        model: Arc<OnceCell<std::result::Result<SharedLocalEmbeddingModel, String>>>,
+        initialization_started: Arc<std::sync::atomic::AtomicBool>,
+        initialization_complete: watch::Receiver<bool>,
+        initialization_complete_tx: Arc<watch::Sender<bool>>,
+        inference_gate: Arc<Semaphore>,
+        enabled: bool,
+    }
+
+    impl LocalEmbeddingRuntime {
+        fn new() -> Self {
+            let (initialization_complete_tx, initialization_complete) = watch::channel(false);
+            Self {
+                model: Arc::new(OnceCell::new()),
+                initialization_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                initialization_complete,
+                initialization_complete_tx: Arc::new(initialization_complete_tx),
+                inference_gate: Arc::new(Semaphore::new(1)),
+                enabled: true,
+            }
+        }
+
+        #[cfg(test)]
+        fn unavailable_for_test() -> Self {
+            let (initialization_complete_tx, initialization_complete) = watch::channel(false);
+            Self {
+                model: Arc::new(OnceCell::new()),
+                initialization_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                initialization_complete,
+                initialization_complete_tx: Arc::new(initialization_complete_tx),
+                inference_gate: Arc::new(Semaphore::new(1)),
+                enabled: false,
+            }
+        }
+
+        fn start_initialization(&self) {
+            if self.initialization_started.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            let model = Arc::clone(&self.model);
+            let initialization_complete_tx = Arc::clone(&self.initialization_complete_tx);
+            tokio::spawn(async move {
+                let result = match tokio::task::spawn_blocking(|| {
+                    let intra_threads = std::env::var("LOCAL_EMBEDDING_THREADS")
+                        .ok()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(2)
+                        .clamp(1, 4);
+                    let options = TextInitOptions::new(FastEmbeddingModel::BGESmallENV15Q)
+                        .with_max_length(512)
+                        .with_intra_threads(intra_threads)
+                        .with_show_download_progress(false);
+                    TextEmbedding::try_new(options)
+                        .map(|model| Arc::new(StdMutex::new(model)))
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => Err(format!(
+                        "local embedding initialization task failed: {error}"
+                    )),
+                };
+                let _ = model.set(result);
+                initialization_complete_tx.send_replace(true);
+            });
+        }
+
+        async fn embed(&self, texts: Vec<String>) -> std::result::Result<Vec<Vec<f32>>, String> {
+            if !self.enabled {
+                return Err("local embeddings disabled for test".to_string());
+            }
+            self.start_initialization();
+            let mut initialization_complete = self.initialization_complete.clone();
+            timeout(
+                local_embedding_init_timeout(),
+                initialization_complete.wait_for(|complete| *complete),
+            )
+            .await
+            .map_err(|_| "local embedding initialization timed out".to_string())?
+            .map_err(|_| "local embedding initialization status closed".to_string())?;
+            let model = self
+                .model
+                .get()
+                .ok_or_else(|| "local embedding initialization did not complete".to_string())?
+                .clone()?;
+            let texts = texts
+                .into_iter()
+                .map(|text| {
+                    text.chars()
+                        .take(LOCAL_CHAT_EMBEDDING_MAX_INPUT_CHARS)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let inference_gate = Arc::clone(&self.inference_gate);
+            timeout(local_embedding_inference_timeout(), async move {
+                let permit = inference_gate
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "local embedding inference gate closed".to_string())?;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    let mut model = model
+                        .lock()
+                        .map_err(|_| "local embedding model lock was poisoned".to_string())?;
+                    model
+                        .embed(&texts, Some(LOCAL_CHAT_EMBEDDING_BATCH_SIZE))
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("local embedding inference task failed: {error}"))?
+            })
+            .await
+            .map_err(|_| "local embedding inference timed out".to_string())?
+        }
+    }
+
+    fn local_embedding_init_timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("LOCAL_EMBEDDING_INIT_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_LOCAL_EMBEDDING_INIT_TIMEOUT_SECONDS)
+                .clamp(10, 900),
+        )
+    }
+
+    fn local_embedding_inference_timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("LOCAL_EMBEDDING_INFERENCE_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_LOCAL_EMBEDDING_INFERENCE_TIMEOUT_SECONDS)
+                .clamp(1, 120),
+        )
+    }
+
     #[derive(Clone)]
     struct SearchPreviousChatsTool {
         conn: Connection,
         active_deks: Arc<DashMap<String, (Instant, Vec<u8>)>>,
+        local_embeddings: LocalEmbeddingRuntime,
+    }
+
+    #[derive(Clone, Debug)]
+    struct PreviousChatCandidate {
+        message_id: i64,
+        session_title: String,
+        date: String,
+        role: String,
+        content: String,
+        lexical_score: i32,
+        embedding: Option<Vec<f32>>,
+        recency_rank: usize,
     }
 
     #[derive(Clone)]
@@ -1166,6 +1328,7 @@ mod runtime {
         persistent_memory: String,
         active_formulations: String,
         body_context: String,
+        time_context: String,
     }
 
     #[derive(Clone, Debug, Serialize)]
@@ -1458,6 +1621,7 @@ mod runtime {
                 CREATE TABLE IF NOT EXISTS user_preferences (
                     user_id TEXT PRIMARY KEY,
                     tts_voice TEXT NOT NULL DEFAULT 'aura-2-thalia-en',
+                    timezone TEXT,
                     onboarding_ciphertext BLOB,
                     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -1545,6 +1709,23 @@ mod runtime {
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(session_id) REFERENCES sessions(id)
                 );
+                CREATE TABLE IF NOT EXISTS chat_message_embeddings (
+                    message_id INTEGER NOT NULL,
+                    user_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    embedding_ciphertext BLOB NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (message_id, user_id, model_id),
+                    FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_message_embeddings_user_model
+                    ON chat_message_embeddings(user_id, model_id, message_id);
+                CREATE TRIGGER IF NOT EXISTS delete_chat_message_embeddings
+                AFTER DELETE ON messages
+                BEGIN
+                    DELETE FROM chat_message_embeddings WHERE message_id = OLD.id;
+                END;
                 CREATE TABLE IF NOT EXISTS patient_graphs (
                     user_id TEXT PRIMARY KEY,
                     graph_json TEXT NOT NULL,
@@ -1749,6 +1930,7 @@ mod runtime {
 
             for (table, column, definition) in [
                 ("user_preferences", "onboarding_ciphertext", "BLOB"),
+                ("user_preferences", "timezone", "TEXT"),
                 ("sessions", "title_ciphertext", "BLOB"),
                 ("sessions", "preview_ciphertext", "BLOB"),
                 ("messages", "content_ciphertext", "BLOB"),
@@ -2521,6 +2703,109 @@ mod runtime {
             .iter()
             .filter(|term| text_terms.contains(*term))
             .count() as i32
+    }
+
+    fn chat_embedding_aad(user_id: &str, message_id: i64, model_id: &str) -> Vec<u8> {
+        serde_json::to_vec(&("chat_message_embedding", user_id, message_id, model_id))
+            .expect("chat embedding AAD tuple is serializable")
+    }
+
+    fn encode_embedding(vector: &[f32]) -> Vec<u8> {
+        vector
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
+        if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+            return None;
+        }
+        Some(
+            bytes
+                .chunks_exact(std::mem::size_of::<f32>())
+                .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                .collect(),
+        )
+    }
+
+    fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+        if left.is_empty() || left.len() != right.len() {
+            return None;
+        }
+        let (dot, left_norm, right_norm) = left.iter().zip(right).fold(
+            (0.0_f32, 0.0_f32, 0.0_f32),
+            |(dot, left_norm, right_norm), (left, right)| {
+                (
+                    dot + (left * right),
+                    left_norm + (left * left),
+                    right_norm + (right * right),
+                )
+            },
+        );
+        if left_norm <= f32::EPSILON || right_norm <= f32::EPSILON {
+            return None;
+        }
+        Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
+    }
+
+    /// Deterministic hybrid ranking. User-message cosine similarity must reach
+    /// the conservative 0.55 floor before it has semantic authority, then it
+    /// is normalized across [0.55, 1.0]. Lexical relevance is normalized
+    /// against the best candidate, and row order supplies a small recency
+    /// tie-break. Only user-authored rows receive semantic weight or the
+    /// evidence bonus. The final score is 69% semantic, 28% lexical, 2%
+    /// recency, and 1% user-evidence preference.
+    fn rank_previous_chat_candidates(
+        mut candidates: Vec<PreviousChatCandidate>,
+        query_embedding: Option<&[f32]>,
+    ) -> Vec<PreviousChatCandidate> {
+        let max_lexical = candidates
+            .iter()
+            .map(|candidate| candidate.lexical_score)
+            .max()
+            .unwrap_or(0)
+            .max(1) as f32;
+        let recency_denominator = candidates.len().saturating_sub(1).max(1) as f32;
+        let mut scored = candidates
+            .drain(..)
+            .filter_map(|candidate| {
+                let semantic = if candidate.role == "user" {
+                    query_embedding
+                        .zip(candidate.embedding.as_deref())
+                        .and_then(|(query, embedding)| cosine_similarity(query, embedding))
+                        .filter(|cosine| *cosine >= LOCAL_CHAT_SEMANTIC_COSINE_FLOOR)
+                        .map(|cosine| {
+                            ((cosine - LOCAL_CHAT_SEMANTIC_COSINE_FLOOR)
+                                / (1.0 - LOCAL_CHAT_SEMANTIC_COSINE_FLOOR))
+                                .clamp(0.0, 1.0)
+                        })
+                        .unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                if candidate.lexical_score <= 0 && semantic <= 0.0 {
+                    return None;
+                }
+                let lexical = candidate.lexical_score.max(0) as f32 / max_lexical;
+                let recency =
+                    1.0 - (candidate.recency_rank as f32 / recency_denominator).clamp(0.0, 1.0);
+                let user_evidence = f32::from(candidate.role == "user");
+                let score = (0.69 * semantic)
+                    + (0.28 * lexical)
+                    + (0.02 * recency)
+                    + (0.01 * user_evidence);
+                Some((score, candidate))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| {
+            right
+                .0
+                .total_cmp(&left.0)
+                .then_with(|| (right.1.role == "user").cmp(&(left.1.role == "user")))
+                .then_with(|| right.1.message_id.cmp(&left.1.message_id))
+        });
+        scored.into_iter().map(|(_, candidate)| candidate).collect()
     }
 
     fn join_items(items: &[String]) -> String {
@@ -4538,12 +4823,20 @@ mod runtime {
         persistent_memory: &str,
         active_formulations: &str,
         body_context: &str,
+        time_context: &str,
         prompt: &str,
     ) -> String {
-        if body_context.trim().is_empty() {
-            format!("{persistent_memory}\n\n{active_formulations}\n\n{prompt}")
+        let time_context = if time_context.trim().is_empty() {
+            String::new()
         } else {
-            format!("{persistent_memory}\n\n{active_formulations}\n\n{body_context}\n\n{prompt}")
+            format!("{time_context}\n\n")
+        };
+        if body_context.trim().is_empty() {
+            format!("{time_context}{persistent_memory}\n\n{active_formulations}\n\n{prompt}")
+        } else {
+            format!(
+                "{time_context}{persistent_memory}\n\n{active_formulations}\n\n{body_context}\n\n{prompt}"
+            )
         }
     }
 
@@ -4564,6 +4857,54 @@ mod runtime {
         async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
             Ok(current_datetime())
         }
+    }
+
+    async fn persist_chat_embeddings(
+        conn: &Connection,
+        user_id: &str,
+        dek: &[u8],
+        embeddings: Vec<(i64, Vec<f32>)>,
+    ) -> Result<()> {
+        let encrypted = embeddings
+            .into_iter()
+            .map(|(message_id, embedding)| {
+                let ciphertext = security::encrypt(
+                    dek,
+                    &encode_embedding(&embedding),
+                    &chat_embedding_aad(user_id, message_id, LOCAL_CHAT_EMBEDDING_MODEL_ID),
+                )?;
+                Ok((message_id, ciphertext))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let user_id = user_id.to_string();
+        conn.call(move |conn| {
+            let transaction = conn.transaction()?;
+            for (message_id, ciphertext) in encrypted {
+                transaction.execute(
+                    r###"
+                    INSERT INTO chat_message_embeddings
+                        (message_id, user_id, model_id, embedding_ciphertext)
+                    SELECT ?1, ?2, ?3, ?4
+                    FROM messages m
+                    JOIN sessions s ON s.id = m.session_id
+                    WHERE m.id = ?1 AND m.role = 'user' AND s.user_id = ?2
+                    ON CONFLICT(message_id, user_id, model_id) DO UPDATE SET
+                        embedding_ciphertext = excluded.embedding_ciphertext,
+                        created_at = CURRENT_TIMESTAMP
+                    "###,
+                    rusqlite::params![
+                        message_id,
+                        user_id,
+                        LOCAL_CHAT_EMBEDDING_MODEL_ID,
+                        ciphertext
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .context("Persisting encrypted local chat embeddings")
     }
 
     impl Tool for SearchPreviousChatsTool {
@@ -4600,35 +4941,47 @@ mod runtime {
             let query_terms = tokenize(&query);
             let query_lower = query.to_lowercase();
 
+            let user_id_for_query = user_id.clone();
+            let dek_for_query = dek.clone();
             let mut candidates = self
                 .conn
                 .call(move |conn| {
                     let mut statement = conn.prepare(
                         r###"
-                        SELECT m.session_id, m.role, m.content_ciphertext,
+                        SELECT m.id, m.session_id, m.role, m.content_ciphertext,
                                s.title_ciphertext,
-                               COALESCE(m.created_at, s.updated_at, s.created_at, '')
+                               COALESCE(m.created_at, s.updated_at, s.created_at, ''),
+                               e.embedding_ciphertext
                         FROM messages m
                         JOIN sessions s ON s.id = m.session_id
+                        LEFT JOIN chat_message_embeddings e
+                          ON e.message_id = m.id
+                         AND e.user_id = ?1
+                         AND e.model_id = ?2
                         WHERE s.user_id = ?1
                         ORDER BY m.id DESC
                         "###,
                     )?;
-                    let rows = statement.query_map([user_id], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Vec<u8>>(2)?,
-                            row.get::<_, Vec<u8>>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    })?;
+                    let rows = statement.query_map(
+                        rusqlite::params![user_id_for_query, LOCAL_CHAT_EMBEDDING_MODEL_ID],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Vec<u8>>(3)?,
+                                row.get::<_, Vec<u8>>(4)?,
+                                row.get::<_, String>(5)?,
+                                row.get::<_, Option<Vec<u8>>>(6)?,
+                            ))
+                        },
+                    )?;
                     let mut matches = Vec::new();
-                    for row in rows {
-                        let (session_id, role, content, title, date) = row?;
+                    for (recency_rank, row) in rows.enumerate() {
+                        let (message_id, session_id, role, content, title, date, embedding) = row?;
                         let content = String::from_utf8(
                             security::decrypt(
-                                &dek,
+                                &dek_for_query,
                                 &content,
                                 format!("messages:{}", session_id).as_bytes(),
                             )
@@ -4637,7 +4990,7 @@ mod runtime {
                         .map_err(|_| rusqlite::Error::InvalidQuery)?;
                         let title = String::from_utf8(
                             security::decrypt(
-                                &dek,
+                                &dek_for_query,
                                 &title,
                                 format!("sessions:{}:title", session_id).as_bytes(),
                             )
@@ -4649,19 +5002,29 @@ mod runtime {
                         if content.to_lowercase().contains(&query_lower) {
                             score += 12;
                         }
-                        if score <= 0 {
-                            continue;
-                        }
-                        let excerpt = content.trim().chars().take(1_200).collect::<String>();
-                        matches.push((
-                            score,
-                            PreviousChatHit {
-                                session_title: title,
-                                date,
-                                role,
-                                excerpt,
-                            },
-                        ));
+                        let embedding = embedding.and_then(|ciphertext| {
+                            let plaintext = security::decrypt(
+                                &dek_for_query,
+                                &ciphertext,
+                                &chat_embedding_aad(
+                                    &user_id_for_query,
+                                    message_id,
+                                    LOCAL_CHAT_EMBEDDING_MODEL_ID,
+                                ),
+                            )
+                            .ok()?;
+                            decode_embedding(&plaintext)
+                        });
+                        matches.push(PreviousChatCandidate {
+                            message_id,
+                            session_title: title,
+                            date,
+                            role,
+                            content,
+                            lexical_score: score,
+                            embedding,
+                            recency_rank,
+                        });
                     }
                     Ok(matches)
                 })
@@ -4670,13 +5033,83 @@ mod runtime {
                     SearchPreviousChatsError(format!("Searching chats failed: {error}"))
                 })?;
 
-            candidates.sort_by(|left, right| right.0.cmp(&left.0));
+            if candidates.is_empty() {
+                return Ok(SearchPreviousChatsOutput {
+                    query,
+                    results: Vec::new(),
+                });
+            }
+
+            let backfill_indices = candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, candidate)| candidate.role == "user" && candidate.embedding.is_none())
+                .take(LOCAL_CHAT_EMBEDDING_BACKFILL_BATCH)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let mut embedding_inputs = Vec::with_capacity(backfill_indices.len() + 1);
+            embedding_inputs.push(query.clone());
+            embedding_inputs.extend(
+                backfill_indices
+                    .iter()
+                    .map(|index| candidates[*index].content.clone()),
+            );
+
+            let query_embedding = match self.local_embeddings.embed(embedding_inputs).await {
+                Ok(mut embeddings) if embeddings.len() == backfill_indices.len() + 1 => {
+                    let query_embedding = embeddings.remove(0);
+                    let newly_embedded = backfill_indices
+                        .into_iter()
+                        .zip(embeddings)
+                        .map(|(index, embedding)| {
+                            let message_id = candidates[index].message_id;
+                            candidates[index].embedding = Some(embedding.clone());
+                            (message_id, embedding)
+                        })
+                        .collect::<Vec<_>>();
+                    if !newly_embedded.is_empty() {
+                        if let Err(error) =
+                            persist_chat_embeddings(&self.conn, &user_id, &dek, newly_embedded)
+                                .await
+                        {
+                            tracing::warn!(
+                            "Could not persist local previous-chat embeddings; lexical search remains available: {error}"
+                        );
+                        }
+                    }
+                    Some(query_embedding)
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        "Local previous-chat embedding inference returned an unexpected batch; using lexical search"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Local previous-chat embeddings are unavailable; using lexical search: {error}"
+                    );
+                    None
+                }
+            };
+
+            let candidates = rank_previous_chat_candidates(candidates, query_embedding.as_deref());
             Ok(SearchPreviousChatsOutput {
                 query,
                 results: candidates
                     .into_iter()
                     .take(max_results)
-                    .map(|(_, hit)| hit)
+                    .map(|candidate| PreviousChatHit {
+                        session_title: candidate.session_title,
+                        date: candidate.date,
+                        role: candidate.role,
+                        excerpt: candidate
+                            .content
+                            .trim()
+                            .chars()
+                            .take(1_200)
+                            .collect::<String>(),
+                    })
                     .collect(),
             })
         }
@@ -4748,6 +5181,7 @@ mod runtime {
         openrouter_client: openrouter::Client,
         #[allow(dead_code)]
         embedding_client: openai::Client,
+        local_embeddings: LocalEmbeddingRuntime,
         webauthn: Webauthn,
         pending_registrations: DashMap<String, PendingRegistration>,
         pending_logins: DashMap<String, (Instant, DiscoverableAuthentication)>,
@@ -4815,6 +5249,7 @@ mod runtime {
                 .context("Building OpenRouter client")?;
 
             let active_deks = Arc::new(DashMap::new());
+            let local_embeddings = LocalEmbeddingRuntime::new();
 
             let therapist_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model.clone()))
@@ -4825,6 +5260,7 @@ mod runtime {
                     .tool(SearchPreviousChatsTool {
                         conn: conn.clone(),
                         active_deks: Arc::clone(&active_deks),
+                        local_embeddings: local_embeddings.clone(),
                     })
                     .tool(StoreMetaMemoryTool {
                         conn: conn.clone(),
@@ -4843,6 +5279,7 @@ mod runtime {
                     .tool(SearchPreviousChatsTool {
                         conn: conn.clone(),
                         active_deks: Arc::clone(&active_deks),
+                        local_embeddings: local_embeddings.clone(),
                     })
                     .tool(StoreMetaMemoryTool {
                         conn: conn.clone(),
@@ -4874,6 +5311,7 @@ mod runtime {
                 openai_client,
                 openrouter_client,
                 embedding_client,
+                local_embeddings,
                 conn,
                 webauthn,
                 pending_registrations: DashMap::new(),
@@ -5935,13 +6373,15 @@ mod runtime {
                 format!("messages:{}", session_id).as_bytes(),
             )?;
             let session_id_for_touch = session_id.clone();
-            self.conn
+            let role_for_embedding = role.clone();
+            let message_id = self
+                .conn
                 .call(move |conn| {
                     conn.execute(
                         "INSERT INTO messages (session_id, role, content, content_ciphertext) VALUES (?1, ?2, '', ?3)",
                         rusqlite::params![session_id, role, encrypted_content],
-                    )
-                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                    )?;
+                    Ok(conn.last_insert_rowid())
                 })
                 .await?;
             self.conn
@@ -5953,6 +6393,34 @@ mod runtime {
                     .map_err(tokio_rusqlite::Error::Rusqlite)
                 })
                 .await?;
+            if role_for_embedding == "user" {
+                let conn = self.conn.clone();
+                let local_embeddings = self.local_embeddings.clone();
+                tokio::spawn(async move {
+                    match local_embeddings.embed(vec![content]).await {
+                        Ok(mut embeddings) if embeddings.len() == 1 => {
+                            if let Err(error) = persist_chat_embeddings(
+                                &conn,
+                                &user_id,
+                                &dek,
+                                vec![(message_id, embeddings.remove(0))],
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "Could not eagerly persist a local chat embedding; the message remains saved: {error}"
+                                );
+                            }
+                        }
+                        Ok(_) => tracing::warn!(
+                            "Local chat embedding inference returned an unexpected batch; the message remains saved"
+                        ),
+                        Err(error) => tracing::warn!(
+                            "Local chat embedding inference is unavailable; the message remains saved: {error}"
+                        ),
+                    }
+                });
+            }
             Ok(())
         }
 
@@ -7559,9 +8027,22 @@ mod runtime {
             let episode_hits = relevant_episode_lines(&episodes, &walk_episode_scores, 4);
 
             let body_context = self
-                .get_cycle_dashboard(user_id, None)
+                .get_cycle_dashboard(user_id.clone(), None)
                 .await
                 .map(|dashboard| cycle::format_body_context(&dashboard))
+                .unwrap_or_default();
+            let time_context = self
+                .get_timezone(user_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|timezone| {
+                    format!(
+                        "<time_context>\nCurrent UTC: {}\nUser's browser timezone: {}\nUse this timezone when interpreting relative dates and times; do not infer why a message arrived late.\n</time_context>",
+                        format_offset_datetime(::time::OffsetDateTime::now_utc()),
+                        timezone
+                    )
+                })
                 .unwrap_or_default();
 
             Ok(TherapistContext {
@@ -7574,6 +8055,7 @@ mod runtime {
                 ),
                 active_formulations: format_active_formulations_block(&core_patterns, &prompt),
                 body_context,
+                time_context,
             })
         }
 
@@ -7965,6 +8447,7 @@ mod runtime {
                 &therapist_context.persistent_memory,
                 &therapist_context.active_formulations,
                 &therapist_context.body_context,
+                &therapist_context.time_context,
                 &prompt,
             );
 
@@ -8588,6 +9071,7 @@ mod runtime {
                 &therapist_context.persistent_memory,
                 &therapist_context.active_formulations,
                 &therapist_context.body_context,
+                &therapist_context.time_context,
                 &prompt,
             );
 
@@ -10187,6 +10671,51 @@ mod runtime {
                 .context("Reading text-to-speech preference")
         }
 
+        pub async fn get_timezone(&self, user_id: String) -> Result<Option<String>> {
+            self.conn
+                .call(move |conn| {
+                    conn.query_row(
+                        "SELECT timezone FROM user_preferences WHERE user_id = ?1",
+                        [user_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Reading timezone preference")
+        }
+
+        pub async fn set_timezone(&self, user_id: String, timezone: String) -> Result<()> {
+            let timezone = timezone.trim().to_string();
+            if timezone.is_empty()
+                || timezone.chars().count() > 80
+                || !timezone.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "/_-+.".contains(character)
+                })
+            {
+                anyhow::bail!("Invalid timezone");
+            }
+
+            self.conn
+                .call(move |conn| {
+                    conn.execute(
+                        r###"
+                        INSERT INTO user_preferences (user_id, timezone, updated_at)
+                        VALUES (?1, ?2, CURRENT_TIMESTAMP)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            timezone = excluded.timezone,
+                            updated_at = CURRENT_TIMESTAMP
+                        "###,
+                        rusqlite::params![user_id, timezone],
+                    )
+                    .map(|_| ())
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .context("Saving timezone preference")
+        }
+
         pub async fn set_tts_voice(&self, user_id: String, voice: String) -> Result<()> {
             self.conn
                 .call(move |conn| {
@@ -10791,6 +11320,64 @@ mod runtime {
             assert_eq!(score, 0);
         }
 
+        fn previous_chat_candidate(
+            message_id: i64,
+            role: &str,
+            lexical_score: i32,
+            embedding: Option<Vec<f32>>,
+            recency_rank: usize,
+        ) -> PreviousChatCandidate {
+            PreviousChatCandidate {
+                message_id,
+                session_title: format!("session {message_id}"),
+                date: "2026-01-02".into(),
+                role: role.into(),
+                content: format!("message {message_id}"),
+                lexical_score,
+                embedding,
+                recency_rank,
+            }
+        }
+
+        #[test]
+        fn hybrid_ranking_allows_semantic_user_evidence_to_beat_lexical_noise() {
+            let candidates = vec![
+                previous_chat_candidate(2, "assistant", 12, None, 0),
+                previous_chat_candidate(1, "user", 0, Some(vec![1.0, 0.0]), 1),
+            ];
+
+            let ranked = rank_previous_chat_candidates(candidates, Some(&[1.0, 0.0]));
+
+            assert_eq!(ranked[0].message_id, 1);
+        }
+
+        #[test]
+        fn hybrid_ranking_falls_back_to_lexical_when_embeddings_are_unavailable() {
+            let candidates = vec![
+                previous_chat_candidate(2, "assistant", 2, None, 0),
+                previous_chat_candidate(1, "user", 0, Some(vec![1.0, 0.0]), 1),
+            ];
+
+            let ranked = rank_previous_chat_candidates(candidates, None);
+
+            assert_eq!(ranked.len(), 1);
+            assert_eq!(ranked[0].message_id, 2);
+        }
+
+        #[test]
+        fn semantic_floor_rejects_unrelated_positive_cosine_but_keeps_lexical_matches() {
+            let weak_positive_embedding = vec![0.30, 0.953_939_2];
+            let candidates = vec![
+                previous_chat_candidate(2, "user", 1, Some(weak_positive_embedding.clone()), 0),
+                previous_chat_candidate(1, "user", 0, Some(weak_positive_embedding), 1),
+            ];
+
+            let ranked = rank_previous_chat_candidates(candidates, Some(&[1.0, 0.0]));
+
+            assert_eq!(ranked.len(), 1);
+            assert_eq!(ranked[0].message_id, 2);
+        }
+
         #[test]
         fn test_fallback_session_preview() {
             let logs = vec![
@@ -10903,6 +11490,13 @@ mod runtime {
                         content_ciphertext BLOB NOT NULL,
                         created_at TEXT
                     );
+                    CREATE TABLE chat_message_embeddings (
+                        message_id INTEGER NOT NULL,
+                        user_id TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        embedding_ciphertext BLOB NOT NULL,
+                        PRIMARY KEY (message_id, user_id, model_id)
+                    );
                     "###,
                 )?;
                 Ok::<_, tokio_rusqlite::Error>(())
@@ -10959,7 +11553,11 @@ mod runtime {
 
             let active_deks = Arc::new(DashMap::new());
             active_deks.insert("user-a".to_string(), (Instant::now(), user_dek.to_vec()));
-            let tool = SearchPreviousChatsTool { conn, active_deks };
+            let tool = SearchPreviousChatsTool {
+                conn,
+                active_deks,
+                local_embeddings: LocalEmbeddingRuntime::unavailable_for_test(),
+            };
             let output = AUTHENTICATED_TOOL_USER_ID
                 .scope("user-a".to_string(), async {
                     tool.call(SearchPreviousChatsArgs {
@@ -10975,6 +11573,129 @@ mod runtime {
             assert_eq!(output.results[0].session_title, "Garden plans");
             assert!(output.results[0].excerpt.contains("kitchen window"));
             assert!(!output.results[0].excerpt.contains("somebody else"));
+        }
+
+        #[tokio::test]
+        async fn ensure_schema_creates_encrypted_chat_embedding_store() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            conn.call(|conn| {
+                conn.execute_batch(
+                    r###"
+                    CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL);
+                    CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY,
+                        user_id TEXT,
+                        title TEXT NOT NULL,
+                        preview TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE TABLE messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL
+                    );
+                    "###,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+            ensure_schema(&conn).await.unwrap();
+
+            let (table_exists, index_exists) = conn
+                .call(|conn| {
+                    let table_exists = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_message_embeddings')",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    let index_exists = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_chat_message_embeddings_user_model')",
+                        [],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    Ok((table_exists, index_exists))
+                })
+                .await
+                .unwrap();
+            assert!(table_exists);
+            assert!(index_exists);
+        }
+
+        #[tokio::test]
+        async fn chat_embeddings_are_user_scoped_encrypted_and_bound_to_row_aad() {
+            let conn = Connection::open_in_memory().await.unwrap();
+            ensure_schema(&conn).await.unwrap();
+            conn.call(|conn| {
+                conn.execute("INSERT INTO users (id, username) VALUES ('user-a', 'a@example.test')", [])?;
+                conn.execute(
+                    "INSERT INTO sessions (id, user_id, title, preview) VALUES ('session-a', 'user-a', '', '')",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content) VALUES ('session-a', 'user', '')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+            let dek = security::generate_dek();
+            let vector = vec![0.25_f32, -0.5, 0.75];
+
+            persist_chat_embeddings(&conn, "user-a", &dek, vec![(1, vector.clone())])
+                .await
+                .unwrap();
+            persist_chat_embeddings(&conn, "user-b", &dek, vec![(1, vec![1.0])])
+                .await
+                .unwrap();
+
+            let ciphertext = conn
+                .call(|conn| {
+                    conn.query_row(
+                        "SELECT embedding_ciphertext FROM chat_message_embeddings WHERE message_id = 1 AND user_id = 'user-a'",
+                        [],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )
+                    .map_err(tokio_rusqlite::Error::Rusqlite)
+                })
+                .await
+                .unwrap();
+            assert_ne!(ciphertext, encode_embedding(&vector));
+            let plaintext = security::decrypt(
+                &dek,
+                &ciphertext,
+                &chat_embedding_aad("user-a", 1, LOCAL_CHAT_EMBEDDING_MODEL_ID),
+            )
+            .unwrap();
+            assert_eq!(decode_embedding(&plaintext).unwrap(), vector);
+            assert!(security::decrypt(
+                &dek,
+                &ciphertext,
+                &chat_embedding_aad("user-a", 2, LOCAL_CHAT_EMBEDDING_MODEL_ID),
+            )
+            .is_err());
+
+            let (other_user_rows, rows_after_delete) = conn
+                .call(|conn| {
+                    let other_user_rows = conn.query_row(
+                        "SELECT count(*) FROM chat_message_embeddings WHERE user_id = 'user-b'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?;
+                    conn.execute("DELETE FROM messages WHERE id = 1", [])?;
+                    let rows_after_delete = conn.query_row(
+                        "SELECT count(*) FROM chat_message_embeddings",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?;
+                    Ok((other_user_rows, rows_after_delete))
+                })
+                .await
+                .unwrap();
+            assert_eq!(other_user_rows, 0);
+            assert_eq!(rows_after_delete, 0);
         }
 
         #[tokio::test]
@@ -11343,6 +12064,7 @@ mod runtime {
                 &persistent_memory,
                 active_formulations,
                 body_context,
+                "",
                 user_input,
             );
 

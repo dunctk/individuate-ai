@@ -190,6 +190,7 @@ async fn main() {
             "/api/settings/voice",
             get(get_voice_setting).post(save_voice_setting),
         )
+        .route("/api/settings/timezone", post(save_timezone_setting))
         .route("/api/mind-map", get(get_social_graph))
         .route("/api/social-graph", get(get_social_graph))
         .route("/api/episodes", get(get_episodes))
@@ -1173,6 +1174,41 @@ async fn recovery_login_handler(
 async fn whoami_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<Option<User>> {
     let user = get_authed_user(&headers, &state.key).await;
     Json(user)
+}
+
+#[derive(Deserialize)]
+struct TimezonePayload {
+    timezone: String,
+}
+
+async fn save_timezone_setting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<TimezonePayload>,
+) -> Response {
+    let user = match get_authed_user(&headers, &state.key).await {
+        Some(user) => user,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let runtime = match agent_runtime().await {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Could not initialize agent runtime: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    match runtime.set_timezone(user.id, payload.timezone).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) if error.to_string().contains("Invalid timezone") => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid timezone"})),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!("Could not save timezone preference: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -26,6 +26,20 @@
 <body class="min-h-screen">
 {% block content %}{% endblock %}
 <script>
+// Keep the user's IANA timezone available to the server for relative dates,
+// routines, and future elapsed-time context. The server remains authoritative
+// for timestamps; this is only a user preference detected by the browser.
+(function saveBrowserTimezone() {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!timezone) return;
+    fetch('/api/settings/timezone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timezone }),
+        credentials: 'same-origin'
+    }).catch(() => {});
+})();
+
 const COLORS = {
     background: "#0F1C18",
     text: "#F2F0E9",

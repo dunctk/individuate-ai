@@ -217,6 +217,11 @@
                             <span><strong>Deep Insight</strong><small>Explore this with a more capable model</small></span>
                             <span class="composer-tool-state" aria-hidden="true">On</span>
                         </button>
+                        <button onclick="setSharpInsight(); setComposerToolsOpen(false, false, true)" id="mode-sharp-insight" type="button" class="composer-tool-row" data-active="false" aria-pressed="false">
+                            <span class="composer-tool-icon" aria-hidden="true">◈</span>
+                            <span><strong>Sharp</strong><small>Challenge the story; expose the pattern</small></span>
+                            <span class="composer-tool-state" aria-hidden="true">On</span>
+                        </button>
                         <button onclick="toggleDraftMode(); setComposerToolsOpen(false, false, true)" id="mode-draft" type="button" class="composer-tool-row" data-active="false" aria-pressed="false">
                             <span class="composer-tool-icon" aria-hidden="true">✎</span>
                             <span><strong>Draft a message</strong><small>Shape something you want to say</small></span>
@@ -295,6 +300,7 @@ window.visualViewport?.addEventListener('scroll', syncChatViewport, { passive: t
 
 let currentMode = 'therapist';
 let deepInsightEnabled = false;
+let sharpInsightEnabled = false;
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
 let currentUsername = '{{ username }}';
@@ -495,10 +501,15 @@ async function saveCorePatternCard(id, article, extraPatch) {
 
 function setMode(mode) {
     currentMode = mode;
-    if (mode === 'draft' && deepInsightEnabled) deepInsightEnabled = false;
+    if (mode === 'draft') {
+        deepInsightEnabled = false;
+        sharpInsightEnabled = false;
+    }
     syncComposerModeUi();
     document.getElementById('chat-input').placeholder = mode === 'draft'
         ? 'Describe the message you want to draft…'
+        : sharpInsightEnabled
+            ? 'What are you avoiding seeing clearly?'
         : deepInsightEnabled
             ? 'What would you like to understand more deeply?'
             : 'What happened, and what do you want to say?';
@@ -507,10 +518,22 @@ function setMode(mode) {
 function setDeepInsight() {
     if (currentMode === 'draft') setMode('therapist');
     deepInsightEnabled = !deepInsightEnabled;
+    if (deepInsightEnabled) sharpInsightEnabled = false;
     syncComposerModeUi();
     const input = document.getElementById('chat-input');
     if (input && currentMode === 'therapist') input.placeholder = deepInsightEnabled
         ? 'What would you like to understand more deeply?'
+        : 'What happened, and what do you want to say?';
+}
+
+function setSharpInsight() {
+    if (currentMode === 'draft') setMode('therapist');
+    sharpInsightEnabled = !sharpInsightEnabled;
+    if (sharpInsightEnabled) deepInsightEnabled = false;
+    syncComposerModeUi();
+    const input = document.getElementById('chat-input');
+    if (input && currentMode === 'therapist') input.placeholder = sharpInsightEnabled
+        ? 'What are you avoiding seeing clearly?'
         : 'What happened, and what do you want to say?';
 }
 
@@ -521,23 +544,27 @@ function toggleDraftMode() {
 function clearComposerMode() {
     if (currentMode === 'draft') setMode('therapist');
     else if (deepInsightEnabled) setDeepInsight();
+    else if (sharpInsightEnabled) setSharpInsight();
 }
 
 function syncComposerModeUi() {
     const deepButton = document.getElementById('mode-deep-insight');
+    const sharpButton = document.getElementById('mode-sharp-insight');
     const draftButton = document.getElementById('mode-draft');
     const indicator = document.getElementById('composer-mode-indicator');
     deepButton?.setAttribute('data-active', deepInsightEnabled ? 'true' : 'false');
     deepButton?.setAttribute('aria-pressed', deepInsightEnabled ? 'true' : 'false');
+    sharpButton?.setAttribute('data-active', sharpInsightEnabled ? 'true' : 'false');
+    sharpButton?.setAttribute('aria-pressed', sharpInsightEnabled ? 'true' : 'false');
     draftButton?.setAttribute('data-active', currentMode === 'draft' ? 'true' : 'false');
     draftButton?.setAttribute('aria-pressed', currentMode === 'draft' ? 'true' : 'false');
     if (!indicator) return;
-    const label = currentMode === 'draft' ? '✎ Draft mode' : deepInsightEnabled ? '✦ Deep Insight' : '';
+    const label = currentMode === 'draft' ? '✎ Draft mode' : sharpInsightEnabled ? '◈ Sharp' : deepInsightEnabled ? '✦ Deep Insight' : '';
     indicator.textContent = label;
     indicator.classList.toggle('hidden', !label);
     indicator.setAttribute('aria-label', currentMode === 'draft'
         ? 'Turn off draft mode'
-        : 'Turn off Deep Insight');
+        : sharpInsightEnabled ? 'Turn off Sharp mode' : 'Turn off Deep Insight');
 }
 
 function setComposerToolsOpen(open, restoreFocus = false, focusInput = false) {
@@ -763,7 +790,7 @@ async function ensureSession() {
     return currentSessionId;
 }
 
-function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = deepInsightEnabled) {
+function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = deepInsightEnabled, sharpInsight = sharpInsightEnabled) {
     const params = new URLSearchParams({
         prompt,
         session_id: currentSessionId,
@@ -772,6 +799,7 @@ function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = de
         retry: isRetry ? 'true' : 'false'
     });
     if (currentMode !== 'draft' && deepInsight) params.set('deep_insight', 'true');
+    if (currentMode !== 'draft' && sharpInsight) params.set('sharp_insight', 'true');
     if (currentMode === 'draft') {
         params.set('relationship_slug', 'default');
         params.set('intent', 'general');
@@ -1392,7 +1420,7 @@ function showResponseRetry(message, bubble, avatar, prompt, code) {
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6"/></svg>' +
         '</button>' +
         '<span>Try again</span>';
-    retryPrompts.set(message, { prompt, deepInsight: deepInsightEnabled });
+    retryPrompts.set(message, { prompt, deepInsight: deepInsightEnabled, sharpInsight: sharpInsightEnabled });
     retry.querySelector('button').addEventListener('click', event => retryAssistantResponse(event.currentTarget));
     message.querySelector('.bubble')?.parentElement?.appendChild(retry);
     scheduleScrollChatToBottom();
@@ -1428,6 +1456,7 @@ function streamAssistantResponse(prompt, options = {}) {
             requestId,
             Boolean(options.isRetry),
             options.deepInsight ?? deepInsightEnabled,
+            options.sharpInsight ?? sharpInsightEnabled,
         ));
         let assembled = '';
         let settled = false;
@@ -2034,6 +2063,7 @@ async function retryAssistantResponse(button) {
             message,
             isRetry: true,
             deepInsight: retry.deepInsight,
+            sharpInsight: retry.sharpInsight,
         });
         if (response.text.trim() && !response.memoryUpdated) watchMemoryWrite();
     } catch (error) {

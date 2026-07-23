@@ -649,6 +649,7 @@ mod runtime {
 
     const DEFAULT_THERAPIST_MODEL: &str = "z-ai/glm-5.2";
     const DEFAULT_DEEP_INSIGHT_MODEL: &str = "openai/gpt-5.6-sol";
+    const DEFAULT_SHARP_INSIGHT_MODEL: &str = "moonshotai/kimi-k3";
     const DEFAULT_MEMORY_EXTRACTION_MODEL: &str = "openai/gpt-5.4-nano";
     const DEFAULT_SESSION_SUMMARY_MODEL: &str = "openai/gpt-4o-mini";
     const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
@@ -715,6 +716,26 @@ mod runtime {
         - Jordan Peterson's publicly discussed psychological themes: responsibility, order and chaos, meaning, and voluntary confrontation with difficulty. Treat these as optional concepts, not as an instruction to imitate his voice or endorse every claim.
 
         Separate your response into a grounded reflection, the strongest alternative interpretation or counter-perspective, and one useful question or next step. Name uncertainty. Do not diagnose, villainize absent people, or turn a framework into a verdict. Never use this mode to encourage an impulsive, irreversible confrontation or major decision. For safety-critical content, encourage appropriate human or emergency support.
+    "###;
+    const SHARP_INSIGHT_SYSTEM_PROMPT: &str = r###"
+        You are IndividuateAI in Sharp mode. Be warm enough to be useful, but unusually direct,
+        skeptical, and unsparing about self-deception. Look for the hidden bargain, avoidance,
+        identity story, or repeated behavior that keeps the user's problem intact. Name the
+        pattern plainly and use vivid, compact language. Challenge comforting narratives and
+        performative insight; prefer what the user's behavior reveals over what they say they
+        intend. Do not be cruel, theatrical, sarcastic, or contemptuous, and do not imitate any
+        particular writer's voice. You may draw conceptually on themes associated with Jed
+        McKenna's *Spiritual Enlightenment: The Damnedest Thing*—radical honesty, examination of
+        the constructed self, and refusing comforting spiritual narratives—but do not quote it,
+        impersonate McKenna, or present its claims as unquestionable truth.
+
+        Keep interpretations provisional. Distinguish the user's agency from real exploitation,
+        coercion, incompatibility, discrimination, or another person's choices. Do not diagnose,
+        villainize absent people, or turn bluntness into a verdict. Include the strongest counter-
+        interpretation when it could change the conclusion, then give one concrete, reversible
+        experiment. Never encourage an impulsive confrontation or irreversible major decision.
+        Usually stay under ~250 words. For safety-critical content, prioritize appropriate human
+        or emergency support.
     "###;
     const DRAFT_SYSTEM_PROMPT: &str = r###"
         You write messages on behalf of the user.
@@ -5171,6 +5192,7 @@ mod runtime {
     pub struct AgentRuntime {
         therapist_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         deep_insight_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
+        sharp_insight_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         draft_agent: rig::agent::Agent<openrouter::completion::CompletionModel>,
         // Conversation context is an ephemeral cache, never a second durable
         // copy. Entries expire after the same short inactivity window as DEKs.
@@ -5240,6 +5262,8 @@ mod runtime {
                 .unwrap_or_else(|_| DEFAULT_THERAPIST_MODEL.to_string());
             let deep_insight_model = std::env::var("DEEP_INSIGHT_MODEL")
                 .unwrap_or_else(|_| DEFAULT_DEEP_INSIGHT_MODEL.to_string());
+            let sharp_insight_model = std::env::var("SHARP_INSIGHT_MODEL")
+                .unwrap_or_else(|_| DEFAULT_SHARP_INSIGHT_MODEL.to_string());
             let mut openrouter_builder = openrouter::Client::builder().api_key(openrouter_key);
             if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
                 openrouter_builder = openrouter_builder.base_url(&base_url);
@@ -5286,6 +5310,25 @@ mod runtime {
                         active_deks: Arc::clone(&active_deks),
                     })
                     .build();
+            let sharp_insight_agent =
+                AgentBuilder::new(openrouter_client.completion_model(sharp_insight_model))
+                    .name("individuateai_sharp_insight")
+                    .preamble(SHARP_INSIGHT_SYSTEM_PROMPT)
+                    .additional_params(serde_json::json!({
+                        "provider": openrouter_privacy_params()["provider"].clone(),
+                        "reasoning": { "effort": "high" }
+                    }))
+                    .tool(CurrentDateTimeTool)
+                    .tool(SearchPreviousChatsTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                        local_embeddings: local_embeddings.clone(),
+                    })
+                    .tool(StoreMetaMemoryTool {
+                        conn: conn.clone(),
+                        active_deks: Arc::clone(&active_deks),
+                    })
+                    .build();
             let draft_agent =
                 AgentBuilder::new(openrouter_client.completion_model(openrouter_model))
                     .name("individuateai_drafter")
@@ -5306,6 +5349,7 @@ mod runtime {
             Ok(Self {
                 therapist_agent,
                 deep_insight_agent,
+                sharp_insight_agent,
                 draft_agent,
                 histories: RwLock::new(HashMap::new()),
                 openai_client,
@@ -8080,6 +8124,18 @@ mod runtime {
             agent
         }
 
+        fn sharp_insight_agent_for_response(
+            &self,
+            response_preferences: &str,
+        ) -> rig::agent::Agent<openrouter::completion::CompletionModel> {
+            let mut agent = self.sharp_insight_agent.clone();
+            agent.preamble = Some(format!(
+                "{}\n\n{}",
+                SHARP_INSIGHT_SYSTEM_PROMPT, response_preferences
+            ));
+            agent
+        }
+
         async fn read_patient_graph(&self, user_id: String) -> Result<PatientGraph> {
             self.read_patient_graph_secure(&user_id).await
         }
@@ -8982,6 +9038,7 @@ mod runtime {
             prompt: String,
             is_retry: bool,
             deep_insight: bool,
+            sharp_insight: bool,
             request_id: String,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
@@ -9062,7 +9119,9 @@ mod runtime {
                 .build_therapist_context(user_id.clone(), prompt.clone())
                 .await
                 .unwrap_or_default();
-            let therapist_agent = if deep_insight {
+            let therapist_agent = if sharp_insight {
+                self.sharp_insight_agent_for_response(&therapist_context.response_preferences)
+            } else if deep_insight {
                 self.deep_insight_agent_for_response(&therapist_context.response_preferences)
             } else {
                 self.therapist_agent_for_response(&therapist_context.response_preferences)
@@ -10845,6 +10904,8 @@ mod runtime {
         pub retry: bool,
         #[serde(default)]
         pub deep_insight: bool,
+        #[serde(default)]
+        pub sharp_insight: bool,
     }
 
     #[derive(Deserialize)]
@@ -10890,6 +10951,7 @@ mod runtime {
                 params.prompt,
                 params.retry,
                 params.deep_insight,
+                params.sharp_insight,
                 params.request_id,
             )
             .await

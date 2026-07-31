@@ -20,4 +20,7 @@ node_modules/
 .gemini-clipboard/
 data/
 *.bak
-.codex
+# Local Codex state and conversation logs
+.codex/
+codex*.log
+.codex*.log

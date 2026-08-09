@@ -2408,10 +2408,6 @@ input[type="range"]::-webkit-slider-thumb {
   margin-bottom: 1.25rem;
 }
 
-.mb-6 {
-  margin-bottom: 1.5rem;
-}
-
 .mb-7 {
   margin-bottom: 1.75rem;
 }
@@ -2634,10 +2630,6 @@ input[type="range"]::-webkit-slider-thumb {
 
 .max-w-xl {
   max-width: 36rem;
-}
-
-.max-w-xs {
-  max-width: 20rem;
 }
 
 .flex-1 {
@@ -3141,11 +3133,6 @@ input[type="range"]::-webkit-slider-thumb {
 .px-5 {
   padding-left: 1.25rem;
   padding-right: 1.25rem;
-}
-
-.px-6 {
-  padding-left: 1.5rem;
-  padding-right: 1.5rem;
 }
 
 .py-0\.5 {
@@ -7371,6 +7358,216 @@ input[type="range"]::-webkit-slider-thumb {
 
   .chat-retry-button {
     color: #DCE8E3;
+  }
+}
+
+/* A calm, label-free first step into reflection. The cards seed the composer;
+   they never submit or become an attachment-style classification. */
+
+.support-chooser {
+  width: min(100%, 42rem);
+  margin: auto;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid rgba(107,138,130,.19);
+  border-radius: 1.65rem;
+  background: linear-gradient(145deg, rgba(16,35,28,.7), rgba(8,19,14,.48));
+  box-shadow: 0 24px 80px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.025);
+  backdrop-filter: blur(16px) saturate(120%);
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+}
+
+.support-chooser-kicker {
+  color: #75D0BF;
+  font-size: .62rem;
+  font-weight: 850;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+}
+
+.support-chooser-intro {
+  max-width: 34rem;
+  margin: .55rem auto 0;
+  color: #8EA9A1;
+  font-size: .76rem;
+  line-height: 1.55;
+}
+
+.support-intent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .55rem;
+  margin-top: 1.2rem;
+  text-align: left;
+}
+
+.support-intent-card {
+  display: grid;
+  grid-template-columns: 2.3rem minmax(0,1fr);
+  min-height: 72px;
+  align-items: center;
+  gap: .65rem;
+  padding: .65rem .7rem;
+  border: 1px solid rgba(107,138,130,.22);
+  border-radius: 1rem;
+  color: #DCE5E1;
+  background: rgba(8,19,14,.42);
+  text-align: left;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms cubic-bezier(.2,.75,.2,1), box-shadow 160ms ease;
+}
+
+.support-intent-card:hover {
+  border-color: rgba(63,184,164,.48);
+  background: rgba(42,157,143,.09);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0,0,0,.12);
+}
+
+.support-intent-card:active {
+  transform: translateY(0) scale(.985);
+}
+
+.support-intent-card:focus-visible {
+  outline: 2px solid #3FB8A4;
+  outline-offset: 2px;
+}
+
+.support-intent-card[aria-pressed="true"] {
+  border-color: rgba(233,196,106,.62);
+  background: rgba(233,196,106,.08);
+  box-shadow: inset 0 0 0 1px rgba(233,196,106,.1);
+}
+
+.support-intent-glyph {
+  display: grid;
+  width: 2.3rem;
+  height: 2.3rem;
+  place-items: center;
+  border: 1px solid rgba(63,184,164,.28);
+  border-radius: .8rem;
+  color: #8DE0D1;
+  background: rgba(42,157,143,.09);
+  font-family: Fraunces, serif;
+  font-size: 1.2rem;
+}
+
+.support-intent-card[aria-pressed="true"] .support-intent-glyph {
+  border-color: rgba(233,196,106,.45);
+  color: #F2D88A;
+  background: rgba(233,196,106,.1);
+}
+
+.support-intent-card strong {
+  display: block;
+  color: #E7EAE5;
+  font-size: .77rem;
+  font-weight: 820;
+  line-height: 1.25;
+}
+
+.support-intent-card small {
+  display: block;
+  margin-top: .22rem;
+  color: #78938B;
+  font-size: .64rem;
+  line-height: 1.35;
+}
+
+.support-chooser-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem;
+  margin-top: .9rem;
+}
+
+.support-freewrite {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: .45rem;
+  padding: .4rem .7rem;
+  border-radius: .7rem;
+  color: #B8CBC5;
+  font-size: .72rem;
+  font-weight: 780;
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.support-freewrite:hover {
+  color: #F2F0E9;
+  background: rgba(107,138,130,.1);
+}
+
+.support-freewrite span {
+  color: #75D0BF;
+  font-size: 1rem;
+}
+
+.support-chooser-note {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  color: #6F8C83;
+  font-size: .62rem;
+  line-height: 1.35;
+}
+
+.support-chooser-note-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #3FB8A4;
+  box-shadow: 0 0 0 4px rgba(63,184,164,.1);
+}
+
+@media (max-width: 520px) {
+  .support-chooser {
+    padding: 1rem .75rem;
+    border-radius: 1.25rem;
+  }
+
+  .support-intent-grid {
+    grid-template-columns: 1fr;
+    gap: .45rem;
+    margin-top: 1rem;
+  }
+
+  .support-intent-card {
+    min-height: 64px;
+  }
+
+  .support-chooser-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .support-intent-card {
+    transition: none;
+  }
+
+  .support-intent-card:hover, .support-intent-card:active {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .support-chooser {
+    background: #10231C;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .support-chooser, .support-intent-card {
+    border-color: #AFC8C0;
+  }
+
+  .support-chooser-intro, .support-intent-card small, .support-chooser-note {
+    color: #B8CBC5;
   }
 }
 

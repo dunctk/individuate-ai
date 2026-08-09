@@ -572,6 +572,11 @@ mod tests {
         assert!(html.contains("app-shell"));
         assert!(html.contains("app-viewport"));
         assert!(html.contains("chat-stage"));
+        assert!(html.contains("support-chooser-title"));
+        assert!(html.contains("I’m creating distance"));
+        assert!(html.contains("I need a boundary"));
+        assert!(html.contains("chooseSupportIntent(this)"));
+        assert!(html.contains("not a label, diagnosis, or permanent profile"));
         assert!(html.contains("composer-shell"));
         assert!(html.contains("window.visualViewport"));
         assert!(html.contains("viewport?.offsetTop"));

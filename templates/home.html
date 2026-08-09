@@ -135,16 +135,47 @@
     <!-- Chat scroll region — the "living rhizome" of the conversation -->
     <main id="chat-stage" class="flex-1 overflow-y-auto relative min-h-0">
         <div id="chat-empty"
-             class="absolute inset-0 {% if messages|length > 0 %}hidden{% else %}flex{% endif %} flex-col items-center justify-center pointer-events-none px-6 text-center">
-            <div class="spiral-empty mb-6" aria-hidden="true">
+             class="absolute inset-0 {% if messages|length > 0 %}hidden{% else %}flex{% endif %} flex-col items-center justify-center pointer-events-auto overflow-y-auto px-4 py-8 text-center sm:px-6">
+            <div class="support-chooser" aria-labelledby="support-chooser-title">
+            <div class="spiral-empty mb-5" aria-hidden="true">
                 <svg viewBox="0 0 200 200" fill="none" stroke="currentColor" stroke-width="1.2">
                     <path d="M100,100 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M100,98 m-6,2 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0 M100,95 m-11,5 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0 M100,90 m-17,7 a17,17 0 1,0 34,0 a17,17 0 1,0 -34,0 M100,85 m-24,9 a24,24 0 1,0 48,0 a24,24 0 1,0 -48,0 M100,79 m-33,11 a33,33 0 1,0 66,0 a33,33 0 1,0 -66,0 M100,72 m-44,15 a44,44 0 1,0 88,0 a44,44 0 1,0 -88,0 M100,64 m-56,21 a56,56 0 1,0 112,0 a56,56 0 1,0 -112,0 M100,55 m-70,23 a70,70 0 1,0 140,0 a70,70 0 1,0 -140,0 M100,44 m-86,30 a86,86 0 1,0 172,0 a86,86 0 1,0 -172,0"/>
                 </svg>
             </div>
-            <h2 class="font-fraunces font-soft text-2xl text-parchment/90 mb-2 text-balance">A space for what's growing</h2>
-            <p class="text-sm text-sage-light max-w-xs text-balance leading-relaxed">
-                Begin wherever you are &mdash; a moment, a feeling, a person on your mind. What you share takes root here and is remembered.
-            </p>
+            <p class="support-chooser-kicker">A private place to begin</p>
+            <h2 id="support-chooser-title" class="font-fraunces font-soft text-2xl text-parchment/90 mb-2 text-balance">What kind of support fits right now?</h2>
+            <p class="support-chooser-intro">Choose a doorway, or write freely. This choice shapes your opening only — it is not a label, diagnosis, or permanent profile.</p>
+            <div class="support-intent-grid" role="group" aria-label="Ways to begin">
+                <button type="button" class="support-intent-card" data-support-intent="distance" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">↔</span>
+                    <span><strong>I’m creating distance</strong><small>Notice what the space may be protecting</small></span>
+                </button>
+                <button type="button" class="support-intent-card" data-support-intent="closeness" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">◌</span>
+                    <span><strong>Closeness feels complicated</strong><small>Slow down without forcing an answer</small></span>
+                </button>
+                <button type="button" class="support-intent-card" data-support-intent="conflict" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">∿</span>
+                    <span><strong>Something ruptured</strong><small>Separate facts, feelings, and next steps</small></span>
+                </button>
+                <button type="button" class="support-intent-card" data-support-intent="need" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">✦</span>
+                    <span><strong>I can’t find my need</strong><small>Listen beneath the analysis or numbness</small></span>
+                </button>
+                <button type="button" class="support-intent-card" data-support-intent="boundary" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">⌁</span>
+                    <span><strong>I need a boundary</strong><small>Protect yourself without disappearing</small></span>
+                </button>
+                <button type="button" class="support-intent-card" data-support-intent="loneliness" aria-pressed="false" onclick="chooseSupportIntent(this)">
+                    <span class="support-intent-glyph" aria-hidden="true">○</span>
+                    <span><strong>I feel alone or uncertain</strong><small>Find steadiness before deciding what to do</small></span>
+                </button>
+            </div>
+            <div class="support-chooser-footer">
+                <button type="button" class="support-freewrite" onclick="beginFreeWriting()">I’d rather write freely <span aria-hidden="true">→</span></button>
+                <span class="support-chooser-note"><span class="support-chooser-note-dot" aria-hidden="true"></span>Your words stay in your private conversation</span>
+            </div>
+            </div>
         </div>
 
         <div id="chat-messages" class="px-4 sm:px-6 py-6 space-y-5 max-w-3xl mx-auto relative z-[1]"
@@ -2076,6 +2107,35 @@ async function retryAssistantResponse(button) {
 function submitPreset(preset) {
     document.getElementById('chat-input').value = preset;
     submitChat();
+}
+
+const SUPPORT_INTENTS = {
+    distance: 'I notice I am creating distance from someone or something. Help me understand what is happening without assuming it is a diagnosis.',
+    closeness: 'Closeness feels complicated for me right now. Help me slow down and notice what I want, what I fear, and what I need.',
+    conflict: 'Something ruptured in a relationship. Help me separate what happened, what I feel, what I am assuming, and what I want to understand before I act.',
+    need: 'I am having trouble finding or naming what I need. Help me explore it gently, without pushing me toward an immediate action.',
+    boundary: 'I think I may need a boundary. Help me tell the difference between protecting myself and disappearing from discomfort.',
+    loneliness: 'I feel alone or uncertain in a relationship. Help me become clearer about whether I want contact, space, support, or something else.'
+};
+
+function chooseSupportIntent(button) {
+    const intent = button?.dataset.supportIntent;
+    const prompt = SUPPORT_INTENTS[intent];
+    if (!prompt) return;
+    document.querySelectorAll('.support-intent-card').forEach(card => card.setAttribute('aria-pressed', card === button ? 'true' : 'false'));
+    const input = document.getElementById('chat-input');
+    if (!input) return;
+    input.value = prompt;
+    input.focus({ preventScroll: true });
+    syncComposerAction();
+    showToast('Opening added to your composer. Edit it or send when ready.');
+}
+
+function beginFreeWriting() {
+    const input = document.getElementById('chat-input');
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    showToast('Take your time. Nothing is pre-filled.');
 }
 
 function refreshSidebar() {

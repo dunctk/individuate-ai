@@ -258,6 +258,11 @@
                             <span><strong>Draft a message</strong><small>Shape something you want to say</small></span>
                             <span class="composer-tool-state" aria-hidden="true">On</span>
                         </button>
+                        <button onclick="toggleCouplesMode(); setComposerToolsOpen(false, false, true)" id="mode-couples" type="button" class="composer-tool-row" data-active="false" aria-pressed="false">
+                            <span class="composer-tool-icon" aria-hidden="true">♢</span>
+                            <span><strong>Couples mode</strong><small>Separate two voices from one microphone</small></span>
+                            <span class="composer-tool-state" aria-hidden="true">On</span>
+                        </button>
                         <label class="composer-tool-row composer-tool-toggle" for="auto-read-responses">
                             <span class="composer-tool-icon" aria-hidden="true">◖</span>
                             <span><strong>Auto-read replies</strong><small>Play new responses aloud</small></span>
@@ -332,6 +337,7 @@ window.visualViewport?.addEventListener('scroll', syncChatViewport, { passive: t
 let currentMode = 'therapist';
 let deepInsightEnabled = false;
 let sharpInsightEnabled = false;
+let couplesModeEnabled = false;
 let currentSessionId = '{{ session_id }}';
 let currentUserId = '{{ user_id }}';
 let currentUsername = '{{ username }}';
@@ -346,6 +352,7 @@ let voiceProvider = 'Deepgram';
 let deepgramSocket = null;
 let deepgramStream = null;
 let deepgramFinalText = '';
+let deepgramFinalSpeakerTurns = [];
 let deepgramStopping = false;
 let deepgramStopTimer = null;
 let deepgramStartId = 0;
@@ -535,6 +542,7 @@ function setMode(mode) {
     if (mode === 'draft') {
         deepInsightEnabled = false;
         sharpInsightEnabled = false;
+        couplesModeEnabled = false;
     }
     syncComposerModeUi();
     document.getElementById('chat-input').placeholder = mode === 'draft'
@@ -543,6 +551,8 @@ function setMode(mode) {
             ? 'What are you avoiding seeing clearly?'
         : deepInsightEnabled
             ? 'What would you like to understand more deeply?'
+        : couplesModeEnabled
+            ? 'Tap the microphone and speak together…'
             : 'What happened, and what do you want to say?';
 }
 
@@ -554,7 +564,7 @@ function setDeepInsight() {
     const input = document.getElementById('chat-input');
     if (input && currentMode === 'therapist') input.placeholder = deepInsightEnabled
         ? 'What would you like to understand more deeply?'
-        : 'What happened, and what do you want to say?';
+        : couplesModeEnabled ? 'Tap the microphone and speak together…' : 'What happened, and what do you want to say?';
 }
 
 function setSharpInsight() {
@@ -565,23 +575,41 @@ function setSharpInsight() {
     const input = document.getElementById('chat-input');
     if (input && currentMode === 'therapist') input.placeholder = sharpInsightEnabled
         ? 'What are you avoiding seeing clearly?'
-        : 'What happened, and what do you want to say?';
+        : couplesModeEnabled ? 'Tap the microphone and speak together…' : 'What happened, and what do you want to say?';
 }
 
 function toggleDraftMode() {
     setMode(currentMode === 'draft' ? 'therapist' : 'draft');
 }
 
+function toggleCouplesMode() {
+    if (deepgramSocket || (voiceRecorder && voiceRecorder.state === 'recording')) {
+        showToast('Stop voice input before changing couples mode', 'error');
+        return;
+    }
+    if (currentMode === 'draft') setMode('therapist');
+    couplesModeEnabled = !couplesModeEnabled;
+    syncComposerModeUi();
+    const input = document.getElementById('chat-input');
+    if (input && currentMode === 'therapist' && !deepInsightEnabled && !sharpInsightEnabled) {
+        input.placeholder = couplesModeEnabled
+            ? 'Tap the microphone and speak together…'
+            : 'What happened, and what do you want to say?';
+    }
+}
+
 function clearComposerMode() {
     if (currentMode === 'draft') setMode('therapist');
     else if (deepInsightEnabled) setDeepInsight();
     else if (sharpInsightEnabled) setSharpInsight();
+    else if (couplesModeEnabled) toggleCouplesMode();
 }
 
 function syncComposerModeUi() {
     const deepButton = document.getElementById('mode-deep-insight');
     const sharpButton = document.getElementById('mode-sharp-insight');
     const draftButton = document.getElementById('mode-draft');
+    const couplesButton = document.getElementById('mode-couples');
     const indicator = document.getElementById('composer-mode-indicator');
     deepButton?.setAttribute('data-active', deepInsightEnabled ? 'true' : 'false');
     deepButton?.setAttribute('aria-pressed', deepInsightEnabled ? 'true' : 'false');
@@ -589,13 +617,14 @@ function syncComposerModeUi() {
     sharpButton?.setAttribute('aria-pressed', sharpInsightEnabled ? 'true' : 'false');
     draftButton?.setAttribute('data-active', currentMode === 'draft' ? 'true' : 'false');
     draftButton?.setAttribute('aria-pressed', currentMode === 'draft' ? 'true' : 'false');
+    couplesButton?.setAttribute('data-active', couplesModeEnabled ? 'true' : 'false');
+    couplesButton?.setAttribute('aria-pressed', couplesModeEnabled ? 'true' : 'false');
     if (!indicator) return;
-    const label = currentMode === 'draft' ? '✎ Draft mode' : sharpInsightEnabled ? '◈ Sharp' : deepInsightEnabled ? '✦ Deep Insight' : '';
+    const responseModeLabel = currentMode === 'draft' ? '✎ Draft' : sharpInsightEnabled ? '◈ Sharp' : deepInsightEnabled ? '✦ Deep Insight' : '';
+    const label = [responseModeLabel, couplesModeEnabled ? '♢ Couples' : ''].filter(Boolean).join(' · ');
     indicator.textContent = label;
     indicator.classList.toggle('hidden', !label);
-    indicator.setAttribute('aria-label', currentMode === 'draft'
-        ? 'Turn off draft mode'
-        : sharpInsightEnabled ? 'Turn off Sharp mode' : 'Turn off Deep Insight');
+    indicator.setAttribute('aria-label', 'Turn off ' + (responseModeLabel || 'couples mode'));
 }
 
 function setComposerToolsOpen(open, restoreFocus = false, focusInput = false) {
@@ -821,7 +850,7 @@ async function ensureSession() {
     return currentSessionId;
 }
 
-function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = deepInsightEnabled, sharpInsight = sharpInsightEnabled) {
+function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = deepInsightEnabled, sharpInsight = sharpInsightEnabled, couples = couplesModeEnabled) {
     const params = new URLSearchParams({
         prompt,
         session_id: currentSessionId,
@@ -831,6 +860,7 @@ function buildChatStreamUrl(prompt, requestId, isRetry = false, deepInsight = de
     });
     if (currentMode !== 'draft' && deepInsight) params.set('deep_insight', 'true');
     if (currentMode !== 'draft' && sharpInsight) params.set('sharp_insight', 'true');
+    if (currentMode !== 'draft' && couples) params.set('couples', 'true');
     if (currentMode === 'draft') {
         params.set('relationship_slug', 'default');
         params.set('intent', 'general');
@@ -1431,7 +1461,7 @@ function streamFailureMessage(code) {
     return 'I couldn\'t finish that response.';
 }
 
-function showResponseRetry(message, bubble, avatar, prompt, code) {
+function showResponseRetry(message, bubble, avatar, prompt, code, modes) {
     bubble.classList.remove('bubble-streaming');
     bubble.classList.add('bubble-retryable');
     bubble.textContent = streamFailureMessage(code);
@@ -1451,7 +1481,7 @@ function showResponseRetry(message, bubble, avatar, prompt, code) {
           '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.35 5.65M20 5v6h-6"/></svg>' +
         '</button>' +
         '<span>Try again</span>';
-    retryPrompts.set(message, { prompt, deepInsight: deepInsightEnabled, sharpInsight: sharpInsightEnabled });
+    retryPrompts.set(message, { prompt, ...modes });
     retry.querySelector('button').addEventListener('click', event => retryAssistantResponse(event.currentTarget));
     message.querySelector('.bubble')?.parentElement?.appendChild(retry);
     scheduleScrollChatToBottom();
@@ -1459,6 +1489,11 @@ function showResponseRetry(message, bubble, avatar, prompt, code) {
 
 function streamAssistantResponse(prompt, options = {}) {
     return new Promise((resolve, reject) => {
+        const requestModes = {
+            deepInsight: options.deepInsight ?? deepInsightEnabled,
+            sharpInsight: options.sharpInsight ?? sharpInsightEnabled,
+            couples: options.couples ?? couplesModeEnabled,
+        };
         let message;
         let bubble;
         let avatar;
@@ -1486,8 +1521,9 @@ function streamAssistantResponse(prompt, options = {}) {
             prompt,
             requestId,
             Boolean(options.isRetry),
-            options.deepInsight ?? deepInsightEnabled,
-            options.sharpInsight ?? sharpInsightEnabled,
+            requestModes.deepInsight,
+            requestModes.sharpInsight,
+            requestModes.couples,
         ));
         let assembled = '';
         let settled = false;
@@ -1579,7 +1615,7 @@ function streamAssistantResponse(prompt, options = {}) {
                 avatar.classList.remove('avatar-thinking');
                 avatar.innerHTML = therapistAvatarMarkup(false);
             }
-            resolve({ text: value || assembled, memoryUpdated });
+            resolve({ text: value || assembled, memoryUpdated, couples: requestModes.couples });
         }
 
         function failResponse(code) {
@@ -1589,7 +1625,7 @@ function streamAssistantResponse(prompt, options = {}) {
             clearInterval(waitingTimer);
             stopResumeReconciliation();
             source.close();
-            showResponseRetry(message, bubble, avatar, prompt, code);
+            showResponseRetry(message, bubble, avatar, prompt, code, requestModes);
             const error = new Error(streamFailureMessage(code));
             error.retryVisible = true;
             reject(error);
@@ -1681,8 +1717,8 @@ function setVoiceState(state, interim = '') {
         : state === 'refining'
         ? 'Refining transcript'
         : state === 'recording'
-            ? 'Recording'
-            : voiceProvider + ' live';
+            ? (couplesModeEnabled ? 'Recording both partners' : 'Recording')
+            : (couplesModeEnabled ? 'Couples listening' : voiceProvider + ' live');
     interimEl.textContent = interim;
     icon.innerHTML = listening
         ? '<rect x="7" y="7" width="10" height="10" rx="1.5" stroke="currentColor" fill="none"/>'
@@ -1694,6 +1730,34 @@ function joinVoiceText(prefix, speech) {
     const cleanPrefix = prefix.trimEnd();
     const cleanSpeech = speech.trim();
     return cleanPrefix && cleanSpeech ? cleanPrefix + ' ' + cleanSpeech : (cleanPrefix || cleanSpeech);
+}
+
+function speakerTurnsFromAlternative(alternative) {
+    const words = Array.isArray(alternative?.words) ? alternative.words : [];
+    const turns = [];
+    for (const word of words) {
+        const text = String(word.punctuated_word || word.word || '').trim();
+        if (!text) continue;
+        const speaker = Number.isInteger(word.speaker) ? word.speaker : 0;
+        const last = turns[turns.length - 1];
+        if (last?.speaker === speaker) last.text += ' ' + text;
+        else turns.push({ speaker, text });
+    }
+    return turns;
+}
+
+function mergeSpeakerTurns(base, additions) {
+    const merged = base.map(turn => ({ ...turn }));
+    for (const turn of additions) {
+        const last = merged[merged.length - 1];
+        if (last?.speaker === turn.speaker) last.text += ' ' + turn.text;
+        else merged.push({ ...turn });
+    }
+    return merged;
+}
+
+function formatSpeakerTurns(turns) {
+    return turns.map(turn => `Partner ${turn.speaker + 1}: ${turn.text}`).join('\n');
 }
 
 function cancelledVoiceStart() {
@@ -1783,6 +1847,7 @@ async function startDeepgramVoiceInput() {
     deepgramStream = stream;
     voiceInputPrefix = document.getElementById('chat-input').value;
     deepgramFinalText = '';
+    deepgramFinalSpeakerTurns = [];
     deepgramStopping = false;
 
     const language = navigator.language || document.documentElement.lang || 'en-US';
@@ -1795,6 +1860,7 @@ async function startDeepgramVoiceInput() {
         endpointing: '350',
         mip_opt_out: 'true'
     });
+    if (couplesModeEnabled) params.set('diarize_model', 'latest');
     const socket = new WebSocket(
         'wss://api.eu.deepgram.com/v1/listen?' + params.toString(),
         ['bearer', tokenPayload.access_token]
@@ -1854,11 +1920,26 @@ async function startDeepgramVoiceInput() {
             let result;
             try { result = JSON.parse(event.data); } catch (_) { return; }
             if (result.type !== 'Results') return;
-            const transcript = result.channel?.alternatives?.[0]?.transcript?.trim() || '';
+            const alternative = result.channel?.alternatives?.[0];
+            const transcript = alternative?.transcript?.trim() || '';
             if (!transcript) return;
-            if (result.is_final) deepgramFinalText = joinVoiceText(deepgramFinalText, transcript);
-            const interim = result.is_final ? '' : transcript;
-            const spoken = joinVoiceText(deepgramFinalText, interim);
+            let interim = result.is_final ? '' : transcript;
+            let spoken;
+            if (couplesModeEnabled) {
+                const turns = speakerTurnsFromAlternative(alternative);
+                if (result.is_final) {
+                    deepgramFinalSpeakerTurns = mergeSpeakerTurns(deepgramFinalSpeakerTurns, turns);
+                    deepgramFinalText = formatSpeakerTurns(deepgramFinalSpeakerTurns);
+                }
+                const visibleTurns = result.is_final
+                    ? deepgramFinalSpeakerTurns
+                    : mergeSpeakerTurns(deepgramFinalSpeakerTurns, turns);
+                spoken = formatSpeakerTurns(visibleTurns);
+                interim = turns.length ? `Partner ${turns[turns.length - 1].speaker + 1}` : transcript;
+            } else {
+                if (result.is_final) deepgramFinalText = joinVoiceText(deepgramFinalText, transcript);
+                spoken = joinVoiceText(deepgramFinalText, interim);
+            }
             const input = document.getElementById('chat-input');
             input.value = joinVoiceText(voiceInputPrefix, spoken);
             input.setSelectionRange(input.value.length, input.value.length);
@@ -1923,7 +2004,7 @@ async function startRecordedVoiceInput() {
             try {
                 setVoiceState('refining');
                 setChatBusy(true);
-                const response = await fetch('/api/transcribe', {
+                const response = await fetch('/api/transcribe' + (couplesModeEnabled ? '?diarize=true' : ''), {
                     method: 'POST',
                     headers: { 'Content-Type': audio.type },
                     body: audio
@@ -2063,10 +2144,10 @@ async function submitChat() {
     setChatBusy(true);
     try {
         const response = await streamAssistantResponse(text);
-        if (response.text.trim() && !response.memoryUpdated) {
+        if (response.text.trim() && !response.memoryUpdated && !response.couples) {
             watchMemoryWrite();
         }
-        offerCycleLogFromChat(text);
+        if (!response.couples) offerCycleLogFromChat(text);
     } catch (e) {
         if (!e.retryVisible) showToast('Error: ' + e.message, 'error');
     } finally {
@@ -2095,8 +2176,9 @@ async function retryAssistantResponse(button) {
             isRetry: true,
             deepInsight: retry.deepInsight,
             sharpInsight: retry.sharpInsight,
+            couples: retry.couples,
         });
-        if (response.text.trim() && !response.memoryUpdated) watchMemoryWrite();
+        if (response.text.trim() && !response.memoryUpdated && !retry.couples) watchMemoryWrite();
     } catch (error) {
         if (!error.retryVisible) showToast('Error: ' + error.message, 'error');
     } finally {

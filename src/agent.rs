@@ -9037,6 +9037,7 @@ mod runtime {
             Ok(ReceiverStream::new(rx))
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub async fn stream(
             self: &Arc<Self>,
             user_id: String,
@@ -9045,6 +9046,7 @@ mod runtime {
             is_retry: bool,
             deep_insight: bool,
             sharp_insight: bool,
+            couples: bool,
             request_id: String,
         ) -> Result<ReceiverStream<Result<String, std::convert::Infallible>>> {
             self.require_session_ownership(&user_id, &session_id)
@@ -9132,13 +9134,18 @@ mod runtime {
             } else {
                 self.therapist_agent_for_response(&therapist_context.response_preferences)
             };
-            let enriched_prompt = therapist_user_prompt(
+            let mut enriched_prompt = therapist_user_prompt(
                 &therapist_context.persistent_memory,
                 &therapist_context.active_formulations,
                 &therapist_context.body_context,
                 &therapist_context.time_context,
                 &prompt,
             );
+            if couples {
+                enriched_prompt.push_str(
+                    "\n\n<couples_session>Two partners are participating together. Speaker labels are automated and may be imperfect. Keep both perspectives distinct, avoid taking sides, attend to the interaction between them, and ask before assuming which partner owns this account.</couples_session>",
+                );
+            }
 
             let mut stream = AUTHENTICATED_TOOL_USER_ID
                 .scope(user_id.clone(), async {
@@ -9243,7 +9250,7 @@ mod runtime {
                         let _ = tx.send(Ok("[RESPONSE_DONE]".to_string())).await;
                     }
 
-                    if !final_content.is_empty() {
+                    if !final_content.is_empty() && !couples {
                         match runtime
                             .update_memory_from_exchange(
                                 user_id_clone.clone(),
@@ -10912,6 +10919,8 @@ mod runtime {
         pub deep_insight: bool,
         #[serde(default)]
         pub sharp_insight: bool,
+        #[serde(default)]
+        pub couples: bool,
     }
 
     #[derive(Deserialize)]
@@ -10958,6 +10967,7 @@ mod runtime {
                 params.retry,
                 params.deep_insight,
                 params.sharp_insight,
+                params.couples,
                 params.request_id,
             )
             .await

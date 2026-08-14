@@ -2220,6 +2220,7 @@ async fn update_core_pattern(
 
 async fn transcribe_handler(
     State(state): State<AppState>,
+    Query(query): Query<TranscribeQuery>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -2292,14 +2293,18 @@ async fn transcribe_handler(
         .filter(|value| value.starts_with("audio/"))
         .unwrap_or("audio/webm");
 
+    let mut deepgram_query = vec![
+        ("model", "nova-3"),
+        ("smart_format", "true"),
+        ("punctuate", "true"),
+        ("mip_opt_out", DEEPGRAM_MIP_OPT_OUT),
+    ];
+    if query.diarize {
+        deepgram_query.push(("diarize_model", "latest"));
+    }
     let response = match reqwest::Client::new()
         .post(deepgram_eu_endpoint("/v1/listen"))
-        .query(&[
-            ("model", "nova-3"),
-            ("smart_format", "true"),
-            ("punctuate", "true"),
-            ("mip_opt_out", DEEPGRAM_MIP_OPT_OUT),
-        ])
+        .query(&deepgram_query)
         .header("Authorization", format!("Token {api_key}"))
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .body(body)
@@ -2337,13 +2342,59 @@ async fn transcribe_handler(
                 .into_response();
         }
     };
-    let transcript = payload["results"]["channels"][0]["alternatives"][0]["transcript"]
-        .as_str()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let alternative = &payload["results"]["channels"][0]["alternatives"][0];
+    let transcript = if query.diarize {
+        format_diarized_transcript(alternative)
+    } else {
+        alternative["transcript"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
 
     Json(serde_json::json!({"transcript": transcript})).into_response()
+}
+
+#[derive(Default, Deserialize)]
+struct TranscribeQuery {
+    #[serde(default)]
+    diarize: bool,
+}
+
+fn format_diarized_transcript(alternative: &serde_json::Value) -> String {
+    let Some(words) = alternative["words"].as_array() else {
+        return alternative["transcript"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+    };
+    let mut turns: Vec<(u64, String)> = Vec::new();
+    for word in words {
+        let text = word["punctuated_word"]
+            .as_str()
+            .or_else(|| word["word"].as_str())
+            .unwrap_or("")
+            .trim();
+        if text.is_empty() {
+            continue;
+        }
+        let speaker = word["speaker"].as_u64().unwrap_or(0);
+        if let Some((last_speaker, sentence)) = turns.last_mut() {
+            if *last_speaker == speaker {
+                sentence.push(' ');
+                sentence.push_str(text);
+                continue;
+            }
+        }
+        turns.push((speaker, text.to_string()));
+    }
+    turns
+        .into_iter()
+        .map(|(speaker, text)| format!("Partner {}: {text}", speaker + 1))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn deepgram_token_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -3295,7 +3346,7 @@ async fn static_asset_handler(Path(filename): Path<String>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::root_destination;
+    use super::{format_diarized_transcript, root_destination};
 
     #[test]
     fn root_sends_authenticated_users_to_chat() {
@@ -3305,5 +3356,32 @@ mod tests {
     #[test]
     fn root_sends_logged_out_users_to_login() {
         assert_eq!(root_destination(false), "/login");
+    }
+
+    #[test]
+    fn diarized_transcript_groups_contiguous_speaker_turns() {
+        let alternative = serde_json::json!({
+            "transcript": "I feel unheard. I did not know that.",
+            "words": [
+                {"word": "i", "punctuated_word": "I", "speaker": 0},
+                {"word": "feel", "punctuated_word": "feel", "speaker": 0},
+                {"word": "unheard", "punctuated_word": "unheard.", "speaker": 0},
+                {"word": "i", "punctuated_word": "I", "speaker": 1},
+                {"word": "did", "punctuated_word": "did", "speaker": 1},
+                {"word": "not", "punctuated_word": "not", "speaker": 1},
+                {"word": "know", "punctuated_word": "know", "speaker": 1},
+                {"word": "that", "punctuated_word": "that.", "speaker": 1}
+            ]
+        });
+        assert_eq!(
+            format_diarized_transcript(&alternative),
+            "Partner 1: I feel unheard.\nPartner 2: I did not know that."
+        );
+    }
+
+    #[test]
+    fn diarized_transcript_falls_back_when_words_are_missing() {
+        let alternative = serde_json::json!({"transcript": "Only one voice."});
+        assert_eq!(format_diarized_transcript(&alternative), "Only one voice.");
     }
 }

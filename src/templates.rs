@@ -615,6 +615,9 @@ mod tests {
         assert!(html.contains("/api/deepgram/token"));
         assert!(html.contains("wss://api.eu.deepgram.com/v1/listen"));
         assert!(html.contains("mip_opt_out: 'true'"));
+        assert!(html.contains("id=\"mode-couples\""));
+        assert!(html.contains("params.set('diarize_model', 'latest')"));
+        assert!(html.contains("Partner ${turn.speaker + 1}"));
         assert!(!html.contains("wss://api.deepgram.com/v1/listen"));
         assert!(!html.contains("wss://api.deepgram.com/v1/speak"));
         assert!(!html.contains("window.webkitSpeechRecognition"));

@@ -368,6 +368,7 @@ let speechFetchChain = Promise.resolve();
 let speechSendChain = Promise.resolve();
 let speechSocket = null;
 let speechSocketReady = null;
+const VOICE_AUDIO_BITRATE = 32000;
 let speechSocketClosing = false;
 let speechStreamingFailed = false;
 let speechAudioFinal = false;
@@ -1839,7 +1840,9 @@ async function startDeepgramVoiceInput() {
         throw new Error(tokenPayload.error || 'Deepgram is unavailable');
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: { ideal: 1 } }
+    });
     if (startId !== deepgramStartId) {
         stream.getTracks().forEach(track => track.stop());
         throw cancelledVoiceStart();
@@ -1888,7 +1891,10 @@ async function startDeepgramVoiceInput() {
             const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
                 .find(type => MediaRecorder.isTypeSupported(type)) || '';
             try {
-                voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+                voiceRecorder = new MediaRecorder(stream, {
+                    ...(mimeType ? { mimeType } : {}),
+                    audioBitsPerSecond: VOICE_AUDIO_BITRATE
+                });
             } catch (error) {
                 socket.close();
                 failBeforeStart(error);
@@ -1987,11 +1993,16 @@ async function startRecordedVoiceInput() {
         return;
     }
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: { ideal: 1 } }
+        });
         const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
             .find(type => MediaRecorder.isTypeSupported(type)) || '';
         voiceChunks = [];
-        voiceRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+        voiceRecorder = new MediaRecorder(stream, {
+            ...(mimeType ? { mimeType } : {}),
+            audioBitsPerSecond: VOICE_AUDIO_BITRATE
+        });
         voiceRecorder.ondataavailable = event => {
             if (event.data.size > 0) voiceChunks.push(event.data);
         };

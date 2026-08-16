@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 const DEEPGRAM_EU_API_BASE: &str = "https://api.eu.deepgram.com";
 const DEEPGRAM_MIP_OPT_OUT: &str = "true";
+const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_MONTHLY_VOICE_TOKEN_SOFT_LIMIT: usize = 600;
 const DEFAULT_MONTHLY_TTS_CHARACTER_SOFT_LIMIT: usize = 150_000;
 
@@ -230,7 +231,10 @@ async fn main() {
             get(get_editable_memory).post(update_editable_memory),
         )
         .route("/api/deepgram/token", post(deepgram_token_handler))
-        .route("/api/transcribe", post(transcribe_handler))
+        .route(
+            "/api/transcribe",
+            post(transcribe_handler).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
+        )
         .route("/api/speak", post(speak_handler))
         .route("/api/chat", post(chat_handler))
         // SSE streams
@@ -2235,7 +2239,6 @@ async fn transcribe_handler(
         }
     };
 
-    const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
     if body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,

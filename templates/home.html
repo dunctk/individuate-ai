@@ -2009,8 +2009,15 @@ async function startRecordedVoiceInput() {
                     headers: { 'Content-Type': audio.type },
                     body: audio
                 });
-                const result = await response.json();
-                if (!response.ok) throw new Error(result.error || 'Transcription failed');
+                const responseText = await response.text();
+                let result = {};
+                try { result = responseText ? JSON.parse(responseText) : {}; } catch (_) {}
+                if (!response.ok) {
+                    const fallback = response.status === 413
+                        ? 'Recording is too large. Try a shorter recording.'
+                        : `Transcription failed (${response.status})`;
+                    throw new Error(result.error || fallback);
+                }
                 if (result.transcript) {
                     input.value = input.value.trim()
                         ? input.value.trimEnd() + ' ' + result.transcript

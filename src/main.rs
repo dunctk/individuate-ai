@@ -16,8 +16,8 @@ use individuateai::agent::{
     RelationshipProfile, TimelinePatch, UsageKind, User, DEFAULT_TTS_VOICE,
 };
 use individuateai::billing::{
-    event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
-    StripeSubscription,
+    event_user_id, is_admin_email, subscription_from_value, BillingPlan, CheckoutEvidenceMetadata,
+    StripeConfig, StripeSubscription,
 };
 use individuateai::cycle::{self, BodyOnboardingPreference, CycleEvent, CycleProfile};
 use individuateai::dispute_evidence::{
@@ -1072,9 +1072,11 @@ async fn create_checkout_handler(
             existing
                 .as_ref()
                 .map(|account| account.stripe_customer_id.as_str()),
-            PRODUCT_COPY_VERSION,
-            PRIVACY_NOTICE_VERSION,
-            payload.disclosure_acknowledged,
+            CheckoutEvidenceMetadata {
+                product_copy_version: PRODUCT_COPY_VERSION,
+                privacy_notice_version: PRIVACY_NOTICE_VERSION,
+                disclosure_acknowledged: payload.disclosure_acknowledged,
+            },
         )
         .await
     {

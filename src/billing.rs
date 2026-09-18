@@ -354,6 +354,16 @@ pub fn event_user_id(object: &Value) -> Option<String> {
         .pointer("/metadata/user_id")
         .and_then(Value::as_str)
         .or_else(|| object.get("client_reference_id").and_then(Value::as_str))
+        .or_else(|| {
+            object
+                .pointer("/parent/subscription_details/metadata/user_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            object
+                .pointer("/subscription_details/metadata/user_id")
+                .and_then(Value::as_str)
+        })
         .map(str::to_string)
 }
 

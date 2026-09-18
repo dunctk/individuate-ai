@@ -67,7 +67,7 @@
                 <a href="#access"><span>04</span>Passkeys &amp; recovery</a>
                 <a href="#providers"><span>05</span>AI &amp; voice providers</a>
                 <a href="#operations"><span>06</span>Operational safeguards</a>
-                <p class="privacy-toc-note">Public design notes<br>Last reviewed July 2026</p>
+                <p class="privacy-toc-note">Public design notes<br>Last reviewed September 2026</p>
             </nav>
 
             <article class="privacy-article min-w-0">
@@ -155,6 +155,10 @@
                             <li>Conversation content is excluded from application logs.</li>
                             <li>Authentication endpoints are rate-limited.</li>
                         </ul>
+                        <div class="privacy-caution">
+                            <strong>Limited payment, fraud, and dispute records are kept separately from conversation content.</strong>
+                            <p>To operate billing, prevent fraud, and respond to payment disputes, we retain limited account, transaction, authentication, and service-use metadata. This can include account and Stripe identifiers, subscription events, passkey timestamps, feature-use counts, purchase-disclosure versions, and records showing that AI responses or product features were used. The dispute-evidence ledger does not store the text of private conversations. These metadata records are retained only for the configured dispute-evidence period unless they are needed longer to establish, exercise, or defend legal claims or meet payment-provider requirements.</p>
+                        </div>
                         <div class="privacy-open-source">
                             <p class="role-label">Do not take our word for it</p>
                             <h3>Inspect the implementation.</h3>

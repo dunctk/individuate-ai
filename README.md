@@ -133,6 +133,12 @@ STRIPE_SANDBOX_WEBHOOK_SECRET=whsec_... # optional only during local sandbox set
 STRIPE_LIVE_SECRET_KEY=sk_live_...
 STRIPE_LIVE_PUBLISHABLE_KEY=pk_live_...
 STRIPE_LIVE_WEBHOOK_SECRET=whsec_...
+EVIDENCE_DB_PATH=/app/data/dispute_evidence.sqlite
+# Optional separate SQLCipher key; falls back to MEMORY_DB_KEY when omitted.
+EVIDENCE_DB_KEY=...
+# Optional provenance for the separate marketing-site deploy.
+MARKETING_RELEASE_SHA=...
+DISPUTE_EVIDENCE_RETENTION_DAYS=550
 ```
 
 `ADMIN_EMAIL` is matched case-insensitively against the signed-in account. That
@@ -149,9 +155,28 @@ into the matching runtime variable:
 ./scripts/setup_stripe_webhook.sh live https://individuateai.com
 ```
 
-The endpoint subscribes only to Checkout completion and subscription lifecycle
-events. Finish the applicable Stripe Tax registrations before enabling
+The endpoint subscribes to Checkout completion, subscription lifecycle,
+invoice payment success/failure, and dispute lifecycle events. Re-running the
+setup script updates an existing webhook endpoint in place without changing its
+signing secret. Finish the applicable Stripe Tax registrations before enabling
 automatic tax in live mode.
+
+The application keeps a separate metadata-only dispute evidence ledger. It
+stores purchase disclosure/version snapshots and relevant Stripe lifecycle
+metadata, but never conversation text. The admin screen links each account to
+a print-ready evidence pack and a JSON export. The pack also reads metadata
+from the encrypted application database (account/passkey timestamps, message
+counts, usage counters, and feature-state counts) without decrypting or
+including conversation content. Production images embed `APP_RELEASE_SHA`
+automatically so each checkout snapshot records the exact app build. Set
+`MARKETING_RELEASE_SHA` manually when you want the pack to include the
+separate marketing deploy provenance.
+
+The checkout page requires an explicit acknowledgement that IndividuateAI can
+generate interpretations, connections, patterns, and insights, and that the
+subscription renews until cancelled. Increment
+`PRODUCT_COPY_VERSION` in `src/dispute_evidence.rs` whenever that commercial
+copy changes.
 
 Internal safeguards can be adjusted with `MONTHLY_CHAT_SOFT_LIMIT`,
 `MONTHLY_VOICE_TOKEN_SOFT_LIMIT`, and `MONTHLY_TTS_CHARACTER_SOFT_LIMIT`.

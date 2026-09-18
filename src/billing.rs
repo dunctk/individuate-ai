@@ -38,12 +38,21 @@ impl BillingPlan {
         }
     }
 
-    fn lookup_key(self) -> &'static str {
+    pub fn lookup_key(self) -> &'static str {
         match self {
             Self::UsdMonthly => "individuate_plus_usd_monthly",
             Self::UsdAnnual => "individuate_plus_usd_annual",
             Self::EurMonthly => "individuate_plus_eur_monthly",
             Self::EurAnnual => "individuate_plus_eur_annual",
+        }
+    }
+
+    pub fn display_price(self) -> &'static str {
+        match self {
+            Self::UsdMonthly => "$24.99 monthly",
+            Self::UsdAnnual => "$239 yearly",
+            Self::EurMonthly => "€29.99 monthly · VAT included",
+            Self::EurAnnual => "€289 yearly · VAT included",
         }
     }
 }
@@ -63,8 +72,26 @@ pub struct StripeSubscription {
     pub customer_id: String,
     pub status: String,
     pub price_id: String,
+    pub created_at: Option<i64>,
     pub current_period_end: Option<i64>,
     pub cancel_at_period_end: bool,
+    pub canceled_at: Option<i64>,
+    pub cancellation_comment: Option<String>,
+    pub cancellation_feedback: Option<String>,
+    pub cancellation_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckoutSession {
+    pub id: String,
+    pub url: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CheckoutEvidenceMetadata<'a> {
+    pub product_copy_version: &'a str,
+    pub privacy_notice_version: &'a str,
+    pub disclosure_acknowledged: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,7 +165,8 @@ impl StripeConfig {
         email: &str,
         plan: BillingPlan,
         existing_customer: Option<&str>,
-    ) -> Result<String> {
+        evidence: CheckoutEvidenceMetadata<'_>,
+    ) -> Result<CheckoutSession> {
         let price_id = self.resolve_price(plan).await?;
         let success_url = format!(
             "{}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
@@ -154,8 +182,36 @@ impl StripeConfig {
             ("cancel_url".to_string(), cancel_url),
             ("metadata[user_id]".to_string(), user_id.to_string()),
             (
+                "metadata[plan_lookup_key]".to_string(),
+                plan.lookup_key().to_string(),
+            ),
+            (
+                "metadata[product_copy_version]".to_string(),
+                evidence.product_copy_version.to_string(),
+            ),
+            (
+                "metadata[privacy_notice_version]".to_string(),
+                evidence.privacy_notice_version.to_string(),
+            ),
+            (
+                "metadata[purchase_disclosure_acknowledged]".to_string(),
+                evidence.disclosure_acknowledged.to_string(),
+            ),
+            (
                 "subscription_data[metadata][user_id]".to_string(),
                 user_id.to_string(),
+            ),
+            (
+                "subscription_data[metadata][product_copy_version]".to_string(),
+                evidence.product_copy_version.to_string(),
+            ),
+            (
+                "subscription_data[metadata][privacy_notice_version]".to_string(),
+                evidence.privacy_notice_version.to_string(),
+            ),
+            (
+                "subscription_data[metadata][purchase_disclosure_acknowledged]".to_string(),
+                evidence.disclosure_acknowledged.to_string(),
             ),
             ("allow_promotion_codes".to_string(), "false".to_string()),
             (
@@ -169,7 +225,12 @@ impl StripeConfig {
             form.push(("customer_email".to_string(), email.to_string()));
         }
         let payload = self.post_form("/checkout/sessions", &form).await?;
-        value_string(&payload, "url").context("Stripe Checkout response did not include a URL")
+        Ok(CheckoutSession {
+            id: value_string(&payload, "id")
+                .context("Stripe Checkout response did not include an ID")?,
+            url: value_string(&payload, "url")
+                .context("Stripe Checkout response did not include a URL")?,
+        })
     }
 
     pub async fn retrieve_checkout(&self, session_id: &str) -> Result<CheckoutResult> {
@@ -196,6 +257,12 @@ impl StripeConfig {
             .get(&format!("/subscriptions/{subscription_id}"))
             .await?;
         subscription_from_value(&payload)
+    }
+
+    pub async fn retrieve_charge_customer(&self, charge_id: &str) -> Result<Option<String>> {
+        ensure_stripe_id(charge_id, "ch_")?;
+        let payload = self.get(&format!("/charges/{charge_id}")).await?;
+        Ok(expandable_id(payload.get("customer")))
     }
 
     pub async fn create_portal_session(&self, customer_id: &str) -> Result<String> {
@@ -271,11 +338,25 @@ pub fn subscription_from_value(value: &Value) -> Result<StripeSubscription> {
             .context("Subscription is missing its customer")?,
         status: value_string(value, "status").context("Subscription is missing its status")?,
         price_id,
+        created_at: value.get("created").and_then(Value::as_i64),
         current_period_end: value.get("current_period_end").and_then(Value::as_i64),
         cancel_at_period_end: value
             .get("cancel_at_period_end")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        canceled_at: value.get("canceled_at").and_then(Value::as_i64),
+        cancellation_comment: value
+            .pointer("/cancellation_details/comment")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cancellation_feedback: value
+            .pointer("/cancellation_details/feedback")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cancellation_reason: value
+            .pointer("/cancellation_details/reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -284,6 +365,16 @@ pub fn event_user_id(object: &Value) -> Option<String> {
         .pointer("/metadata/user_id")
         .and_then(Value::as_str)
         .or_else(|| object.get("client_reference_id").and_then(Value::as_str))
+        .or_else(|| {
+            object
+                .pointer("/parent/subscription_details/metadata/user_id")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            object
+                .pointer("/subscription_details/metadata/user_id")
+                .and_then(Value::as_str)
+        })
         .map(str::to_string)
 }
 
@@ -404,6 +495,39 @@ mod tests {
             Some(BillingPlan::EurAnnual)
         );
         assert_eq!(BillingPlan::parse("free"), None);
+        assert_eq!(
+            BillingPlan::UsdMonthly.lookup_key(),
+            "individuate_plus_usd_monthly"
+        );
+        assert_eq!(
+            BillingPlan::EurAnnual.display_price(),
+            "€289 yearly · VAT included"
+        );
+    }
+
+    #[test]
+    fn subscription_parser_keeps_cancellation_details() {
+        let value = serde_json::json!({
+            "id": "sub_test",
+            "customer": "cus_test",
+            "status": "active",
+            "created": 100,
+            "current_period_end": 200,
+            "cancel_at_period_end": true,
+            "canceled_at": 150,
+            "cancellation_details": {
+                "comment": "It embellishes too much",
+                "feedback": "other",
+                "reason": "cancellation_requested"
+            },
+            "items": {"data": [{"price": {"id": "price_test"}}]}
+        });
+        let subscription = subscription_from_value(&value).unwrap();
+        assert_eq!(
+            subscription.cancellation_comment.as_deref(),
+            Some("It embellishes too much")
+        );
+        assert_eq!(subscription.canceled_at, Some(150));
     }
 
     #[test]

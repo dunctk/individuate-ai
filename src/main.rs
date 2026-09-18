@@ -16,10 +16,13 @@ use individuateai::agent::{
     RelationshipProfile, TimelinePatch, UsageKind, User, DEFAULT_TTS_VOICE,
 };
 use individuateai::billing::{
-    event_user_id, is_admin_email, subscription_from_value, BillingPlan, StripeConfig,
-    StripeSubscription,
+    event_user_id, is_admin_email, subscription_from_value, BillingPlan, CheckoutEvidenceMetadata,
+    StripeConfig, StripeSubscription,
 };
 use individuateai::cycle::{self, BodyOnboardingPreference, CycleEvent, CycleProfile};
+use individuateai::dispute_evidence::{
+    DisputeEvidencePack, EvidenceStore, PRIVACY_NOTICE_VERSION, PRODUCT_COPY_VERSION,
+};
 use individuateai::fileserv;
 use individuateai::import::parse_gemini_takeout;
 use individuateai::templates;
@@ -53,6 +56,7 @@ struct AppState {
     rate_limiter: RateLimiter,
     speech_rate_limiter: RateLimiter,
     stripe: Option<StripeConfig>,
+    evidence_store: Option<EvidenceStore>,
 }
 
 impl axum::extract::FromRef<AppState> for Key {
@@ -118,6 +122,13 @@ async fn main() {
     let env = Arc::new(templates::create_env());
     let stripe = StripeConfig::from_env()
         .unwrap_or_else(|error| panic!("Invalid Stripe billing configuration: {error}"));
+    let evidence_store = match EvidenceStore::open_from_env().await {
+        Ok(store) => Some(store),
+        Err(error) => {
+            tracing::error!("Dispute evidence store is unavailable: {error}");
+            None
+        }
+    };
 
     let state = AppState {
         key: key.clone(),
@@ -125,6 +136,7 @@ async fn main() {
         rate_limiter: RateLimiter::new(10, 60), // 10 attempts per 60s window
         speech_rate_limiter: RateLimiter::new(90, 60),
         stripe,
+        evidence_store,
     };
 
     let rate_limited_routes = Router::new()
@@ -159,6 +171,10 @@ async fn main() {
         .route("/subscribe", get(subscribe_page))
         .route("/billing/success", get(billing_success_page))
         .route("/admin", get(admin_page))
+        .route(
+            "/admin/dispute-evidence/:user_id",
+            get(admin_dispute_evidence_page),
+        )
         .route("/mind-map", get(mind_map_page))
         .route("/timeline", get(timeline_page))
         .route("/inner-work", get(inner_work_timeline_page))
@@ -181,6 +197,10 @@ async fn main() {
         .route(
             "/api/admin/users/:user_id/lifetime-access/revoke",
             post(revoke_lifetime_access_handler),
+        )
+        .route(
+            "/api/admin/dispute-evidence/:user_id/json",
+            get(admin_dispute_evidence_json),
         )
         .route("/api/stripe/webhook", post(stripe_webhook_handler))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -286,6 +306,7 @@ async fn auth_guard(
         || path == "/subscribe"
         || path == "/billing/success"
         || path == "/admin"
+        || path.starts_with("/admin/")
         || path == "/mind-map"
         || path == "/timeline"
         || path == "/inner-work"
@@ -320,6 +341,7 @@ async fn auth_guard(
         || path == "/api/logout"
         || path == "/api/whoami"
         || path == "/admin"
+        || path.starts_with("/admin/")
         || path.starts_with("/api/billing/")
         || path.starts_with("/api/admin/");
     let requires_paid_access = !is_public_webhook
@@ -617,6 +639,86 @@ async fn admin_page(State(state): State<AppState>, headers: HeaderMap) -> Respon
     }
 }
 
+async fn load_dispute_evidence_pack(
+    state: &AppState,
+    target_user_id: &str,
+) -> anyhow::Result<DisputeEvidencePack> {
+    let store = state
+        .evidence_store
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Dispute evidence store is unavailable"))?;
+    let mut pack = store.build_pack(target_user_id).await?;
+    let subscription_id = pack
+        .billing
+        .as_ref()
+        .map(|billing| billing.stripe_subscription_id.clone());
+    if let (Some(stripe), Some(subscription_id)) = (state.stripe.as_ref(), subscription_id) {
+        match stripe.retrieve_subscription(&subscription_id).await {
+            Ok(subscription) => pack.set_live_subscription(subscription),
+            Err(error) => {
+                tracing::warn!("Could not enrich dispute pack from Stripe: {error}");
+            }
+        }
+    }
+    Ok(pack)
+}
+
+async fn admin_dispute_evidence_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_user_id): Path<String>,
+) -> Response {
+    match get_authed_user(&headers, &state.key).await {
+        Some(user) if is_admin_email(&user.username) => {}
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => return Redirect::temporary("/login").into_response(),
+    }
+
+    match load_dispute_evidence_pack(&state, &target_user_id).await {
+        Ok(pack) => {
+            let html = templates::render_dispute_evidence(&state.templates, &pack);
+            let mut response =
+                ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private"),
+            );
+            response
+        }
+        Err(error) => {
+            tracing::error!("Could not build dispute evidence pack: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+async fn admin_dispute_evidence_json(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_user_id): Path<String>,
+) -> Response {
+    match get_authed_user(&headers, &state.key).await {
+        Some(user) if is_admin_email(&user.username) => {}
+        Some(_) => return StatusCode::FORBIDDEN.into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    }
+
+    match load_dispute_evidence_pack(&state, &target_user_id).await {
+        Ok(pack) => {
+            let mut response = Json(pack).into_response();
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, private"),
+            );
+            response
+        }
+        Err(error) => {
+            tracing::error!("Could not build dispute evidence JSON: {error}");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 async fn grant_lifetime_access_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -722,9 +824,31 @@ async fn billing_success_page(
             anyhow::bail!("Checkout customer does not match its subscription");
         }
         let runtime = agent_runtime().await?;
+        let subscription_id = subscription.id.clone();
+        let customer_id = subscription.customer_id.clone();
+        let status = subscription.status.clone();
         runtime
             .upsert_billing_account(user.id.clone(), subscription)
-            .await
+            .await?;
+        if let Some(store) = state.evidence_store.as_ref() {
+            if let Err(error) = store
+                .record_event(
+                    &user.id,
+                    "checkout.reconciled",
+                    Some(session_id),
+                    serde_json::json!({
+                        "checkout_session_id": session_id,
+                        "subscription_id": subscription_id,
+                        "customer_id": customer_id,
+                        "status": status,
+                    }),
+                )
+                .await
+            {
+                tracing::warn!("Could not record reconciled checkout evidence: {error}");
+            }
+        }
+        Ok(())
     }
     .await;
     match result {
@@ -865,6 +989,8 @@ async fn profile_drawer_fragment(
 #[derive(Deserialize)]
 struct CreateCheckoutPayload {
     plan: String,
+    #[serde(default)]
+    disclosure_acknowledged: bool,
 }
 
 async fn create_checkout_handler(
@@ -889,6 +1015,15 @@ async fn create_checkout_handler(
             tracing::error!("Could not check access before Checkout: {error}");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
+    }
+    if !payload.disclosure_acknowledged {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Please confirm the product and renewal disclosure before checkout"
+            })),
+        )
+            .into_response();
     }
     let plan = match BillingPlan::parse(&payload.plan) {
         Some(plan) => plan,
@@ -937,10 +1072,31 @@ async fn create_checkout_handler(
             existing
                 .as_ref()
                 .map(|account| account.stripe_customer_id.as_str()),
+            CheckoutEvidenceMetadata {
+                product_copy_version: PRODUCT_COPY_VERSION,
+                privacy_notice_version: PRIVACY_NOTICE_VERSION,
+                disclosure_acknowledged: payload.disclosure_acknowledged,
+            },
         )
         .await
     {
-        Ok(url) => Json(serde_json::json!({"url": url})).into_response(),
+        Ok(checkout) => {
+            if let Some(store) = state.evidence_store.as_ref() {
+                if let Err(error) = store
+                    .record_checkout_snapshot(
+                        &user.id,
+                        &checkout.id,
+                        plan.lookup_key(),
+                        plan.display_price(),
+                        payload.disclosure_acknowledged,
+                    )
+                    .await
+                {
+                    tracing::error!("Could not record checkout evidence snapshot: {error}");
+                }
+            }
+            Json(serde_json::json!({"url": checkout.url})).into_response()
+        }
         Err(error) => {
             tracing::error!("Could not create Stripe Checkout session: {error}");
             (
@@ -1096,6 +1252,39 @@ async fn stripe_webhook_handler(
                 anyhow::bail!("Could not associate Stripe subscription with an app user");
             }
         }
+
+        if let Some(store) = state.evidence_store.as_ref() {
+            let mut evidence_user_id = event_user_id(object);
+            if evidence_user_id.is_none() {
+                let customer_id = object.get("customer").and_then(|value| {
+                    value.as_str().map(str::to_string).or_else(|| {
+                        value
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .map(str::to_string)
+                    })
+                });
+                if let Some(customer_id) = customer_id {
+                    evidence_user_id = runtime.user_id_for_stripe_customer(customer_id).await?;
+                }
+            }
+            if evidence_user_id.is_none() && event_type.starts_with("charge.dispute.") {
+                if let Some(charge_id) = object.get("charge").and_then(|value| value.as_str()) {
+                    if let Some(customer_id) = stripe.retrieve_charge_customer(charge_id).await? {
+                        evidence_user_id = runtime.user_id_for_stripe_customer(customer_id).await?;
+                    }
+                }
+            }
+            if let Some(evidence_user_id) = evidence_user_id {
+                if let Err(error) = store
+                    .record_stripe_event(&evidence_user_id, &event_id, event_type, object)
+                    .await
+                {
+                    tracing::warn!("Could not record Stripe evidence metadata: {error}");
+                }
+            }
+        }
+
         runtime.mark_stripe_event_processed(event_id).await
     }
     .await;

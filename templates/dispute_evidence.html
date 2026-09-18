@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dispute evidence · {{ pack.account.email }} · IndividuateAI</title>
+    <style>
+        :root { font-family: Arial, Helvetica, sans-serif; color: #17211d; background: #eef1ef; }
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        .toolbar { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 12px 18px; background: #10251e; color: white; }
+        .toolbar a, .toolbar button { border: 1px solid rgba(255,255,255,.35); border-radius: 8px; padding: 9px 12px; background: transparent; color: white; font: inherit; text-decoration: none; cursor: pointer; }
+        .toolbar button { background: #d9f4e8; color: #10251e; border-color: #d9f4e8; font-weight: 700; }
+        .paper { width: min(210mm, calc(100% - 24px)); margin: 20px auto 60px; background: white; box-shadow: 0 8px 40px rgba(0,0,0,.12); padding: 16mm; }
+        h1 { font-size: 25pt; margin: 0 0 5mm; line-height: 1.1; }
+        h2 { font-size: 15pt; margin: 10mm 0 4mm; padding-bottom: 2mm; border-bottom: 1px solid #cfd7d2; }
+        h3 { font-size: 11pt; margin: 6mm 0 2mm; }
+        p, li, td, th, dt, dd { font-size: 10.5pt; line-height: 1.42; }
+        .eyebrow { font-size: 8.5pt; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #476359; }
+        .lede { font-size: 11.5pt; line-height: 1.5; color: #31463e; }
+        .muted { color: #5d6f68; }
+        .note { border-left: 4px solid #2f8f74; background: #f2f8f5; padding: 4mm; margin: 5mm 0; }
+        .warning { border-left-color: #b3841b; background: #fbf7e9; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4mm; }
+        .card { border: 1px solid #d8dfdb; border-radius: 8px; padding: 4mm; break-inside: avoid; }
+        .card dt { color: #5d6f68; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .05em; margin-top: 2mm; }
+        .card dd { margin: 1mm 0 0; font-weight: 600; word-break: break-word; }
+        table { width: 100%; border-collapse: collapse; margin: 3mm 0 0; }
+        th { text-align: left; color: #4d625a; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .05em; }
+        th, td { padding: 2.5mm 2mm; border-bottom: 1px solid #e3e8e5; vertical-align: top; }
+        .metric { font-size: 19pt; font-weight: 700; color: #15392e; }
+        .metric-label { display: block; color: #5d6f68; font-size: 8.5pt; text-transform: uppercase; letter-spacing: .06em; }
+        .copy { white-space: pre-wrap; border: 1px solid #d8dfdb; background: #fafbf9; border-radius: 7px; padding: 4mm; font-size: 10pt; line-height: 1.45; }
+        .timeline { list-style: none; margin: 0; padding: 0; }
+        .timeline li { display: grid; grid-template-columns: 38mm 1fr; gap: 4mm; padding: 3mm 0; border-bottom: 1px solid #e3e8e5; break-inside: avoid; }
+        .page-break { break-before: page; }
+        .footer { margin-top: 12mm; padding-top: 4mm; border-top: 1px solid #d8dfdb; font-size: 8.5pt; color: #66766f; }
+        code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 8.8pt; word-break: break-all; }
+        @media (max-width: 720px) {
+            .grid { grid-template-columns: 1fr; }
+            .timeline li { grid-template-columns: 1fr; gap: 1mm; }
+            .paper { padding: 8mm; }
+        }
+        @page { size: A4 portrait; margin: 12mm; }
+        @media print {
+            :root, body { background: white; }
+            .toolbar { display: none !important; }
+            .paper { width: auto; margin: 0; padding: 0; box-shadow: none; }
+            a { color: inherit; text-decoration: none; }
+            h2, h3 { break-after: avoid; }
+            .card, table, .copy, .note { break-inside: avoid; }
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <a href="/admin">← Admin</a>
+        <div>Metadata-only evidence · conversation contents excluded</div>
+        <div>
+            <a href="/api/admin/dispute-evidence/{{ pack.account.user_id }}.json">Download JSON</a>
+            <button type="button" onclick="window.print()">Print / Save as PDF</button>
+        </div>
+    </div>
+
+    <main class="paper">
+        <p class="eyebrow">IndividuateAI · payment dispute evidence</p>
+        <h1>Service delivery & purchase evidence</h1>
+        <p class="lede">
+            Evidence for account <strong>{{ pack.account.email }}</strong>. Generated {{ pack.generated_at }}.
+            {{ pack.privacy_note }}
+        </p>
+
+        <div class="note">
+            <strong>Evidence design:</strong> this report deliberately uses account, billing, authentication,
+            feature-state and service-delivery metadata. It does not expose private conversation text.
+        </div>
+
+        <h2>1. Account and billing identity</h2>
+        <div class="grid">
+            <dl class="card">
+                <dt>Customer email</dt><dd>{{ pack.account.email }}</dd>
+                <dt>Internal account ID</dt><dd><code>{{ pack.account.user_id }}</code></dd>
+                <dt>Account created</dt><dd>{{ pack.account.created_at }} UTC</dd>
+                <dt>Passkeys registered</dt><dd>{{ pack.account.passkey_count }}</dd>
+                <dt>First passkey created</dt><dd>{{ pack.account.first_passkey_created_at or "Not recorded" }}</dd>
+                <dt>Last passkey use</dt><dd>{{ pack.account.last_passkey_used_at or "Not recorded" }}</dd>
+            </dl>
+            <dl class="card">
+                {% if pack.billing %}
+                <dt>Stripe customer</dt><dd><code>{{ pack.billing.stripe_customer_id }}</code></dd>
+                <dt>Stripe subscription</dt><dd><code>{{ pack.billing.stripe_subscription_id }}</code></dd>
+                <dt>Stored subscription status</dt><dd>{{ pack.billing.status }}</dd>
+                <dt>Price ID</dt><dd><code>{{ pack.billing.price_id }}</code></dd>
+                <dt>Cancel at period end</dt><dd>{{ pack.billing.cancel_at_period_end }}</dd>
+                <dt>Billing record updated</dt><dd>{{ pack.billing.updated_at or "Not recorded" }}</dd>
+                {% else %}
+                <dt>Billing record</dt><dd>No Stripe billing record found in the application database.</dd>
+                {% endif %}
+            </dl>
+        </div>
+
+        {% if pack.live_subscription %}
+        <h3>Current Stripe subscription snapshot</h3>
+        <div class="card">
+            <table>
+                <tr><th>Status</th><td>{{ pack.live_subscription.status }}</td><th>Created</th><td>{{ pack.live_subscription.created_at or "Not supplied" }}</td></tr>
+                <tr><th>Cancel at period end</th><td>{{ pack.live_subscription.cancel_at_period_end }}</td><th>Cancelled at</th><td>{{ pack.live_subscription.canceled_at or "Not cancelled" }}</td></tr>
+                <tr><th>Cancellation reason</th><td>{{ pack.live_subscription.cancellation_reason or "Not supplied" }}</td><th>Feedback</th><td>{{ pack.live_subscription.cancellation_feedback or "Not supplied" }}</td></tr>
+            </table>
+            {% if pack.live_subscription.cancellation_comment %}
+            <div class="note warning">
+                <strong>Customer cancellation comment:</strong> “{{ pack.live_subscription.cancellation_comment }}”
+            </div>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        <h2>2. Service access and use</h2>
+        {% if pack.evidence_window_start %}
+        <p class="muted">Usage counts below are limited to records on or after the first captured commercial snapshot: {{ pack.evidence_window_start }} UTC.</p>
+        {% else %}
+        <p class="muted">No historical commercial snapshot exists for this account, so usage metadata is shown from the account record available in the application database.</p>
+        {% endif %}
+
+        <div class="grid">
+            <div class="card"><span class="metric">{{ pack.usage.session_count }}</span><span class="metric-label">Conversation sessions</span></div>
+            <div class="card"><span class="metric">{{ pack.usage.user_message_count }}</span><span class="metric-label">Persisted customer messages</span></div>
+            <div class="card"><span class="metric">{{ pack.usage.assistant_message_count }}</span><span class="metric-label">Persisted assistant-message records</span></div>
+            <div class="card"><span class="metric">{{ pack.usage.metered_chat_responses }}</span><span class="metric-label">Metered customer-triggered response requests</span></div>
+        </div>
+
+        <table>
+            <tr><th>First recorded message</th><td>{{ pack.usage.first_message_at or "None" }}</td><th>Last recorded message</th><td>{{ pack.usage.last_message_at or "None" }}</td></tr>
+            <tr><th>Voice usage tokens</th><td>{{ pack.usage.voice_tokens }}</td><th>Text-to-speech characters</th><td>{{ pack.usage.tts_characters }}</td></tr>
+        </table>
+
+        <div class="note">
+            Persisted assistant-message records and metered chat-response requests are intentionally shown separately.
+            Opening/initial assistant records and request accounting can make the totals differ; this report does not present them as the same metric.
+        </div>
+
+        <h3>Feature-state evidence</h3>
+        <table>
+            <tr><th>Episodes</th><td>{{ pack.usage.episodes_count }}</td><th>Relationship profiles</th><td>{{ pack.usage.relationship_profiles_count }}</td></tr>
+            <tr><th>Relationship edges</th><td>{{ pack.usage.social_relationships_count }}</td><th>Memory links</th><td>{{ pack.usage.memory_links_count }}</td></tr>
+            <tr><th>Core patterns</th><td>{{ pack.usage.core_patterns_count }}</td><th>Mind map present</th><td>{{ pack.usage.mind_map_present }}{% if pack.usage.mind_map_updated_at %} · updated {{ pack.usage.mind_map_updated_at }}{% endif %}</td></tr>
+            <tr><th>Social graph present</th><td>{{ pack.usage.social_graph_present }}{% if pack.usage.social_graph_updated_at %} · updated {{ pack.usage.social_graph_updated_at }}{% endif %}</td><th></th><td></td></tr>
+        </table>
+
+        <div class="page-break"></div>
+        <h2>3. Commercial copy captured at checkout</h2>
+        {% if pack.commercial_snapshots|length %}
+            {% for snapshot in pack.commercial_snapshots %}
+            <section class="card" style="margin-bottom:5mm">
+                <p class="eyebrow">Checkout {{ snapshot.created_at }} UTC</p>
+                <table>
+                    <tr><th>Checkout session</th><td><code>{{ snapshot.checkout_session_id }}</code></td></tr>
+                    <tr><th>Selected plan</th><td>{{ snapshot.plan_display }} · <code>{{ snapshot.plan_lookup_key }}</code></td></tr>
+                    <tr><th>Product copy version</th><td>{{ snapshot.product_copy_version }}</td></tr>
+                    <tr><th>Privacy notice version</th><td>{{ snapshot.privacy_notice_version }}</td></tr>
+                    <tr><th>Disclosure acknowledged</th><td><strong>{{ snapshot.disclosure_acknowledged }}</strong></td></tr>
+                    <tr><th>App release SHA</th><td><code>{{ snapshot.app_release_sha or "Not configured" }}</code></td></tr>
+                    <tr><th>Marketing release SHA</th><td><code>{{ snapshot.marketing_release_sha or "Not configured" }}</code></td></tr>
+                    <tr><th>Purchase page</th><td>{{ snapshot.purchase_page_url or "Not configured" }}</td></tr>
+                </table>
+                <h3>Product description stored at purchase</h3>
+                <div class="copy">{{ snapshot.product_description }}</div>
+                <h3>Disclosure shown immediately before checkout</h3>
+                <div class="copy">{{ snapshot.purchase_disclosure }}</div>
+            </section>
+            {% endfor %}
+        {% else %}
+            <div class="note warning">
+                This account predates the commercial-snapshot ledger. Do not represent current product copy as historical purchase copy without separate deployment/source evidence.
+            </div>
+        {% endif %}
+
+        <h2>4. Payment and subscription event timeline</h2>
+        {% if pack.events|length %}
+        <ol class="timeline">
+            {% for event in pack.events %}
+            <li>
+                <div><strong>{{ event.occurred_at }} UTC</strong><br><span class="muted">{{ event.event_type }}</span></div>
+                <div>{{ event.summary }}{% if event.external_id %}<br><code>{{ event.external_id }}</code>{% endif %}</div>
+            </li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        <p class="muted">No evidence-ledger events are available for this account. The ledger may have been enabled after the transaction.</p>
+        {% endif %}
+
+        <h2>5. Evidence notes</h2>
+        <div class="note">
+            <strong>What this pack can support:</strong> account identity, authenticated access, purchase disclosures captured by the application,
+            Stripe subscription lifecycle metadata, service-use timestamps and counts, and current feature state.
+        </div>
+        <div class="note warning">
+            <strong>What this pack intentionally does not claim:</strong> it does not characterize any customer complaint as an advertised feature,
+            does not reproduce private conversation contents, and does not prove historical marketing copy for transactions that predate the commercial snapshot ledger.
+        </div>
+
+        <p class="footer">
+            IndividuateAI internal dispute-evidence export · generated {{ pack.generated_at }} ·
+            metadata retention setting: {{ pack.retention_days }} days.
+        </p>
+    </main>
+</body>
+</html>

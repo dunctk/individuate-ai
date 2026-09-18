@@ -28,6 +28,7 @@ RUN cargo build --locked --release --bin individuateai
 # Runner stage
 FROM debian:trixie-slim
 
+ARG APP_RELEASE_SHA=unknown
 WORKDIR /app
 
 # Install runtime dependencies
@@ -51,6 +52,8 @@ COPY --from=builder /app/mandala-avatar.mp4 /app/mandala-avatar.mp4
 ENV PORT="3008"
 ENV LEPTOS_SITE_ROOT="/app/public"
 ENV MEMORY_DB_PATH="/app/data/memory.sqlite"
+ENV EVIDENCE_DB_PATH="/app/data/dispute_evidence.sqlite"
+ENV APP_RELEASE_SHA="${APP_RELEASE_SHA}"
 ENV FASTEMBED_CACHE_DIR="/app/data/fastembed-cache"
 
 # Expose the port

@@ -228,6 +228,10 @@ impl EvidenceStore {
         let purchase_page_url = env_nonempty("APP_BASE_URL")
             .map(|base| format!("{}/subscribe", base.trim_end_matches('/')));
 
+        let insert_user_id = user_id.clone();
+        let insert_checkout_session_id = checkout_session_id.clone();
+        let insert_plan_lookup_key = plan_lookup_key.clone();
+        let insert_plan_display = plan_display.clone();
         self.conn
             .call(move |conn| {
                 conn.execute(
@@ -243,10 +247,10 @@ impl EvidenceStore {
                         disclosure_acknowledged = excluded.disclosure_acknowledged
                     "#,
                     params![
-                        user_id,
-                        checkout_session_id,
-                        plan_lookup_key,
-                        plan_display,
+                        insert_user_id,
+                        insert_checkout_session_id,
+                        insert_plan_lookup_key,
+                        insert_plan_display,
                         PRODUCT_COPY_VERSION,
                         PRODUCT_DESCRIPTION,
                         PURCHASE_DISCLOSURE,
@@ -264,12 +268,12 @@ impl EvidenceStore {
             .context("Recording commercial snapshot")?;
 
         self.record_event(
-            user_id_for_event(user_id_ref(user_id)),
+            &user_id,
             "checkout.created",
-            Some(checkout_session_id_for_event(checkout_session_id_ref(checkout_session_id))),
+            Some(&checkout_session_id),
             json!({
-                "plan_lookup_key": plan_lookup_key_for_event(plan_lookup_key_ref(plan_lookup_key)),
-                "plan_display": plan_display_for_event(plan_display_ref(plan_display)),
+                "plan_lookup_key": plan_lookup_key,
+                "plan_display": plan_display,
                 "product_copy_version": PRODUCT_COPY_VERSION,
                 "privacy_notice_version": PRIVACY_NOTICE_VERSION,
                 "disclosure_acknowledged": disclosure_acknowledged,
@@ -749,15 +753,6 @@ fn format_unix(value: Option<i64>) -> Option<String> {
         .and_then(|value| value.format(&Rfc3339).ok())
 }
 
-// Small helpers keep ownership explicit around the async insert above.
-fn user_id_ref(value: String) -> String { value }
-fn user_id_for_event(value: String) -> &'static str { Box::leak(value.into_boxed_str()) }
-fn checkout_session_id_ref(value: String) -> String { value }
-fn checkout_session_id_for_event(value: String) -> &'static str { Box::leak(value.into_boxed_str()) }
-fn plan_lookup_key_ref(value: String) -> String { value }
-fn plan_lookup_key_for_event(value: String) -> &'static str { Box::leak(value.into_boxed_str()) }
-fn plan_display_ref(value: String) -> String { value }
-fn plan_display_for_event(value: String) -> &'static str { Box::leak(value.into_boxed_str()) }
 
 #[cfg(test)]
 mod tests {

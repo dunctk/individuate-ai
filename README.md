@@ -155,9 +155,11 @@ into the matching runtime variable:
 ./scripts/setup_stripe_webhook.sh live https://individuateai.com
 ```
 
-The endpoint subscribes to Checkout completion, subscription lifecycle, and
-invoice payment success/failure events. Finish the applicable Stripe Tax
-registrations before enabling automatic tax in live mode.
+The endpoint subscribes to Checkout completion, subscription lifecycle,
+invoice payment success/failure, and dispute lifecycle events. Re-running the
+setup script updates an existing webhook endpoint in place without changing its
+signing secret. Finish the applicable Stripe Tax registrations before enabling
+automatic tax in live mode.
 
 The application keeps a separate metadata-only dispute evidence ledger. It
 stores purchase disclosure/version snapshots and relevant Stripe lifecycle

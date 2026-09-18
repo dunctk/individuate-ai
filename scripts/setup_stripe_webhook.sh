@@ -47,7 +47,10 @@ webhook="$(curl -sS --fail-with-body -u "${stripe_key}:" \
     --data-urlencode "enabled_events[]=customer.subscription.updated" \
     --data-urlencode "enabled_events[]=customer.subscription.deleted" \
     --data-urlencode "enabled_events[]=invoice.payment_succeeded" \
-    --data-urlencode "enabled_events[]=invoice.payment_failed")"
+    --data-urlencode "enabled_events[]=invoice.payment_failed" \
+    --data-urlencode "enabled_events[]=charge.dispute.created" \
+    --data-urlencode "enabled_events[]=charge.dispute.updated" \
+    --data-urlencode "enabled_events[]=charge.dispute.closed")"
 
 printf '%s=%s\n' "$secret_name" "$(jq -r '.secret' <<<"$webhook")"
 echo "Save that value in the matching runtime environment now; Stripe only returns it at creation." >&2

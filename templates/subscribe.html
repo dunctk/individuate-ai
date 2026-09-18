@@ -71,6 +71,22 @@
             <div class="rounded-xl border border-sage-mist/15 p-4"><strong class="text-parchment block mb-1">Your context stays</strong>Chats become memory maps and relationship context you can inspect.</div>
             <div class="rounded-xl border border-sage-mist/15 p-4"><strong class="text-parchment block mb-1">Secure payment</strong>Stripe handles payment details; IndividuateAI never receives your card number.</div>
         </div>
+
+        <section class="mx-auto mt-7 max-w-xl rounded-2xl border border-systemic-yellow/30 bg-systemic-yellow/10 p-5 text-sm leading-6 text-parchment">
+            <p class="font-semibold text-systemic-yellow">Before you continue</p>
+            <p class="mt-2">{{ purchase_disclosure }}</p>
+            <label class="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-sage-mist/20 bg-void-green/35 p-4">
+                <input id="purchase-disclosure-ack" type="checkbox"
+                    class="mt-1 h-5 w-5 shrink-0 accent-[#75dfca]">
+                <span>
+                    I understand that the product may generate interpretations and insights, and that my subscription renews until I cancel it.
+                </span>
+            </label>
+            <p class="mt-3 text-xs text-sage-mist">
+                Disclosure version {{ product_copy_version }} ·
+                <a href="/privacy-and-security" class="underline underline-offset-2 hover:text-parchment">Privacy &amp; security</a>
+            </p>
+        </section>
         <p class="mt-7 text-center text-xs text-sage-mist leading-relaxed">
             IndividuateAI supports reflection and is not a substitute for a licensed mental health professional. Usage is subject to reasonable capacity and abuse safeguards.
         </p>
@@ -80,6 +96,7 @@
 <script>
 const checkoutError = document.getElementById('checkout-error');
 const checkoutNotice = document.getElementById('checkout-notice');
+const purchaseDisclosureAck = document.getElementById('purchase-disclosure-ack');
 const currencyPanels = [...document.querySelectorAll('[data-currency-panel]')];
 
 function showBillingCurrency(currency) {
@@ -108,6 +125,12 @@ if (checkoutState === 'cancelled') {
 document.querySelectorAll('.checkout-plan').forEach(button => {
     button.addEventListener('click', async () => {
         checkoutError.classList.add('hidden');
+        if (!purchaseDisclosureAck.checked) {
+            checkoutError.textContent = 'Please confirm the product and renewal disclosure before continuing to Stripe.';
+            checkoutError.classList.remove('hidden');
+            purchaseDisclosureAck.focus();
+            return;
+        }
         const original = button.innerHTML;
         button.disabled = true;
         button.textContent = 'Opening secure checkout…';
@@ -115,7 +138,10 @@ document.querySelectorAll('.checkout-plan').forEach(button => {
             const response = await fetch('/api/billing/checkout', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ plan: button.dataset.plan })
+                body: JSON.stringify({
+                    plan: button.dataset.plan,
+                    disclosure_acknowledged: purchaseDisclosureAck.checked
+                })
             });
             const result = await response.json().catch(() => ({}));
             if (!response.ok || !result.url) throw new Error(result.error || 'Could not start checkout');

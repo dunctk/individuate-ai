@@ -199,7 +199,7 @@ async fn main() {
             post(revoke_lifetime_access_handler),
         )
         .route(
-            "/api/admin/dispute-evidence/:user_id.json",
+            "/api/admin/dispute-evidence/:user_id/json",
             get(admin_dispute_evidence_json),
         )
         .route("/api/stripe/webhook", post(stripe_webhook_handler))

@@ -2,6 +2,7 @@ use crate::agent::{
     AdminUserAccess, ChatLog, RelationshipProfile, Session, SocialGraph, User, TTS_VOICES,
 };
 use crate::cycle::{BodyOnboardingPreference, CycleDashboard, CycleProfile};
+use crate::dispute_evidence::{DisputeEvidencePack, PRODUCT_COPY_VERSION, PURCHASE_DISCLOSURE};
 use minijinja::Environment;
 use serde_json::json;
 
@@ -67,6 +68,11 @@ pub fn create_env() -> Environment<'static> {
         .unwrap();
     env.add_template("admin", include_str!("../templates/admin.html"))
         .unwrap();
+    env.add_template(
+        "dispute_evidence",
+        include_str!("../templates/dispute_evidence.html"),
+    )
+    .unwrap();
     env.add_template("home", include_str!("../templates/home.html"))
         .unwrap();
     env.add_template("sidebar", include_str!("../templates/sidebar.html"))
@@ -131,7 +137,10 @@ pub fn render_signup(env: &Environment) -> String {
 pub fn render_subscribe(env: &Environment) -> String {
     env.get_template("subscribe")
         .unwrap()
-        .render(json!({}))
+        .render(json!({
+            "product_copy_version": PRODUCT_COPY_VERSION,
+            "purchase_disclosure": PURCHASE_DISCLOSURE,
+        }))
         .unwrap()
 }
 
@@ -219,6 +228,13 @@ pub fn render_admin(env: &Environment, users: &[AdminUserAccess], admin_email: &
             "users": users,
             "admin_email": admin_email,
         }))
+        .unwrap()
+}
+
+pub fn render_dispute_evidence(env: &Environment, pack: &DisputeEvidencePack) -> String {
+    env.get_template("dispute_evidence")
+        .unwrap()
+        .render(json!({ "pack": pack }))
         .unwrap()
 }
 
@@ -514,6 +530,9 @@ mod tests {
         assert!(html.contains("data-currency-panel=\"eur\""));
         assert!(html.contains("Show euro pricing"));
         assert!(html.contains("billing_currency"));
+        assert!(html.contains("purchase-disclosure-ack"));
+        assert!(html.contains("may generate interpretations and insights"));
+        assert!(html.contains(PRODUCT_COPY_VERSION));
         assert!(!html.to_ascii_lowercase().contains("unlimited"));
         assert!(!html.to_ascii_lowercase().contains("free trial"));
     }
@@ -531,6 +550,8 @@ mod tests {
         assert!(html.contains("Complimentary access"));
         assert!(html.contains("person@example.com"));
         assert!(html.contains("Grant lifetime"));
+        assert!(html.contains("Evidence pack"));
+        assert!(html.contains("/admin/dispute-evidence/"));
         assert!(html.contains("/api/admin/users/"));
         assert!(html.contains("does not cancel an existing paid subscription"));
     }

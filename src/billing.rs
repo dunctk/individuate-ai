@@ -87,6 +87,13 @@ pub struct CheckoutSession {
     pub url: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CheckoutEvidenceMetadata<'a> {
+    pub product_copy_version: &'a str,
+    pub privacy_notice_version: &'a str,
+    pub disclosure_acknowledged: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckoutResult {
     pub user_id: String,
@@ -158,9 +165,7 @@ impl StripeConfig {
         email: &str,
         plan: BillingPlan,
         existing_customer: Option<&str>,
-        product_copy_version: &str,
-        privacy_notice_version: &str,
-        disclosure_acknowledged: bool,
+        evidence: CheckoutEvidenceMetadata<'_>,
     ) -> Result<CheckoutSession> {
         let price_id = self.resolve_price(plan).await?;
         let success_url = format!(
@@ -182,15 +187,15 @@ impl StripeConfig {
             ),
             (
                 "metadata[product_copy_version]".to_string(),
-                product_copy_version.to_string(),
+                evidence.product_copy_version.to_string(),
             ),
             (
                 "metadata[privacy_notice_version]".to_string(),
-                privacy_notice_version.to_string(),
+                evidence.privacy_notice_version.to_string(),
             ),
             (
                 "metadata[purchase_disclosure_acknowledged]".to_string(),
-                disclosure_acknowledged.to_string(),
+                evidence.disclosure_acknowledged.to_string(),
             ),
             (
                 "subscription_data[metadata][user_id]".to_string(),
@@ -198,15 +203,15 @@ impl StripeConfig {
             ),
             (
                 "subscription_data[metadata][product_copy_version]".to_string(),
-                product_copy_version.to_string(),
+                evidence.product_copy_version.to_string(),
             ),
             (
                 "subscription_data[metadata][privacy_notice_version]".to_string(),
-                privacy_notice_version.to_string(),
+                evidence.privacy_notice_version.to_string(),
             ),
             (
                 "subscription_data[metadata][purchase_disclosure_acknowledged]".to_string(),
-                disclosure_acknowledged.to_string(),
+                evidence.disclosure_acknowledged.to_string(),
             ),
             ("allow_promotion_codes".to_string(), "false".to_string()),
             (

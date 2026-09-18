@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension, OpenFlags};
+use rusqlite::{params, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -325,7 +325,9 @@ impl EvidenceStore {
     pub async fn build_pack(&self, user_id: &str) -> Result<DisputeEvidencePack> {
         let snapshots = self.snapshots_for_user(user_id).await?;
         let events = self.events_for_user(user_id).await?;
-        let evidence_window_start = snapshots.first().map(|snapshot| snapshot.created_at.clone());
+        let evidence_window_start = snapshots
+            .first()
+            .map(|snapshot| snapshot.created_at.clone());
         let user_id_owned = user_id.to_string();
         let since = evidence_window_start.clone();
 
@@ -469,8 +471,10 @@ fn read_application_metadata(
         conn.pragma_update(None, "key", key)
             .context("Applying SQLCipher key for metadata-only evidence read")?;
     }
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))
-        .context("Validating memory database for evidence read")?;
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .context("Validating memory database for evidence read")?;
 
     let (email, created_at): (String, String) = conn
         .query_row(
@@ -480,8 +484,11 @@ fn read_application_metadata(
         )
         .context("Loading account metadata for dispute evidence")?;
 
-    let (passkey_count, first_passkey_created_at, last_passkey_used_at):
-        (i64, Option<String>, Option<String>) = conn.query_row(
+    let (passkey_count, first_passkey_created_at, last_passkey_used_at): (
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
         "SELECT COUNT(*), MIN(created_at), MAX(last_used_at) FROM passkeys WHERE user_id = ?1",
         [user_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -516,8 +523,12 @@ fn read_application_metadata(
         |row| row.get(0),
     )?;
 
-    let (user_message_count, assistant_message_count, first_message_at, last_message_at):
-        (i64, i64, Option<String>, Option<String>) = conn.query_row(
+    let (user_message_count, assistant_message_count, first_message_at, last_message_at): (
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
         r#"
         SELECT
             COALESCE(SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0),
@@ -533,9 +544,8 @@ fn read_application_metadata(
     )?;
 
     let usage_period = since.and_then(|value| value.get(..7));
-    let (metered_chat_responses, voice_tokens, tts_characters): (i64, i64, i64) =
-        conn.query_row(
-            r#"
+    let (metered_chat_responses, voice_tokens, tts_characters): (i64, i64, i64) = conn.query_row(
+        r#"
             SELECT
                 COALESCE(SUM(chat_responses), 0),
                 COALESCE(SUM(voice_tokens), 0),
@@ -543,9 +553,9 @@ fn read_application_metadata(
             FROM monthly_usage
             WHERE user_id = ?1 AND (?2 IS NULL OR period >= ?2)
             "#,
-            params![user_id, usage_period],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )?;
+        params![user_id, usage_period],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
 
     let usage = UsageEvidence {
         session_count,
@@ -708,7 +718,9 @@ fn summarize_event(event_type: &str, details: &Value) -> String {
         }
         "invoice.payment_succeeded" => "Stripe recorded a successful invoice payment.".to_string(),
         "invoice.payment_failed" => "Stripe recorded a failed invoice payment attempt.".to_string(),
-        "checkout.reconciled" => "Successful Checkout was reconciled to the application account.".to_string(),
+        "checkout.reconciled" => {
+            "Successful Checkout was reconciled to the application account.".to_string()
+        }
         _ => event_type.replace('.', " "),
     }
 }
@@ -752,7 +764,6 @@ fn format_unix(value: Option<i64>) -> Option<String> {
         .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
         .and_then(|value| value.format(&Rfc3339).ok())
 }
-
 
 #[cfg(test)]
 mod tests {

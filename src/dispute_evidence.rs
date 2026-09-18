@@ -730,16 +730,28 @@ fn summarize_event(event_type: &str, details: &Value) -> String {
         "invoice.payment_failed" => "Stripe recorded a failed invoice payment attempt.".to_string(),
         "charge.dispute.created" => format!(
             "Stripe dispute opened. Reason: {}; status: {}.",
-            details.get("reason").and_then(Value::as_str).unwrap_or("unknown"),
-            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+            details
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            details
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
         ),
         "charge.dispute.updated" => format!(
             "Stripe dispute updated. Status: {}.",
-            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+            details
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
         ),
         "charge.dispute.closed" => format!(
             "Stripe dispute closed. Status: {}.",
-            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+            details
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
         ),
         "checkout.reconciled" => {
             "Successful Checkout was reconciled to the application account.".to_string()

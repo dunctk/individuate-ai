@@ -36,7 +36,7 @@ jobs:
         run: |
           set -eu
           image="${IMAGE_NAME,,}"
-          docker build --pull --tag "$image:${GITHUB_SHA}" --tag "$image:latest" .
+          docker build --pull --build-arg APP_RELEASE_SHA="${GITHUB_SHA}" --tag "$image:${GITHUB_SHA}" --tag "$image:latest" .
           docker push "$image:${GITHUB_SHA}"
           docker push "$image:latest"
 

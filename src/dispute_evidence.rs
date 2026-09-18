@@ -666,6 +666,16 @@ fn stripe_event_details(event_type: &str, object: &Value) -> Value {
             "currency": object.get("currency").and_then(Value::as_str),
             "status": object.get("status").and_then(Value::as_str),
         }),
+        "charge.dispute.created" | "charge.dispute.updated" | "charge.dispute.closed" => json!({
+            "dispute_id": object.get("id").and_then(Value::as_str),
+            "charge_id": expandable_id(object.get("charge")),
+            "payment_intent_id": expandable_id(object.get("payment_intent")),
+            "amount": object.get("amount").and_then(Value::as_i64),
+            "currency": object.get("currency").and_then(Value::as_str),
+            "reason": object.get("reason").and_then(Value::as_str),
+            "status": object.get("status").and_then(Value::as_str),
+            "evidence_due_by": object.pointer("/evidence_details/due_by").and_then(Value::as_i64),
+        }),
         _ => json!({
             "stripe_object_id": object.get("id").and_then(Value::as_str),
         }),
@@ -718,6 +728,19 @@ fn summarize_event(event_type: &str, details: &Value) -> String {
         }
         "invoice.payment_succeeded" => "Stripe recorded a successful invoice payment.".to_string(),
         "invoice.payment_failed" => "Stripe recorded a failed invoice payment attempt.".to_string(),
+        "charge.dispute.created" => format!(
+            "Stripe dispute opened. Reason: {}; status: {}.",
+            details.get("reason").and_then(Value::as_str).unwrap_or("unknown"),
+            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+        ),
+        "charge.dispute.updated" => format!(
+            "Stripe dispute updated. Status: {}.",
+            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+        ),
+        "charge.dispute.closed" => format!(
+            "Stripe dispute closed. Status: {}.",
+            details.get("status").and_then(Value::as_str).unwrap_or("unknown")
+        ),
         "checkout.reconciled" => {
             "Successful Checkout was reconciled to the application account.".to_string()
         }

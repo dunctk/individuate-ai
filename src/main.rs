@@ -1266,6 +1266,17 @@ async fn stripe_webhook_handler(
                     evidence_user_id = runtime.user_id_for_stripe_customer(customer_id).await?;
                 }
             }
+            if evidence_user_id.is_none() && event_type.starts_with("charge.dispute.") {
+                if let Some(charge_id) = object
+                    .get("charge")
+                    .and_then(|value| value.as_str())
+                {
+                    if let Some(customer_id) = stripe.retrieve_charge_customer(charge_id).await? {
+                        evidence_user_id =
+                            runtime.user_id_for_stripe_customer(customer_id).await?;
+                    }
+                }
+            }
             if let Some(evidence_user_id) = evidence_user_id {
                 if let Err(error) = store
                     .record_stripe_event(&evidence_user_id, &event_id, event_type, object)

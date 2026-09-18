@@ -1255,25 +1255,20 @@ async fn stripe_webhook_handler(
             let mut evidence_user_id = event_user_id(object);
             if evidence_user_id.is_none() {
                 let customer_id = object.get("customer").and_then(|value| {
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .or_else(|| value.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                    value.as_str().map(str::to_string).or_else(|| {
+                        value
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .map(str::to_string)
+                    })
                 });
                 if let Some(customer_id) = customer_id {
-                    evidence_user_id = runtime
-                        .user_id_for_stripe_customer(customer_id)
-                        .await?;
+                    evidence_user_id = runtime.user_id_for_stripe_customer(customer_id).await?;
                 }
             }
             if let Some(evidence_user_id) = evidence_user_id {
                 if let Err(error) = store
-                    .record_stripe_event(
-                        &evidence_user_id,
-                        &event_id,
-                        event_type,
-                        object,
-                    )
+                    .record_stripe_event(&evidence_user_id, &event_id, event_type, object)
                     .await
                 {
                     tracing::warn!("Could not record Stripe evidence metadata: {error}");

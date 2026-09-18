@@ -254,6 +254,12 @@ impl StripeConfig {
         subscription_from_value(&payload)
     }
 
+    pub async fn retrieve_charge_customer(&self, charge_id: &str) -> Result<Option<String>> {
+        ensure_stripe_id(charge_id, "ch_")?;
+        let payload = self.get(&format!("/charges/{charge_id}")).await?;
+        Ok(expandable_id(payload.get("customer")))
+    }
+
     pub async fn create_portal_session(&self, customer_id: &str) -> Result<String> {
         ensure_stripe_id(customer_id, "cus_")?;
         let form = vec![

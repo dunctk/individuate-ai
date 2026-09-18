@@ -474,8 +474,14 @@ mod tests {
             Some(BillingPlan::EurAnnual)
         );
         assert_eq!(BillingPlan::parse("free"), None);
-        assert_eq!(BillingPlan::UsdMonthly.lookup_key(), "individuate_plus_usd_monthly");
-        assert_eq!(BillingPlan::EurAnnual.display_price(), "€289 yearly · VAT included");
+        assert_eq!(
+            BillingPlan::UsdMonthly.lookup_key(),
+            "individuate_plus_usd_monthly"
+        );
+        assert_eq!(
+            BillingPlan::EurAnnual.display_price(),
+            "€289 yearly · VAT included"
+        );
     }
 
     #[test]

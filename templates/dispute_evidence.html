@@ -75,6 +75,31 @@
             feature-state and service-delivery metadata. It does not expose private conversation text.
         </div>
 
+        <h2>Reviewer summary</h2>
+        <div class="card">
+            <p>
+                The application records <strong>{{ pack.usage.session_count }} conversation sessions</strong>,
+                <strong>{{ pack.usage.user_message_count }} persisted customer messages</strong>, and
+                <strong>{{ pack.usage.assistant_message_count }} persisted assistant-message records</strong>
+                in the evidence window shown below.
+            </p>
+            {% if pack.commercial_snapshots|length %}
+            <p>
+                The checkout ledger also contains a contemporaneous, versioned snapshot of the selected plan,
+                product description and pre-purchase disclosure. The snapshot records whether the customer
+                acknowledged that disclosure before Stripe Checkout was opened.
+            </p>
+            {% endif %}
+            {% if pack.live_subscription and pack.live_subscription.cancellation_comment %}
+            <p>
+                Stripe currently records the customer's cancellation comment as:
+                <strong>“{{ pack.live_subscription.cancellation_comment }}”</strong>.
+                This report reproduces that statement exactly and does not characterize the complaint itself
+                as an advertised feature.
+            </p>
+            {% endif %}
+        </div>
+
         <h2>1. Account and billing identity</h2>
         <div class="grid">
             <dl class="card">

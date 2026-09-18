@@ -32,25 +32,35 @@ fi
 webhook_url="${base_url%/}/api/stripe/webhook"
 existing="$(curl -sS --fail-with-body -u "${stripe_key}:" -G \
     https://api.stripe.com/v1/webhook_endpoints --data-urlencode "limit=100")"
-if jq -e --arg url "$webhook_url" '.data[] | select(.url == $url)' <<<"$existing" >/dev/null; then
-    echo "A webhook already exists at $webhook_url." >&2
-    echo "Use Stripe Workbench to reveal or rotate its signing secret." >&2
-    exit 1
+existing_id="$(jq -r --arg url "$webhook_url" '.data[] | select(.url == $url) | .id' <<<"$existing" | head -n1)"
+
+event_args=(
+    --data-urlencode "enabled_events[]=checkout.session.completed"
+    --data-urlencode "enabled_events[]=customer.subscription.created"
+    --data-urlencode "enabled_events[]=customer.subscription.updated"
+    --data-urlencode "enabled_events[]=customer.subscription.deleted"
+    --data-urlencode "enabled_events[]=invoice.payment_succeeded"
+    --data-urlencode "enabled_events[]=invoice.payment_failed"
+    --data-urlencode "enabled_events[]=charge.dispute.created"
+    --data-urlencode "enabled_events[]=charge.dispute.updated"
+    --data-urlencode "enabled_events[]=charge.dispute.closed"
+)
+
+if [[ -n "$existing_id" ]]; then
+    curl -sS --fail-with-body -u "${stripe_key}:" \
+        "https://api.stripe.com/v1/webhook_endpoints/${existing_id}" \
+        --data-urlencode "description=IndividuateAI billing and dispute evidence" \
+        "${event_args[@]}" >/dev/null
+    echo "Updated existing webhook $existing_id at $webhook_url." >&2
+    echo "Its signing secret is unchanged; no runtime secret update is required." >&2
+    exit 0
 fi
 
 webhook="$(curl -sS --fail-with-body -u "${stripe_key}:" \
     https://api.stripe.com/v1/webhook_endpoints \
     --data-urlencode "url=${webhook_url}" \
-    --data-urlencode "description=IndividuateAI subscription access" \
-    --data-urlencode "enabled_events[]=checkout.session.completed" \
-    --data-urlencode "enabled_events[]=customer.subscription.created" \
-    --data-urlencode "enabled_events[]=customer.subscription.updated" \
-    --data-urlencode "enabled_events[]=customer.subscription.deleted" \
-    --data-urlencode "enabled_events[]=invoice.payment_succeeded" \
-    --data-urlencode "enabled_events[]=invoice.payment_failed" \
-    --data-urlencode "enabled_events[]=charge.dispute.created" \
-    --data-urlencode "enabled_events[]=charge.dispute.updated" \
-    --data-urlencode "enabled_events[]=charge.dispute.closed")"
+    --data-urlencode "description=IndividuateAI billing and dispute evidence" \
+    "${event_args[@]}")"
 
 printf '%s=%s\n' "$secret_name" "$(jq -r '.secret' <<<"$webhook")"
 echo "Save that value in the matching runtime environment now; Stripe only returns it at creation." >&2

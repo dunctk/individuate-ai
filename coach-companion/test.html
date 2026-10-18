@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Coach Companion — synthetic-only tests</title>
+<style>body{font:16px system-ui;max-width:700px;margin:4rem auto;padding:1rem}li{margin:1rem} .ok{color:green}.bad{color:#a22}</style>
+<h1>Privacy-screen demo tests</h1><p>Tests use fabricated examples. No network requests or client data.</p><ol id="results"></ol>
+<script type="module">
+import {screenText, coachingCards, isRiskEscalation} from "./logic.js";
+const cases=[
+  ["email masked",()=>screenText("coach@test.invalid").screened.includes("[EMAIL]")],
+  ["phone masked",()=>screenText("Telephone 07123 456789").screened.includes("[TELEPHONE]")],
+  ["postcode masked",()=>screenText("Near NN1 1AA").screened.includes("[POSTCODE]")],
+  ["NHS-number shaped masked",()=>screenText("Number 123 456 7890").screened.includes("[IDENTIFIER]")],
+  ["indirect identifiers flagged",()=>screenText("works at a local hospital").possibleIndirectIdentification],
+  ["urgent content flagged",()=>isRiskEscalation("immediate safeguarding concern")],
+  ["synthetic ordinary example",()=>!screenText("fictional person is uncertain about work").requiresHumanReview],
+  ["four cards per framework",()=>["oars","comb","strengths","supervision"].every(mode=>coachingCards(mode).length===4)],
+  ["no person name appears in cards",()=>!JSON.stringify(coachingCards("oars")).includes("Georgia")]
+];
+const list=document.getElementById("results");
+for (const [name,check] of cases) {
+  const li=document.createElement("li"); const ok=check();
+  li.className=ok?"ok":"bad";li.textContent=(ok?"PASS: ":"FAIL: ")+name;list.append(li);
+}
+</script>

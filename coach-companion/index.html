@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#f4f2eb">
+  <title>Coach Companion — reflective practice</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./voice.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="site-header">
+      <span class="brand"><span class="brand-mark" aria-hidden="true">✳</span> Coach Companion</span>
+      <span class="top-label">Fictional practice only</span>
+    </header>
+    <main>
+      <div class="eyebrow">A space to think aloud</div>
+      <h1>What would you like to <em>work through?</em></h1>
+      <p class="lead">Explore your coaching practice with a calm, thoughtful sounding board. Speak rather than type.</p>
+      <section class="warning" aria-labelledby="safety-title">
+        <strong id="safety-title">Practice with invented examples only</strong>
+        <p>Not approved for real NHS client information. Speak <strong>after</strong> a session, never record a client, and don't include identifying details.</p>
+      </section>
+      <section class="workspace" aria-label="Voice reflection">
+        <div class="mode-heading">Choose a way to reflect</div>
+        <div class="modes" role="group" aria-label="Coaching reflection focus">
+          <button class="mode selected" type="button" data-mode="oars" aria-pressed="true"><span>✦</span> Motivational interviewing</button>
+          <button class="mode" type="button" data-mode="comb" aria-pressed="false"><span>◈</span> COM-B barriers</button>
+          <button class="mode" type="button" data-mode="strengths" aria-pressed="false"><span>↗</span> Strengths & goals</button>
+          <button class="mode" type="button" data-mode="supervision" aria-pressed="false"><span>☰</span> Supervision reflection</button>
+        </div>
+        <div class="microphone">
+          <span class="mic-orbit" aria-hidden="true"></span>
+          <button id="talk" class="mic-button" type="button" aria-label="Begin a fictional reflection" aria-pressed="false" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2.5" width="6" height="12" rx="3"></rect><path d="M5.5 10.5v1.7a6.5 6.5 0 0 0 13 0v-1.7M12 18.7v3M8.5 21.7h7"></path></svg>
+          </button>
+          <div class="mic-title" id="mic-title">Checking local microphone support…</div>
+          <div class="mic-help" id="status" role="status" aria-live="polite">Speech stays on the device if supported.</div>
+        </div>
+        <div class="transcript-panel" id="transcript-panel" hidden>
+          <div class="panel-head"><h2>What I heard on this device</h2><span>Not saved</span></div>
+          <p id="transcript" class="transcript"></p>
+          <p class="mic-help">Recognition can get names wrong. This is not a privacy certification.</p>
+          <button class="quiet-button" id="clear" type="button">Clear this reflection</button>
+        </div>
+      </section>
+      <section id="insights" class="insights" hidden aria-live="polite">
+        <div class="eyebrow">A few possible angles</div>
+        <h2>Something to try next</h2>
+        <div id="risk" class="risk" hidden></div>
+        <div class="insight-grid" id="insight-grid"></div>
+        <button id="read-insights" type="button" class="listen-button">▶ Hear the suggestions</button>
+        <p class="disclaimer">Educational reflection, not a diagnosis or clinical decision. Use professional judgement and your organisation's pathways.</p>
+      </section>
+    </main>
+    <footer>
+      <span>Private by design · No uploads · No history in this demo</span>
+      <a href="./README.md" rel="noopener">About this prototype</a>
+    </footer>
+  </div>
+</body>
+</html>

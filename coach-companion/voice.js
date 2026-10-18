@@ -113,9 +113,10 @@ async function start() {
     rec.onresult = event => {
       // Rebuild the complete transcript so repeated result events cannot duplicate segments.
       let final = "", interim = "";
-      for (const result of event.results) {
-        if (result.isFinal) final += result[0].transcript + " ";
-        else interim += result[0].transcript + " ";
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results.item(i);
+        if (result.isFinal) final += result.item(0).transcript + " ";
+        else interim += result.item(0).transcript + " ";
       }
       text = (final + interim).trim();
       renderScreened(text);

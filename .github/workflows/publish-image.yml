@@ -42,8 +42,15 @@ jobs:
 
       - name: Trigger Coolify deployment
         if: ${{ env.COOLIFY_DEPLOY_HOOK_URL != '' && env.COOLIFY_TOKEN != '' }}
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          curl --fail --show-error --silent --retry 3 \
-            --request GET \
+          test -n "$CF_ACCESS_CLIENT_ID"
+          test -n "$CF_ACCESS_CLIENT_SECRET"
+          curl --fail --show-error --silent \
+            --request POST \
+            --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
             --header "Authorization: Bearer $COOLIFY_TOKEN" \
             "$COOLIFY_DEPLOY_HOOK_URL"

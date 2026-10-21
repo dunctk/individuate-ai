@@ -48,7 +48,7 @@ jobs:
         run: |
           test -n "$CF_ACCESS_CLIENT_ID"
           test -n "$CF_ACCESS_CLIENT_SECRET"
-          curl --fail --show-error --silent \
+          curl --location --max-redirs 0 --fail --show-error --silent \
             --request POST \
             --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
